@@ -219,7 +219,8 @@ fn item_is_pub(node: &TopLevelNode) -> bool {
         | TopLevelNode::Extern { is_pub, .. }
         | TopLevelNode::Struct { is_pub, .. }
         | TopLevelNode::Global { is_pub, .. }
-        | TopLevelNode::Enum { is_pub, .. } => *is_pub,
+        | TopLevelNode::Enum { is_pub, .. }
+        | TopLevelNode::Trait { is_pub, .. } => *is_pub,
         // method docs aren't rendered yet; skip `extend` blocks.
         TopLevelNode::Extend { .. } => false,
     }
@@ -246,7 +247,8 @@ fn item_name<'a>(node: &TopLevelNode<'a>) -> &'a str {
         | TopLevelNode::Extern { name, .. }
         | TopLevelNode::Struct { name, .. }
         | TopLevelNode::Global { name, .. }
-        | TopLevelNode::Enum { name, .. } => name,
+        | TopLevelNode::Enum { name, .. }
+        | TopLevelNode::Trait { name, .. } => name,
         TopLevelNode::Extend { target, .. } => target,
     }
 }
@@ -323,6 +325,8 @@ fn signature(node: &TopLevelNode, src: &str, start: usize, end: usize) -> String
             s.push('}');
             s
         }
+        // a trait renders its method-signature block via the Display impl.
+        TopLevelNode::Trait { .. } => node.to_string(),
         // never rendered (extends are filtered out by `item_is_pub`), but the
         // match must stay exhaustive; fall back to the Display impl.
         TopLevelNode::Extend { .. } => node.to_string(),

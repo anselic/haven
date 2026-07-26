@@ -1,0 +1,55 @@
+// Stage 2: traits, `extend T: Trait` conformance, and trait bounds on generics
+// giving static dispatch. `describe<T: Shape>` calls `area` through the bound;
+// monomorphization picks each concrete impl (Square$area vs Rect$area).
+//@ exit: 37
+
+trait Shape {
+    proc area(*self) i32;
+}
+
+struct Square {
+    side: i32,
+
+    // associated function (not part of the trait)
+    proc make(s: i32) Square {
+        return Square { side: s };
+    }
+}
+
+extend Square: Shape {
+    proc area(*self) i32 {
+        return self.side * self.side;
+    }
+}
+
+struct Rect {
+    w: i32,
+    h: i32,
+
+    proc make(w: i32, h: i32) Rect {
+        return Rect { w: w, h: h };
+    }
+}
+
+extend Rect: Shape {
+    proc area(*self) i32 {
+        return self.w * self.h;
+    }
+}
+
+// a bounded generic: `s.area()` resolves through `T: Shape`, and each
+// instantiation dispatches statically to the concrete impl.
+proc describe<T: Shape>(s: *T) i32 {
+    return s.area();
+}
+
+@export
+proc main() i32 {
+    let sq: Square = Square::make(5);
+    let r: Rect = Rect::make(3, 4);
+
+    printf::<i32>("%d\n", describe::<Square>(&sq)); // 25
+    printf::<i32>("%d\n", describe::<Rect>(&r));    // 12
+
+    return describe::<Square>(&sq) + describe::<Rect>(&r); // 25 + 12 = 37
+}

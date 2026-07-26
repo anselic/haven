@@ -85,6 +85,9 @@ struct Module<'a> {
     /// failed to resolve (error already recorded).
     import_keys: Vec<Option<String>>,
     items: Vec<TopLevel<'a>>,
+    /// `extend Target: Trait` conformance records from this module, in source
+    /// (pre-mangling) names; remapped to final names after scopes are built.
+    impls: Vec<RawImpl<'a>>,
 }
 
 /// One entry in a module's symbol table: the final (post-mangling) emitted name
@@ -191,8 +194,19 @@ fn load_import<'a>(imp: &Import, key: &str, dir: Option<&Path>, arena: &'a Bump)
 /// receiver's type); that resolution happens in the typechecker. An associated
 /// call `T::method()` is rewritten by name resolution (see `call_name`), keyed on
 /// the same `T$method` name minted here.
-fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> Vec<Error> {
+/// A raw (pre-mangling) `extend Target: Trait` conformance record, collected
+/// while desugaring. `target`/`trait_` are the source names; `load_and_merge`
+/// remaps them to their final (mangled) forms through the module's scopes before
+/// handing them to the typechecker.
+struct RawImpl<'a> {
+    target: &'a str,
+    trait_: &'a str,
+    span: Span,
+}
+
+fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> (Vec<Error>, Vec<RawImpl<'a>>) {
     let mut errors = Vec::new();
+    let mut impls: Vec<RawImpl<'a>> = Vec::new();
 
     // Types declared generic in this module. A method's `self` type would need the
     // type's own params in scope (`*Vec<T>`), which Stage 1 doesn't handle - reject
@@ -209,11 +223,15 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> Vec<Erro
     let mut synthesized: Vec<TopLevel<'a>> = Vec::new();
     let mut kept: Vec<TopLevel<'a>> = Vec::with_capacity(items.len());
     for tl in items.drain(..) {
-        let TopLevelNode::Extend { target, methods, .. } = &tl.value else {
+        let TopLevelNode::Extend { target, trait_, methods } = &tl.value else {
             kept.push(tl);
             continue;
         };
         let target: &'a str = target;
+        // record the conformance obligation; remapped to final names later.
+        if let Some(tr) = trait_ {
+            impls.push(RawImpl { target, trait_: tr, span: tl.span.clone() });
+        }
         if generic_types.contains(target) {
             errors.push(Error::new(tl.span.clone(), format!(
                 "methods on generic type '{}' are not supported yet (Stage 1 supports methods on non-generic types only)",
@@ -247,7 +265,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> Vec<Erro
     }
     *items = kept;
     items.extend(synthesized);
-    errors
+    (errors, impls)
 }
 
 /// Lex + parse one module's source into `(imports, items)`, printing any
@@ -255,7 +273,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> Vec<Erro
 /// them for `'a`. `extend`/method blocks are desugared to functions here, so the
 /// returned items are already method-free.
 fn parse_module<'a>(key: &'a str, src: &'a str, arena: &'a Bump)
-    -> Result<(Vec<Import<'a>>, Vec<TopLevel<'a>>), ()>
+    -> Result<(Vec<Import<'a>>, Vec<TopLevel<'a>>, Vec<RawImpl<'a>>), ()>
 {
     // errors here can only point into this one module, so a single-source cache
     // is enough to quote them.
@@ -282,7 +300,7 @@ fn parse_module<'a>(key: &'a str, src: &'a str, arena: &'a Bump)
 
     // desugar `extend`/method blocks into functions before anything else looks at
     // the items. errors here point into this one module, so `local` quotes them.
-    let method_errs = lower_methods(&mut items, arena);
+    let (method_errs, impls) = lower_methods(&mut items, arena);
     if !method_errs.is_empty() {
         for e in &method_errs {
             diag::report_error("Method error", e, &local);
@@ -290,7 +308,7 @@ fn parse_module<'a>(key: &'a str, src: &'a str, arena: &'a Bump)
         return Err(());
     }
 
-    Ok((imports, items))
+    Ok((imports, items, impls))
 }
 
 /// Name-resolution scopes for one module.
@@ -492,7 +510,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         match &mut tl.value {
             TopLevelNode::Function { name, generics, params, return_type, body, .. } => {
                 let gparams: HashSet<&str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type(n) => Some(*n),
+                    GenericParam::Type { name, .. } => Some(*name),
                     GenericParam::Const(..) => None,
                 }).collect();
                 *name = self.scopes.calls.get(*name).copied().unwrap_or(*name);
@@ -508,7 +526,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             }
             TopLevelNode::Extern { name, generics, params, return_type, .. } => {
                 let gparams: HashSet<&str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type(n) => Some(*n),
+                    GenericParam::Type { name, .. } => Some(*name),
                     GenericParam::Const(..) => None,
                 }).collect();
                 *name = self.scopes.calls.get(*name).copied().unwrap_or(*name);
@@ -519,7 +537,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 // the struct's own type params shadow struct names when rewriting
                 // field types (a field `T` is a param, not a module type).
                 let gparams: HashSet<&str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type(n) => Some(*n),
+                    GenericParam::Type { name, .. } => Some(*name),
                     GenericParam::Const(..) => None,
                 }).collect();
                 *name = self.scopes.types.get(*name).copied().unwrap_or(*name);
@@ -539,11 +557,22 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // names (a payload `T` is a param, not a module type).
             TopLevelNode::Enum { generics, variants, .. } => {
                 let gparams: HashSet<&str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type(n) => Some(*n),
+                    GenericParam::Type { name, .. } => Some(*name),
                     GenericParam::Const(..) => None,
                 }).collect();
                 for (_, _, payload) in variants.iter_mut() {
                     for (_, ty) in payload.iter_mut() { self.ty(ty, &gparams); }
+                }
+            }
+            // a trait's method signatures carry types (params + return) that must
+            // be rewritten like any other - a `String` in `proc display(*self)
+            // String` resolves to the imported struct's mangled name. `Self` is
+            // left untouched (typecheck substitutes it per implementing type).
+            TopLevelNode::Trait { methods, .. } => {
+                let empty = HashSet::new();
+                for m in methods.iter_mut() {
+                    for (_, ty) in m.params.iter_mut() { self.ty(ty, &empty); }
+                    self.ty(&mut m.return_type, &empty);
                 }
             }
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before name resolution"),
@@ -576,6 +605,13 @@ fn build_symtab<'a>(m: &Module<'a>, arena: &'a Bump) -> SymTab<'a> {
             TopLevelNode::Global { name, is_pub, attributes, .. } => {
                 st.fns.insert(name, Sym { name: final_global_name(m, name, attributes, arena), is_pub: *is_pub });
             }
+            // traits live in the type namespace like structs/enums, but their
+            // name is kept stable (unmangled) so bounds (`T: Display`) and
+            // conformance records line up across modules - Stage-2 limitation:
+            // trait names must be globally unique, like enum names.
+            TopLevelNode::Trait { name, is_pub, .. } => {
+                st.structs.insert(name, Sym { name, is_pub: *is_pub });
+            }
             // `extend` blocks were lowered to functions in `lower_methods`.
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before symtab"),
         }
@@ -584,7 +620,7 @@ fn build_symtab<'a>(m: &Module<'a>, arena: &'a Bump) -> SymTab<'a> {
 }
 
 pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a Bump)
-    -> Result<(Vec<TopLevel<'a>>, Sources<'a>), ()>
+    -> Result<(Vec<TopLevel<'a>>, Sources<'a>, Vec<ImplDecl<'a>>), ()>
 {
     // a module we've decided to load but haven't parsed yet.
     struct Pending<'a> {
@@ -639,7 +675,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         seen.insert(p.key.clone(), id);
 
         let key_static = arena.alloc_str(&p.key);
-        let (imports, items) = match parse_module(key_static, p.src, arena) {
+        let (imports, items, impls) = match parse_module(key_static, p.src, arena) {
             Ok(pi) => pi,
             Err(()) => { had_error = true; continue; }
         };
@@ -691,6 +727,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
             imports,
             import_keys,
             items,
+            impls,
         });
     }
 
@@ -802,12 +839,22 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         all_scopes.push(scopes);
     }
 
-    // pass 2: rewrite each module's items in place using its scopes.
+    // pass 2: rewrite each module's items in place using its scopes. Also remap
+    // each `extend T: Trait` conformance record to final (mangled) names through
+    // the same scopes, so the typechecker matches them against the merged program.
+    let mut impls: Vec<ImplDecl<'a>> = Vec::new();
     for (id, m) in modules.iter_mut().enumerate() {
         let scopes = &all_scopes[id];
         let mut rw = Rewriter { scopes, errs: &mut errs, locals: Vec::new() };
         for tl in &mut m.items {
             rw.toplevel(tl);
+        }
+        for imp in &m.impls {
+            impls.push(ImplDecl {
+                target: scopes.types.get(imp.target).copied().unwrap_or(imp.target),
+                trait_: scopes.types.get(imp.trait_).copied().unwrap_or(imp.trait_),
+                span: imp.span.clone(),
+            });
         }
     }
 
@@ -843,6 +890,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
                     (*name, true, params.as_slice(), return_type),
                 TopLevelNode::Struct { .. } => { out.push(tl.clone()); continue; }
                 TopLevelNode::Enum { .. } => { out.push(tl.clone()); continue; }
+                TopLevelNode::Trait { .. } => { out.push(tl.clone()); continue; }
                 TopLevelNode::Extend { .. } => unreachable!("extend desugared before merge"),
                 TopLevelNode::Global { name, .. } => {
                     if !seen_globals.insert(*name) {
@@ -861,7 +909,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
                         (false, params.as_slice(), return_type),
                     TopLevelNode::Extern { params, return_type, .. } =>
                         (true, params.as_slice(), return_type),
-                    TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } => unreachable!("only callables are recorded"),
+                    TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } | TopLevelNode::Trait { .. } => unreachable!("only callables are recorded"),
                     TopLevelNode::Extend { .. } => unreachable!("extend desugared before merge"),
                     TopLevelNode::Global { .. } => unreachable!("globals are deduped separately"),
                 };
@@ -893,5 +941,5 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         return Err(());
     }
 
-    Ok((out, sources))
+    Ok((out, sources, impls))
 }

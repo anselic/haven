@@ -696,6 +696,8 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
                 concrete_aggregates.insert(i, m.rebuild_enum(tl, &empty));
             }
             TopLevelNode::Extern { .. } | TopLevelNode::Global { .. } => {}
+            // traits emit no code; they're dropped from the monomorphized output.
+            TopLevelNode::Trait { .. } => {}
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before mono"),
         }
     }
@@ -738,7 +740,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
         let mut bindings = Bindings::empty();
         for (gp, arg) in generics.iter().zip(&inst.args) {
             match (gp, arg) {
-                (GenericParam::Type(n), ConcreteArg::Type(t)) => {
+                (GenericParam::Type { name: n, .. }, ConcreteArg::Type(t)) => {
                     bindings.types.insert(n, t.clone());
                 }
                 (GenericParam::Const(n, ty), ConcreteArg::Const(v)) => {
@@ -795,7 +797,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
             let mut bindings = Bindings::empty();
             for (gp, arg) in generics.iter().zip(&inst.args) {
                 match (gp, arg) {
-                    (GenericParam::Type(n), ConcreteArg::Type(t)) => {
+                    (GenericParam::Type { name: n, .. }, ConcreteArg::Type(t)) => {
                         bindings.types.insert(n, t.clone());
                     }
                     (GenericParam::Const(n, ty), ConcreteArg::Const(v)) => {
@@ -853,7 +855,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
             let mut bindings = Bindings::empty();
             for (gp, arg) in generics.iter().zip(&inst.args) {
                 match (gp, arg) {
-                    (GenericParam::Type(n), ConcreteArg::Type(t)) => {
+                    (GenericParam::Type { name: n, .. }, ConcreteArg::Type(t)) => {
                         bindings.types.insert(n, t.clone());
                     }
                     (GenericParam::Const(n, ty), ConcreteArg::Const(v)) => {
@@ -921,6 +923,8 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
             TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } =>
                 output.push(concrete_aggregates.remove(&i).unwrap()),
             TopLevelNode::Extern { .. } | TopLevelNode::Global { .. } => output.push(tl.clone()),
+            // traits emit no code and are not carried into the concrete program.
+            TopLevelNode::Trait { .. } => {}
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before mono"),
         }
     }

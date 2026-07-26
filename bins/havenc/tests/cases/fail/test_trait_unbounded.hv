@@ -1,0 +1,16 @@
+// A method call on a bare (unbounded) type param has nothing to dispatch to -
+// the param has no methods of its own. The fix is a trait bound `<T: Shape>`.
+//@ error: no method 'area' on type parameter 'T'
+
+trait Shape {
+    proc area(*self) i32;
+}
+
+proc bad<T>(s: *T) i32 {
+    return s.area();
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

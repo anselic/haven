@@ -1,0 +1,19 @@
+// An `extend T: Trait` block must implement every method the trait requires.
+// Here `area` is missing, so the conformance check reports it.
+//@ error: missing method 'area'
+
+trait Shape {
+    proc area(*self) i32;
+}
+
+struct A {
+    x: i32,
+}
+
+extend A: Shape {
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

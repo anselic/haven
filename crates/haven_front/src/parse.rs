@@ -873,7 +873,18 @@ fn parse_method<'tks, 'src: 'tks>()
             .then_ignore(just(Token::Colon))
             .then(parse_type())
             .map(|(name, ty)| GenericParam::Const(name, ty)),
-        var.map(|s| GenericParam::Type(*s)),
+        // a bare type param, optionally with trait bounds: `T`, `T: Display`,
+        // `T: A + B`. bounds are trait names joined by `+` (the `Add` op token).
+        var.map(|s| *s)
+            .then(
+                just(Token::Colon)
+                    .ignore_then(
+                        var.map(|s| *s)
+                            .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
+                            .at_least(1)
+                            .collect::<Vec<_>>())
+                    .or_not())
+            .map(|(name, bounds)| GenericParam::Type { name, bounds: bounds.unwrap_or_default() }),
     ));
     let generics = generic_param
         .separated_by(just(Token::Comma))
@@ -931,6 +942,52 @@ fn parse_method<'tks, 'src: 'tks>()
         .boxed()
 }
 
+/// One required method signature inside a `trait` declaration:
+/// `proc name(receiver?, params...) [RetType];` - a method header terminated by
+/// `;` instead of a `{ body }`. Mirrors `parse_method`'s receiver/param shapes
+/// but omits attributes, `pub`, generics and the body (a trait states signatures
+/// only; conformance and default methods are the typechecker's / a later stage's
+/// concern).
+fn parse_trait_method<'tks, 'src: 'tks>()
+-> impl Parser<
+    'tks,
+    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
+    TraitMethod<'src>,
+    extra::Err<Rich<'tks, Token<'src>, Span>>,
+> {
+    let var = select_ref! { Token::Var(ident) => ident };
+
+    let normal_param = var.map(|s| *s)
+        .then_ignore(just(Token::Colon))
+        .then(parse_type())
+        .boxed();
+
+    let self_recv = just(Token::BinaryOp(BinaryOp::Mul)).or_not()
+        .then(select_ref! { Token::Var(s) if *s == "self" => () })
+        .map(|(star, _)| if star.is_some() { Receiver::Pointer } else { Receiver::Value });
+
+    let params_inner = choice((
+        self_recv
+            .then(just(Token::Comma).ignore_then(normal_param.clone()).repeated().collect::<Vec<_>>())
+            .map(|(recv, ps)| (recv, ps)),
+        normal_param
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .map(|ps| (Receiver::Associated, ps)),
+    ))
+        .delimited_by(just(Token::LParen), just(Token::RParen));
+
+    just(Token::Proc)
+        .ignore_then(var.map(|s| *s))
+        .then(params_inner)
+        .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
+        .then_ignore(just(Token::Semicolon))
+        .map(|((name, (receiver, params)), return_type)|
+            TraitMethod { receiver, name, params, return_type })
+        .boxed()
+}
+
 fn parse_toplevel<'tks, 'src: 'tks>()
 -> impl Parser<
     'tks,
@@ -947,7 +1004,18 @@ fn parse_toplevel<'tks, 'src: 'tks>()
             .then_ignore(just(Token::Colon))
             .then(parse_type())
             .map(|(name, ty)| GenericParam::Const(name, ty)),
-        var.map(|s| GenericParam::Type(*s)),
+        // a bare type param, optionally with trait bounds: `T`, `T: Display`,
+        // `T: A + B`. bounds are trait names joined by `+` (the `Add` op token).
+        var.map(|s| *s)
+            .then(
+                just(Token::Colon)
+                    .ignore_then(
+                        var.map(|s| *s)
+                            .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
+                            .at_least(1)
+                            .collect::<Vec<_>>())
+                    .or_not())
+            .map(|(name, bounds)| GenericParam::Type { name, bounds: bounds.unwrap_or_default() }),
     ));
 
     // optional `<T, const N: u32, ...>` list following a function name
@@ -1146,12 +1214,27 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         )
         .map(|((target, trait_), methods)| (TopLevelNode::Extend { target, trait_, methods }, Vec::new()));
 
+    // `trait Name { proc m(...) Ret; ... }`. Like `extend`, `trait` lexes as a
+    // `Var` (not a reserved keyword), so match it by text. Trait names are kept
+    // stable (unmangled) across modules, like enum names; a trait is always
+    // importable (Stage-2 keeps them effectively public).
+    let trait_ = select_ref! { Token::Var(s) if *s == "trait" => () }
+        .ignore_then(var.map(|s| *s))
+        .then(
+            parse_trait_method()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace))
+        )
+        .map(|(name, methods)| (TopLevelNode::Trait { name, is_pub: true, methods }, Vec::new()));
+
     choice((
         function,
         extern_,
         struct_,
         enum_,
         extend_,
+        trait_,
         global,
     ))
         .map_with(|(node, methods), e| {

@@ -451,8 +451,12 @@ pub type Expr<'a> = Metadata<ExprNode<'a>>;
 /// `const N: u32` in `proc foo<T, const N: u32>(...)`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GenericParam<'a> {
-    /// A type parameter, e.g. `T`.
-    Type(&'a str),
+    /// A type parameter, e.g. `T`, optionally with trait bounds (`T: Display` or
+    /// `T: A + B`). `bounds` lists the traits the concrete argument must
+    /// implement; empty for an unbounded param. A bounded param's method calls
+    /// resolve through the trait in the typechecker, and monomorphization picks
+    /// the concrete impl (static dispatch).
+    Type { name: &'a str, bounds: Vec<&'a str> },
     /// A compile-time constant parameter, e.g. `const N: u32`.
     Const(&'a str, Type<'a>),
 }
@@ -460,7 +464,8 @@ pub enum GenericParam<'a> {
 impl<'a> Display for GenericParam<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            GenericParam::Type(name) => write!(f, "{}", name),
+            GenericParam::Type { name, bounds } if bounds.is_empty() => write!(f, "{}", name),
+            GenericParam::Type { name, bounds } => write!(f, "{}: {}", name, bounds.join(" + ")),
             GenericParam::Const(name, ty) => write!(f, "const {}: {}", name, ty),
         }
     }
@@ -678,6 +683,31 @@ pub struct MethodNode<'a> {
 
 pub type Method<'a> = Metadata<MethodNode<'a>>;
 
+/// One required method signature in a `trait` declaration: a method header with
+/// no body, terminated by `;`. `params` excludes the receiver (recorded in
+/// `receiver`). A `Self` in a param/return type refers to the implementing type;
+/// the typechecker substitutes it (with the concrete type when checking
+/// conformance, with the bounded type param when resolving a bounded call).
+#[derive(Clone, Debug)]
+pub struct TraitMethod<'a> {
+    pub receiver: Receiver,
+    pub name: &'a str,
+    pub params: Vec<(&'a str, Type<'a>)>,
+    pub return_type: Type<'a>,
+}
+
+/// A recorded `extend Target: Trait` conformance obligation, produced by the
+/// module resolver (which desugars the block's methods to functions but keeps
+/// this relation) and consumed by the typechecker, which verifies `Target`
+/// implements every method of `Trait` and registers the impl so a `T: Trait`
+/// bound can be checked at a generic call site. Names are final (post-mangling).
+#[derive(Clone, Debug)]
+pub struct ImplDecl<'a> {
+    pub target: &'a str,
+    pub trait_: &'a str,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub enum TopLevelNode<'a> {
     Function {
@@ -750,6 +780,19 @@ pub enum TopLevelNode<'a> {
         target: &'a str,
         trait_: Option<&'a str>,
         methods: Vec<Method<'a>>,
+    },
+
+    /// A `trait Name { proc m(*self) Ret; ... }` declaration: a set of required
+    /// method signatures. Unlike `extend`, a trait is NOT desugared in the module
+    /// resolver - it survives to the typechecker, which registers it, checks that
+    /// every `extend T: Trait` conforms, and resolves a bounded type param's
+    /// method calls through it. Monomorphization drops trait nodes (they emit no
+    /// code); static dispatch falls out of substituting the concrete type and
+    /// re-resolving the method call on the concrete instance.
+    Trait {
+        name: &'a str,
+        is_pub: bool,
+        methods: Vec<TraitMethod<'a>>,
     },
 }
 
@@ -843,6 +886,21 @@ impl<'a> Display for TopLevelNode<'a> {
                     format!("    proc {}({}{}{}) {} {{ ... }}\n", m.name, recv, sep, params_str, m.return_type)
                 }).collect::<String>();
                 write!(f, "extend {}{} {{\n{}}}", target, trait_str, methods_str)
+            },
+            TopLevelNode::Trait { name, is_pub, methods } => {
+                let pub_str = if *is_pub { "pub " } else { "" };
+                let methods_str = methods.iter().map(|m| {
+                    let recv = match m.receiver {
+                        Receiver::Associated => String::new(),
+                        Receiver::Value => "self".to_string(),
+                        Receiver::Pointer => "*self".to_string(),
+                    };
+                    let sep = if !recv.is_empty() && !m.params.is_empty() { ", " } else { "" };
+                    let params_str = m.params.iter()
+                        .map(|(n, ty)| format!("{}: {}", n, ty)).collect::<Vec<_>>().join(", ");
+                    format!("    proc {}({}{}{}) {};\n", m.name, recv, sep, params_str, m.return_type)
+                }).collect::<String>();
+                write!(f, "{}trait {} {{\n{}}}", pub_str, name, methods_str)
             },
         }
     }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use haven_common::ast::*;
 use crate::intrinsics::Intrinsic;
 use super::context::{Context, MethodCall, RecvAdjust, enum_payload_struct_name};
-use super::generics::{bind_generics, subst_param_type, check_generic_call, bind_struct_generics, resolve_type, check_const_scope};
+use super::generics::{bind_generics, subst_param_type, check_generic_call, bind_struct_generics, resolve_type, check_const_scope, subst_self};
 use super::enums::{enum_variant, split_enum_variant, enum_variant_ctor, check_variant_pattern};
 
 /// Whether `expr` denotes a place (an addressable location) rather than a
@@ -27,6 +27,65 @@ fn receiver_matches(ty: &Type<'_>, recv_name: &str) -> bool {
             Type::Struct { name, .. } | Type::Enum { name, .. } if *name == recv_name),
         _ => false,
     }
+}
+
+/// Resolve a method call `base.field(args)` when `base` is a (possibly
+/// pointer-wrapped) type parameter, dispatching through the param's trait bounds.
+/// Returns `Ok(Some(result_type))` on success, `Ok(None)` if `base_ty` is not a
+/// type param at all (the caller then tries concrete method resolution), or an
+/// error if the base *is* a type param but no bound provides `field` (a bare type
+/// param has no methods of its own) or the arguments don't match.
+fn resolve_bounded_method<'a>(
+    cx: &mut Context<'a>,
+    base_ty: &Type<'a>,
+    field: &str,
+    args: &[Expr<'a>],
+    span: &Span,
+) -> Result<Option<Type<'a>>, Error> {
+    let param = match base_ty {
+        Type::Param(n) => *n,
+        Type::Pointer(inner) => match inner.as_ref() {
+            Type::Param(n) => *n,
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+
+    // find the first bound trait that declares a method named `field`.
+    let bounds = cx.generic_bounds.get(param).cloned().unwrap_or_default();
+    let mut sig = None;
+    for tr in &bounds {
+        if let Some(def) = cx.traits.get(tr) {
+            if let Some(m) = def.methods.get(field) {
+                sig = Some((m.params.clone(), m.return_type.clone()));
+                break;
+            }
+        }
+    }
+    let Some((params, return_type)) = sig else {
+        return Err(Error {
+            msg: format!(
+                "no method '{}' on type parameter '{}'; add a trait bound that provides it \
+                 (e.g. `<{}: SomeTrait>`)",
+                field, param, param),
+            span: span.clone(),
+        });
+    };
+
+    // `Self` in the trait signature refers to the param type `T` here.
+    let self_ty = Type::Param(param);
+    if args.len() != params.len() {
+        return Err(Error {
+            msg: format!("method '{}' expects {} argument(s), got {}",
+                field, params.len(), args.len()),
+            span: span.clone(),
+        });
+    }
+    for (pty, arg) in params.iter().zip(args) {
+        let expected = subst_self(pty, &self_ty);
+        check_expr(cx, &expected, arg)?;
+    }
+    Ok(Some(subst_self(&return_type, &self_ty)))
 }
 
 fn typecheck_intrinsic<'a>(
@@ -704,7 +763,7 @@ fn infer<'a>(
                 if let Some(params) = cx.generic_structs.get(struct_name) {
                     for (gp, ga) in params.iter().zip(struct_args.iter()) {
                         match (gp, ga) {
-                            (GenericParam::Type(n), GenericArg::Type(t)) => { type_subst.insert(*n, t.clone()); }
+                            (GenericParam::Type { name: n, .. }, GenericArg::Type(t)) => { type_subst.insert(*n, t.clone()); }
                             (GenericParam::Const(n, _), GenericArg::Const(ConstVal::Lit(v))) => { const_subst.insert(*n, ConstVal::Lit(*v)); }
                             _ => {}
                         }
@@ -731,6 +790,16 @@ fn infer<'a>(
             if type_args.is_empty() {
                 if let ExprNode::Access { base, field } = &func.value {
                     let base_ty = infer(cx, base)?;
+                    // a bounded type-param receiver: `x.m(...)` where `x: T` (or
+                    // `*T`) and `T: SomeTrait`. Resolve through the bound and yield
+                    // the trait method's result type. The generic body itself is
+                    // never lowered - monomorphization substitutes `T` and the
+                    // concrete call re-resolves via the path below - so we only
+                    // typecheck here and record nothing in `method_calls`.
+                    if let Some(ret) = resolve_bounded_method(cx, &base_ty, field, args, &span)? {
+                        cx.node_types.insert(metadata.id, ret.clone());
+                        return Ok(ret);
+                    }
                     let recv_name = match &base_ty {
                         Type::Struct { name, .. } | Type::Enum { name, .. } => Some(*name),
                         Type::Pointer(inner) => match inner.as_ref() {
@@ -1024,7 +1093,7 @@ pub(crate) fn check_stmt<'a>(
                         if let Some(params) = cx.generic_enums.get(name) {
                             for (gp, ga) in params.iter().zip(args.iter()) {
                                 match (gp, ga) {
-                                    (GenericParam::Type(n), GenericArg::Type(t)) => { ts.insert(*n, t.clone()); }
+                                    (GenericParam::Type { name: n, .. }, GenericArg::Type(t)) => { ts.insert(*n, t.clone()); }
                                     (GenericParam::Const(n, _), GenericArg::Const(ConstVal::Lit(v))) => { cs.insert(*n, ConstVal::Lit(*v)); }
                                     _ => {}
                                 }

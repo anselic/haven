@@ -8,9 +8,9 @@ mod enums;
 mod infer;
 
 // Public surface re-exported for the rest of the crate (mil.rs) and the driver.
-pub use context::{Context, EnumDef, GenericFnSig, MethodCall, RecvAdjust, ENUM_TAG_FIELD, ENUM_PAYLOAD_FIELD, enum_payload_struct_name};
+pub use context::{Context, EnumDef, GenericFnSig, MethodCall, RecvAdjust, TraitDef, TraitMethodSig, ENUM_TAG_FIELD, ENUM_PAYLOAD_FIELD, enum_payload_struct_name};
 
-use generics::{resolve_type, check_const_scope, check_type_resolves};
+use generics::{resolve_type, check_const_scope, check_type_resolves, subst_self};
 use enums::{enum_variant, enum_repr, enum_agg_deps_ready, payload_blob_type};
 use infer::{check_stmt, check_expr, always_returns};
 
@@ -186,13 +186,32 @@ fn check_toplevel<'a>(
             // idents in the signature/body resolve to `Type::Param` rather than
             // an (undeclared) struct
             cx.generics = generics.iter().filter_map(|g| match g {
-                GenericParam::Type(n) => Some(*n),
+                GenericParam::Type { name: n, .. } => Some(*n),
                 GenericParam::Const(_, _) => None,
             }).collect();
             cx.const_generics = generics.iter().filter_map(|g| match g {
                 GenericParam::Const(n, _) => Some(*n),
-                GenericParam::Type(_) => None,
+                GenericParam::Type { .. } => None,
             }).collect();
+            // trait bounds on this fn's type params, so a method call on a
+            // `T`-typed receiver in the body resolves through the bound trait.
+            cx.generic_bounds = generics.iter().filter_map(|g| match g {
+                GenericParam::Type { name, bounds } if !bounds.is_empty() => Some((*name, bounds.clone())),
+                _ => None,
+            }).collect();
+            // every bound must name a declared trait.
+            for g in generics {
+                if let GenericParam::Type { name: pn, bounds } = g {
+                    for b in bounds {
+                        if !cx.traits.contains_key(b) {
+                            return Err(Error {
+                                msg: format!("unknown trait '{}' in bound '{}: {}' of '{}'", b, pn, b, name),
+                                span: node.span.clone(),
+                            });
+                        }
+                    }
+                }
+            }
 
             // every `ConstVal::Param` in the signature must name a declared const
             // param. runs for non-generic fns too (empty scope), so a stray
@@ -255,6 +274,7 @@ fn check_toplevel<'a>(
                 cx.pop_scope();
                 cx.generics = Vec::new();
                 cx.const_generics = Vec::new();
+                cx.generic_bounds = HashMap::new();
                 return Err(Error {
                     msg: format!(
                         "function '{}' has return type '{}' but not all paths return a value",
@@ -267,6 +287,7 @@ fn check_toplevel<'a>(
             cx.pop_scope();
             cx.generics = Vec::new();
             cx.const_generics = Vec::new();
+            cx.generic_bounds = HashMap::new();
         }
 
         // extern declarations have no body to check, but their signature types
@@ -274,7 +295,7 @@ fn check_toplevel<'a>(
         // type is caught at typecheck, not by a codegen panic).
         TopLevelNode::Extern { name, generics, params, return_type, .. } => {
             let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                GenericParam::Type(n) => Some(*n),
+                GenericParam::Type { name: n, .. } => Some(*n),
                 GenericParam::Const(_, _) => None,
             }).collect();
             for (pname, ty) in params {
@@ -299,12 +320,12 @@ fn check_toplevel<'a>(
             // the struct's own type and const params are in scope inside its fields:
             // `T` resolves to `Param`, and a `[T; N]` size names the const param `N`.
             let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                GenericParam::Type(n) => Some(*n),
+                GenericParam::Type { name: n, .. } => Some(*n),
                 GenericParam::Const(_, _) => None,
             }).collect();
             let const_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
                 GenericParam::Const(n, _) => Some(*n),
-                GenericParam::Type(_) => None,
+                GenericParam::Type { .. } => None,
             }).collect();
             // ensure no duplicate field names and that referenced struct types exist
             let mut seen = std::collections::HashSet::new();
@@ -348,6 +369,9 @@ fn check_toplevel<'a>(
         // field-less enums are fully validated in the forward-declaration pass
         // (duplicate variants, `@repr` value); nothing more to check here.
         TopLevelNode::Enum { .. } => {}
+        // traits are registered + conformance-checked in the forward pass; the
+        // signatures carry no bodies to check here.
+        TopLevelNode::Trait { .. } => {}
         // methods were desugared to functions in the module resolver.
         TopLevelNode::Extend { .. } => unreachable!("extend desugared before typecheck"),
     }
@@ -355,7 +379,7 @@ fn check_toplevel<'a>(
     Ok(())
 }
 
-pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>]) -> Vec<Error> {
+pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>], impls: &[ImplDecl<'a>]) -> Vec<Error> {
     let mut errors = Vec::new();
 
     // --- forward declaration pass
@@ -426,7 +450,7 @@ pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>]) -> 
             // name. (const params already arrive as `ConstVal::Param` from the
             // parser. Body-level validation happens in the main pass below.)
             let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                GenericParam::Type(n) => Some(*n),
+                GenericParam::Type { name: n, .. } => Some(*n),
                 GenericParam::Const(_, _) => None,
             }).collect();
             let resolved_fields = fields.iter()
@@ -458,7 +482,7 @@ pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>]) -> 
     for ename in &data_enums {
         let type_params: Vec<&'a str> = cx.generic_enums.get(ename)
             .map(|params| params.iter().filter_map(|g| match g {
-                GenericParam::Type(n) => Some(*n),
+                GenericParam::Type { name: n, .. } => Some(*n),
                 GenericParam::Const(_, _) => None,
             }).collect())
             .unwrap_or_default();
@@ -524,7 +548,7 @@ pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>]) -> 
             TopLevelNode::Function { name, generics, params, return_type, .. }
                 if !generics.is_empty() => {
                 let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type(n) => Some(*n),
+                    GenericParam::Type { name: n, .. } => Some(*n),
                     GenericParam::Const(_, _) => None,
                 }).collect();
                 // only type params get reclassified `Struct`->`Param`; const params
@@ -547,7 +571,7 @@ pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>]) -> 
             TopLevelNode::Extern { name, generics, params, return_type, .. }
                 if !generics.is_empty() => {
                 let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type(n) => Some(*n),
+                    GenericParam::Type { name: n, .. } => Some(*n),
                     GenericParam::Const(_, _) => None,
                 }).collect();
                 let resolved_params = params.iter()
@@ -577,10 +601,53 @@ pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>]) -> 
                 cx.global_consts.insert(name);
             }
             // enums were collected in their own pass above; nothing to register
-            // in the value namespace (variant refs resolve directly).
-            TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } => {}
+            // in the value namespace (variant refs resolve directly). traits are
+            // registered in their own pass below.
+            TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } | TopLevelNode::Trait { .. } => {}
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before typecheck"),
         }
+    }
+
+    // register each trait's required method signatures. runs after structs and
+    // enums are declared so a method's param/return types resolve (`String` ->
+    // the struct, an enum name -> `Type::Enum`); `Self` is left symbolic and
+    // substituted per-impl / per-bound later.
+    for node in program {
+        if let TopLevelNode::Trait { name, methods, .. } = &node.value {
+            if cx.traits.contains_key(name) {
+                errors.push(Error {
+                    msg: format!("Duplicate trait definition '{}'", name),
+                    span: node.span.clone(),
+                });
+                continue;
+            }
+            let mut ms: HashMap<&'a str, TraitMethodSig<'a>> = HashMap::new();
+            let mut dup = false;
+            for m in methods {
+                if ms.contains_key(m.name) {
+                    errors.push(Error {
+                        msg: format!("Duplicate method '{}' in trait '{}'", m.name, name),
+                        span: node.span.clone(),
+                    });
+                    dup = true;
+                    break;
+                }
+                let params = m.params.iter()
+                    .map(|(_, t)| resolve_type(&[], &cx.enums, t)).collect();
+                let return_type = resolve_type(&[], &cx.enums, &m.return_type);
+                ms.insert(m.name, TraitMethodSig { receiver: m.receiver, params, return_type });
+            }
+            if dup { continue; }
+            cx.traits.insert(name, TraitDef { methods: ms });
+        }
+    }
+
+    // check every `extend T: Trait` conformance and record the satisfied impls,
+    // so a `T: Trait` bound at a generic call site can be verified. Runs after
+    // function forward-declaration, since a method's desugared function (`T$m`)
+    // must be visible to compare its signature.
+    for imp in impls {
+        check_impl_conformance(cx, imp, &mut errors);
     }
 
     // --- typecheck pass
@@ -591,4 +658,66 @@ pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>]) -> 
     }
 
     errors
+}
+
+/// Verify that `imp.target` implements every method of `imp.trait_` with a
+/// matching signature, and record the `(target, trait)` impl regardless (a
+/// conformance error already stops compilation before mono, so recording it
+/// avoids a duplicate "does not implement" at the bound site). A method's
+/// receiver is expanded to the concrete `self` type and any `Self` in the trait
+/// signature is substituted with the implementing type before comparison.
+fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: &mut Vec<Error>) {
+    let trait_def = match cx.traits.get(imp.trait_) {
+        Some(d) => d.clone(),
+        None => {
+            errors.push(Error {
+                msg: format!("unknown trait '{}' in `extend {}: {}`", imp.trait_, imp.target, imp.trait_),
+                span: imp.span.clone(),
+            });
+            return;
+        }
+    };
+    // the implementing type, resolved (a name that is an enum -> `Type::Enum`).
+    let self_ty = resolve_type(&[], &cx.enums, &Type::plain_struct(imp.target));
+
+    for (mname, sig) in &trait_def.methods {
+        let fname = format!("{}${}", imp.target, mname);
+        let found = match cx.lookup(&fname) {
+            Some((_, Type::Function { params, return_type })) =>
+                Some((params.clone(), (**return_type).clone())),
+            _ => None,
+        };
+        let Some((params, return_type)) = found else {
+            errors.push(Error {
+                msg: format!("type '{}' does not implement trait '{}': missing method '{}'",
+                    imp.target, imp.trait_, mname),
+                span: imp.span.clone(),
+            });
+            continue;
+        };
+        // expected parameter list: the receiver's `self` type (if any) followed
+        // by the declared params, with `Self` substituted to the concrete type.
+        let mut expected: Vec<Type<'a>> = Vec::new();
+        match sig.receiver {
+            Receiver::Associated => {}
+            Receiver::Value => expected.push(self_ty.clone()),
+            Receiver::Pointer => expected.push(Type::Pointer(Box::new(self_ty.clone()))),
+        }
+        for p in &sig.params { expected.push(subst_self(p, &self_ty)); }
+        let expected_ret = subst_self(&sig.return_type, &self_ty);
+
+        if params.len() != expected.len()
+            || params.iter().zip(&expected).any(|(a, b)| a != b)
+            || return_type != expected_ret
+        {
+            errors.push(Error {
+                msg: format!(
+                    "type '{}' implements '{}::{}' with a signature that does not match the trait",
+                    imp.target, imp.trait_, mname),
+                span: imp.span.clone(),
+            });
+        }
+    }
+
+    cx.impls.insert((imp.target, imp.trait_));
 }

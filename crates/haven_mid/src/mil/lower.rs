@@ -569,6 +569,7 @@ fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
         TopLevelNode::Struct { .. } => (vec![], None),
         TopLevelNode::Global { .. } => (vec![], None),
         TopLevelNode::Enum { .. } => (vec![], None),
+        TopLevelNode::Trait { .. } => unreachable!("traits dropped in monomorphization"),
         TopLevelNode::Extend { .. } => unreachable!("extend desugared before lowering"),
     }
 }
@@ -648,7 +649,7 @@ pub fn lower<'a>(
                 // concrete leading params. the call site still passes the concrete
                 // args; the underlying C symbol (e.g. printf) accepts them.
                 let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type(n) => Some(*n),
+                    GenericParam::Type { name: n, .. } => Some(*n),
                     GenericParam::Const(_, _) => None,
                 }).collect();
                 let concrete_params: Vec<Type<'a>> = params.iter()
@@ -706,6 +707,7 @@ pub fn lower<'a>(
                     enum_unions.insert(*name, pstruct_names);
                 }
             }
+            TopLevelNode::Trait { .. } => unreachable!("traits dropped in monomorphization"),
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before lowering"),
         }
     }

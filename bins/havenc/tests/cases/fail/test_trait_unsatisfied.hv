@@ -1,0 +1,32 @@
+// Calling a bounded generic with a type that doesn't implement the required
+// trait is rejected at the call site.
+//@ error: does not implement trait
+
+trait Shape {
+    proc area(*self) i32;
+}
+
+struct A {
+    x: i32,
+    proc make() A { return A { x: 7 }; }
+}
+
+extend A: Shape {
+    proc area(*self) i32 { return self.x; }
+}
+
+// B has no `extend B: Shape`, so it does not satisfy `T: Shape`.
+struct B {
+    y: i32,
+    proc make() B { return B { y: 1 }; }
+}
+
+proc describe<T: Shape>(s: *T) i32 {
+    return s.area();
+}
+
+@export
+proc main() i32 {
+    let b: B = B::make();
+    return describe::<B>(&b);
+}

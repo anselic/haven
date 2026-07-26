@@ -53,6 +53,24 @@ pub struct MethodCall<'a> {
     pub return_type: Type<'a>,
 }
 
+/// One required method of a trait, in resolved form (enum names rewritten to
+/// `Type::Enum`; a `Self` in a type is left symbolic for per-impl substitution).
+/// `params` excludes the receiver, which is captured by `receiver`.
+#[derive(Clone, Debug)]
+pub struct TraitMethodSig<'a> {
+    pub receiver: Receiver,
+    pub params: Vec<Type<'a>>,
+    pub return_type: Type<'a>,
+}
+
+/// A declared `trait`: its required method signatures, keyed by method name.
+/// Used to check `extend T: Trait` conformance and to resolve a bounded type
+/// param's method call (`x.m()` where `x: T` and `T: Trait`).
+#[derive(Clone, Debug)]
+pub struct TraitDef<'a> {
+    pub methods: HashMap<&'a str, TraitMethodSig<'a>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Context<'a> {
     /// Lexical scope stack. Each entry maps a name to its binding identity and
@@ -104,6 +122,18 @@ pub struct Context<'a> {
     /// Populated by `infer` and consumed by MIL lowering. Rebuilt on each typecheck
     /// pass, so it always matches the AST that lowering will see.
     pub method_calls: HashMap<usize, MethodCall<'a>>,
+    /// Declared traits, by name. Populated in the forward-declaration pass;
+    /// consumed by conformance checking and bounded method-call resolution.
+    pub traits: HashMap<&'a str, TraitDef<'a>>,
+    /// Which `(type, trait)` conformances hold, from `extend T: Trait` blocks
+    /// (verified during the forward pass). A `T: Trait` bound at a generic call
+    /// site is satisfied iff the concrete argument type is present here.
+    pub impls: std::collections::HashSet<(&'a str, &'a str)>,
+    /// Trait bounds on the type params of the function currently being checked,
+    /// e.g. `{"T": ["Display"]}` inside `proc show<T: Display>(...)`. Lets a
+    /// method call on a `T`-typed receiver resolve through the bound trait. Empty
+    /// outside a bounded generic.
+    pub generic_bounds: HashMap<&'a str, Vec<&'a str>>,
 }
 
 /// A declared enum's definition: the discriminant repr, variant discriminant
@@ -144,6 +174,9 @@ impl<'a> Context<'a> {
             enums: HashMap::new(),
             generic_enums: std::collections::HashMap::new(),
             method_calls: HashMap::new(),
+            traits: HashMap::new(),
+            impls: std::collections::HashSet::new(),
+            generic_bounds: HashMap::new(),
         }
     }
 

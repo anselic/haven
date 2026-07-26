@@ -35,14 +35,14 @@ fn main() {
     // let prelude = if args.no_prelude { None } else { Some(PRELUDE_SRC) };
     // `sources` is (file-key, src) for every loaded module, so diagnostics below
     // quote the span's owning module - not just the entry file.
-    let (ast, sources) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
-        Ok(pair) => pair,
+    let (ast, sources, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
+        Ok(triple) => triple,
         Err(()) => std::process::exit(1),
     };
 
     {
         let mut cx = typecheck::Context::new();
-        let typecheck_errs = typecheck::typecheck_program(&mut cx, &ast);
+        let typecheck_errs = typecheck::typecheck_program(&mut cx, &ast, &impls);
 
         // check if there is no main function when compiling an executable
         if !args.shared && !args.static_lib {
@@ -81,8 +81,10 @@ fn main() {
                 diag::report_error("Monomorphization error", &e, &sources);
                 std::process::exit(1);
             });
+            // mono dropped all trait nodes and substituted every bounded type
+            // param, so the concrete program has no impls left to check.
             let mut cx = typecheck::Context::new();
-            let mono_errs = typecheck::typecheck_program(&mut cx, &mono_ast);
+            let mono_errs = typecheck::typecheck_program(&mut cx, &mono_ast, &[]);
             if !mono_errs.is_empty() {
                 mono_errs.iter()
                     .for_each(|e| diag::report_error("Typecheck error", e, &sources));
