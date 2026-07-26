@@ -1,0 +1,63 @@
+// Stage 1 methods: inherent + `extend` (no traits), value & pointer receivers,
+// associated functions, autoref at the call site, and a method calling another
+// method on `*self`.
+//@ exit: 16
+
+struct Point {
+    x: i32,
+    y: i32,
+
+    // associated function (no receiver), called as `Point::new(...)`
+    proc new(x: i32, y: i32) Point {
+        return Point { x: x, y: y };
+    }
+
+    // pointer receiver: `self.x` auto-derefs `*self`
+    proc sum(*self) i32 {
+        return self.x + self.y;
+    }
+
+    proc shifted(*self, dx: i32, dy: i32) Point {
+        return Point { x: self.x + dx, y: self.y + dy };
+    }
+}
+
+// methods added out-of-body; `doubled` calls `sum` on the same `*self`
+extend Point {
+    proc doubled(*self) i32 {
+        return self.sum() * 2;
+    }
+}
+
+@repr(u8)
+enum Dir {
+    North,
+    East,
+    South,
+    West,
+
+    // value receiver: `match (self)` scrutinizes the enum by value
+    proc turn_cost(self) i32 {
+        match (self) {
+            Dir::North -> { return 1; }
+            Dir::East  -> { return 2; }
+            Dir::South -> { return 3; }
+            Dir::West  -> { return 4; }
+        }
+    }
+}
+
+@export
+proc main() i32 {
+    let p: Point = Point::new(3, 4);
+    printf::<i32>("%d\n", p.sum());       // 7   (autoref: &p)
+    printf::<i32>("%d\n", p.doubled());   // 14
+
+    let q: Point = p.shifted(1, 1);       // (4, 5)
+    printf::<i32>("%d\n", q.sum());       // 9
+
+    let d: Dir = Dir::West;
+    printf::<i32>("%d\n", d.turn_cost()); // 4
+
+    return p.sum() + q.sum();             // 7 + 9 = 16
+}

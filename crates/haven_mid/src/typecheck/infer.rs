@@ -1,9 +1,33 @@
 use std::collections::{HashMap, HashSet};
 use haven_common::ast::*;
 use crate::intrinsics::Intrinsic;
-use super::context::{Context, enum_payload_struct_name};
+use super::context::{Context, MethodCall, RecvAdjust, enum_payload_struct_name};
 use super::generics::{bind_generics, subst_param_type, check_generic_call, bind_struct_generics, resolve_type, check_const_scope};
 use super::enums::{enum_variant, split_enum_variant, enum_variant_ctor, check_variant_pattern};
+
+/// Whether `expr` denotes a place (an addressable location) rather than a
+/// temporary. Must stay in sync with what MIL's `lower_lvalue` can handle: a
+/// variable, a field access, an index, or a pointer dereference. Everything else
+/// (a call result, a literal, an arithmetic result, a struct/array literal) is a
+/// temporary with no storage to take the address of.
+fn is_place(expr: &Expr<'_>) -> bool {
+    matches!(&expr.value,
+        ExprNode::Var(_)
+        | ExprNode::Access { .. }
+        | ExprNode::Index { .. }
+        | ExprNode::Unary { op: UnaryOp::Deref, .. })
+}
+
+/// Whether `ty` is a `self` receiver of the type named `recv_name`: the nominal
+/// type `T`, a pointer `*T`, or the corresponding enum forms.
+fn receiver_matches(ty: &Type<'_>, recv_name: &str) -> bool {
+    match ty {
+        Type::Struct { name, .. } | Type::Enum { name, .. } => *name == recv_name,
+        Type::Pointer(inner) => matches!(inner.as_ref(),
+            Type::Struct { name, .. } | Type::Enum { name, .. } if *name == recv_name),
+        _ => false,
+    }
+}
 
 fn typecheck_intrinsic<'a>(
     cx: &mut Context<'a>,
@@ -390,7 +414,22 @@ fn infer<'a>(
         ExprNode::Unary { op, operand } => {
             let operand_ty = infer(cx, operand)?;
             match op {
-                UnaryOp::AddrOf => Type::Pointer(Box::new(operand_ty)),
+                UnaryOp::AddrOf => {
+                    // `&` needs a place to point at. Taking the address of a
+                    // temporary (a call result, literal, arithmetic, ...) has no
+                    // storage; reject it here rather than panicking in lowering,
+                    // which only knows how to address real places.
+                    if !is_place(operand) {
+                        return Err(Error {
+                            msg: format!(
+                                "cannot take the address of a temporary value `{}`; \
+                                 bind it to a `let` first, then take a pointer to that",
+                                operand.value),
+                            span,
+                        });
+                    }
+                    Type::Pointer(Box::new(operand_ty))
+                },
                 UnaryOp::Deref => match operand_ty {
                     Type::Pointer(inner) => *inner,
                     _ => {
@@ -683,6 +722,70 @@ fn infer<'a>(
             typecheck_intrinsic(cx, intrinsic, type_args, args, span, metadata.id)?
         },
         ExprNode::Call { func, type_args, args } => {
+            // a receiver method call `recv.method(args)`: `func` is a field access
+            // whose base is a struct/enum that has a method `Type$method`. Resolved
+            // here (only the typechecker knows the receiver's type) into
+            // `method_calls` for MIL lowering. When there's no such method this
+            // falls through to the ordinary access-then-call path below (which
+            // handles a function-pointer struct field called as `x.f()`).
+            if type_args.is_empty() {
+                if let ExprNode::Access { base, field } = &func.value {
+                    let base_ty = infer(cx, base)?;
+                    let recv_name = match &base_ty {
+                        Type::Struct { name, .. } | Type::Enum { name, .. } => Some(*name),
+                        Type::Pointer(inner) => match inner.as_ref() {
+                            Type::Struct { name, .. } | Type::Enum { name, .. } => Some(*name),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(recv_name) = recv_name {
+                        let method_name = format!("{}${}", recv_name, field);
+                        // a receiver method's first param is a `self` of the receiver
+                        // type; an associated fn (no `self`) doesn't match, so calling
+                        // one as `value.assoc()` falls through rather than misbinding.
+                        let resolved = match cx.lookup_kv(&method_name) {
+                            Some((target, (_, Type::Function { params, return_type })))
+                                if params.first().is_some_and(|p| receiver_matches(p, recv_name)) =>
+                                Some((target, params.clone(), (**return_type).clone())),
+                            _ => None,
+                        };
+                        if let Some((target, params, return_type)) = resolved {
+                            let base_is_ptr = matches!(base_ty, Type::Pointer(_));
+
+                            // params[0] is the receiver `self`; args match the rest.
+                            let arg_params = &params[1..];
+                            if args.len() != arg_params.len() {
+                                return Err(Error {
+                                    msg: format!("method '{}' expects {} argument(s), got {}",
+                                        field, arg_params.len(), args.len()),
+                                    span,
+                                });
+                            }
+                            for (param_ty, arg) in arg_params.iter().zip(args.iter()) {
+                                check_expr(cx, param_ty, arg)?;
+                            }
+
+                            // a `*self` method called on a value takes its address;
+                            // otherwise the base passes straight through (a `*self`
+                            // on a `*T`, or a value receiver whose aggregate is
+                            // already handled by pointer).
+                            let self_is_ptr = matches!(params[0], Type::Pointer(_));
+                            let adjust = if self_is_ptr && !base_is_ptr {
+                                RecvAdjust::AddrOf
+                            } else {
+                                RecvAdjust::AsIs
+                            };
+                            cx.method_calls.insert(metadata.id, MethodCall {
+                                target, adjust, param_tys: params, return_type: return_type.clone(),
+                            });
+                            cx.node_types.insert(metadata.id, return_type.clone());
+                            return Ok(return_type);
+                        }
+                    }
+                }
+            }
+
             // a data-enum constructor `E::V(args...)` looks like a call but names
             // no function; check arity + each arg against the payload field types
             // and yield the aggregate enum type. Guarded before ordinary dispatch.

@@ -1,0 +1,16 @@
+// Stage 1 supports methods only on non-generic types. A method on a generic
+// struct is rejected (its `self` type would need the type's own params in scope).
+//@ error: methods on generic type
+
+struct Box<T> {
+    value: T,
+
+    proc get(*self) T {
+        return self.value;
+    }
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

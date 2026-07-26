@@ -8,7 +8,7 @@ mod enums;
 mod infer;
 
 // Public surface re-exported for the rest of the crate (mil.rs) and the driver.
-pub use context::{Context, EnumDef, GenericFnSig, ENUM_TAG_FIELD, ENUM_PAYLOAD_FIELD, enum_payload_struct_name};
+pub use context::{Context, EnumDef, GenericFnSig, MethodCall, RecvAdjust, ENUM_TAG_FIELD, ENUM_PAYLOAD_FIELD, enum_payload_struct_name};
 
 use generics::{resolve_type, check_const_scope, check_type_resolves};
 use enums::{enum_variant, enum_repr, enum_agg_deps_ready, payload_blob_type};
@@ -348,6 +348,8 @@ fn check_toplevel<'a>(
         // field-less enums are fully validated in the forward-declaration pass
         // (duplicate variants, `@repr` value); nothing more to check here.
         TopLevelNode::Enum { .. } => {}
+        // methods were desugared to functions in the module resolver.
+        TopLevelNode::Extend { .. } => unreachable!("extend desugared before typecheck"),
     }
 
     Ok(())
@@ -577,6 +579,7 @@ pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>]) -> 
             // enums were collected in their own pass above; nothing to register
             // in the value namespace (variant refs resolve directly).
             TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } => {}
+            TopLevelNode::Extend { .. } => unreachable!("extend desugared before typecheck"),
         }
     }
 

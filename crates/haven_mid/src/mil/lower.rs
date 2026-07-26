@@ -569,6 +569,7 @@ fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
         TopLevelNode::Struct { .. } => (vec![], None),
         TopLevelNode::Global { .. } => (vec![], None),
         TopLevelNode::Enum { .. } => (vec![], None),
+        TopLevelNode::Extend { .. } => unreachable!("extend desugared before lowering"),
     }
 }
 
@@ -595,6 +596,7 @@ pub fn lower<'a>(
         enums: typecheck_context.enums.clone(),
         node_types: typecheck_context.node_types.clone(),
         resolved: typecheck_context.resolved.clone(),
+        method_calls: typecheck_context.method_calls.clone(),
         current_return_type: Type::Void,
         sret_param: None,
         store_target: None,
@@ -704,6 +706,7 @@ pub fn lower<'a>(
                     enum_unions.insert(*name, pstruct_names);
                 }
             }
+            TopLevelNode::Extend { .. } => unreachable!("extend desugared before lowering"),
         }
     }
 

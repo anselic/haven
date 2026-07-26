@@ -696,6 +696,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
                 concrete_aggregates.insert(i, m.rebuild_enum(tl, &empty));
             }
             TopLevelNode::Extern { .. } | TopLevelNode::Global { .. } => {}
+            TopLevelNode::Extend { .. } => unreachable!("extend desugared before mono"),
         }
     }
 
@@ -920,6 +921,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
             TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } =>
                 output.push(concrete_aggregates.remove(&i).unwrap()),
             TopLevelNode::Extern { .. } | TopLevelNode::Global { .. } => output.push(tl.clone()),
+            TopLevelNode::Extend { .. } => unreachable!("extend desugared before mono"),
         }
     }
 

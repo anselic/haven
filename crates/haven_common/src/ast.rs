@@ -651,6 +651,33 @@ impl<'a> Display for AttributeNode<'a> {
 
 pub type Attribute<'a> = Metadata<AttributeNode<'a>>;
 
+/// How a method takes `self`. `Associated` is no receiver at all - an associated
+/// function like `Point::new`, called as `Point::new(...)`. `Value` is a by-value
+/// `self`, `Pointer` is `*self` (a pointer receiver). Desugaring turns `Value`
+/// into a leading `self: T` param and `Pointer` into `self: *T`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Receiver { Associated, Value, Pointer }
+
+/// A method declared inside a struct/enum body or an `extend` block. This is a
+/// purely front-end construct: the module resolver desugars every method into a
+/// top-level [`TopLevelNode::Function`] named `Type$method` (prepending a `self`
+/// param for `Value`/`Pointer` receivers) before any later stage runs, so
+/// typecheck/mono/mil/codegen only ever see ordinary functions. `params` excludes
+/// the receiver.
+#[derive(Clone, Debug)]
+pub struct MethodNode<'a> {
+    pub is_pub: bool,
+    pub attributes: Vec<Attribute<'a>>,
+    pub receiver: Receiver,
+    pub name: &'a str,
+    pub generics: Vec<GenericParam<'a>>,
+    pub params: Vec<(&'a str, Type<'a>)>,
+    pub return_type: Type<'a>,
+    pub body: Vec<Stmt<'a>>,
+}
+
+pub type Method<'a> = Metadata<MethodNode<'a>>;
+
 #[derive(Clone, Debug)]
 pub enum TopLevelNode<'a> {
     Function {
@@ -710,6 +737,19 @@ pub enum TopLevelNode<'a> {
         attributes: Vec<Attribute<'a>>,
         ty: Type<'a>,
         value: Expr<'a>,
+    },
+
+    /// An `extend Type { ... }` (or `extend Type: Trait { ... }`) block adding
+    /// methods to `target`. Inherent methods written directly in a struct/enum
+    /// body are also parsed into one of these (with `trait_: None`). Trait
+    /// conformance is not enforced in Stage 1 - `trait_` is recorded for later
+    /// stages but otherwise ignored. The module resolver desugars every method
+    /// into a top-level `Function` (see `lower_methods`) before typecheck, so no
+    /// stage past front-end module resolution ever observes this variant.
+    Extend {
+        target: &'a str,
+        trait_: Option<&'a str>,
+        methods: Vec<Method<'a>>,
     },
 }
 
@@ -784,6 +824,25 @@ impl<'a> Display for TopLevelNode<'a> {
                 }).collect::<String>();
 
                 write!(f, "{}{}enum {}{} {{\n{}}}", attrs_str, pub_str, name, generics_str, variants_str)
+            },
+            TopLevelNode::Extend { target, trait_, methods } => {
+                let trait_str = match trait_ {
+                    Some(t) => format!(": {}", t),
+                    None => String::new(),
+                };
+                let methods_str = methods.iter().map(|m| {
+                    let m = &m.value;
+                    let recv = match m.receiver {
+                        Receiver::Associated => String::new(),
+                        Receiver::Value => "self".to_string(),
+                        Receiver::Pointer => "*self".to_string(),
+                    };
+                    let sep = if !recv.is_empty() && !m.params.is_empty() { ", " } else { "" };
+                    let params_str = m.params.iter()
+                        .map(|(n, ty)| format!("{}: {}", n, ty)).collect::<Vec<_>>().join(", ");
+                    format!("    proc {}({}{}{}) {} {{ ... }}\n", m.name, recv, sep, params_str, m.return_type)
+                }).collect::<String>();
+                write!(f, "extend {}{} {{\n{}}}", target, trait_str, methods_str)
             },
         }
     }

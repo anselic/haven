@@ -100,6 +100,10 @@ pub struct LowerCtx<'a> {
     /// Name resolution from typecheck: `Var` node id -> its param/local binding.
     /// Absent for globals/functions, which resolve via `globals` / direct calls.
     pub resolved: HashMap<usize, Binding<'a>>, // from typecheck
+    /// Receiver method calls from typecheck (`recv.method(...)`), keyed by the
+    /// `Call` node id. Lowered to a direct call with the adjusted receiver
+    /// prepended to the args.
+    pub method_calls: HashMap<usize, crate::typecheck::MethodCall<'a>>, // from typecheck
     pub current_return_type: Type<'a>,        // return type of the function being lowered
     pub sret_param: Option<Register>,         // out-pointer slot, if the current fn returns a struct
     /// When set, the next struct/array literal lowered fills this pre-allocated

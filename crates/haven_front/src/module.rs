@@ -180,9 +180,80 @@ fn load_import<'a>(imp: &Import, key: &str, dir: Option<&Path>, arena: &'a Bump)
     }
 }
 
+/// Desugar every `extend` block (and the synthesized ones from inherent struct/
+/// enum method bodies) into ordinary top-level functions, in place. A method on
+/// `T` becomes a function named `T$method` with a `self` param prepended for a
+/// value/pointer receiver (`self: T` / `self: *T`); associated functions get no
+/// receiver param. After this runs the module has no `Extend` nodes, so every
+/// later stage - name resolution, typecheck, mono, codegen - sees only functions.
+///
+/// A receiver-call site `recv.method()` can't be rewritten here (it needs the
+/// receiver's type); that resolution happens in the typechecker. An associated
+/// call `T::method()` is rewritten by name resolution (see `call_name`), keyed on
+/// the same `T$method` name minted here.
+fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> Vec<Error> {
+    let mut errors = Vec::new();
+
+    // Types declared generic in this module. A method's `self` type would need the
+    // type's own params in scope (`*Vec<T>`), which Stage 1 doesn't handle - reject
+    // with a clear message rather than emit a function with an unbound `Param`.
+    let mut generic_types: HashSet<&str> = HashSet::new();
+    for tl in items.iter() {
+        match &tl.value {
+            TopLevelNode::Struct { name, generics, .. } if !generics.is_empty() => { generic_types.insert(*name); }
+            TopLevelNode::Enum { name, generics, .. } if !generics.is_empty() => { generic_types.insert(*name); }
+            _ => {}
+        }
+    }
+
+    let mut synthesized: Vec<TopLevel<'a>> = Vec::new();
+    let mut kept: Vec<TopLevel<'a>> = Vec::with_capacity(items.len());
+    for tl in items.drain(..) {
+        let TopLevelNode::Extend { target, methods, .. } = &tl.value else {
+            kept.push(tl);
+            continue;
+        };
+        let target: &'a str = target;
+        if generic_types.contains(target) {
+            errors.push(Error::new(tl.span.clone(), format!(
+                "methods on generic type '{}' are not supported yet (Stage 1 supports methods on non-generic types only)",
+                target)));
+            continue;
+        }
+        for m in methods {
+            let mnode = &m.value;
+            let mut params: Vec<(&'a str, Type<'a>)> = Vec::with_capacity(mnode.params.len() + 1);
+            let self_ty = Type::Struct { name: target, args: Vec::new() };
+            match mnode.receiver {
+                Receiver::Associated => {}
+                Receiver::Value => params.push(("self", self_ty)),
+                Receiver::Pointer => params.push(("self", Type::Pointer(Box::new(self_ty)))),
+            }
+            params.extend(mnode.params.iter().cloned());
+            let fname: &'a str = arena.alloc_str(&format!("{}${}", target, mnode.name));
+            synthesized.push(Metadata::new(
+                TopLevelNode::Function {
+                    name: fname,
+                    is_pub: mnode.is_pub,
+                    attributes: mnode.attributes.clone(),
+                    generics: mnode.generics.clone(),
+                    params,
+                    return_type: mnode.return_type.clone(),
+                    body: mnode.body.clone(),
+                },
+                m.span.clone(),
+            ));
+        }
+    }
+    *items = kept;
+    items.extend(synthesized);
+    errors
+}
+
 /// Lex + parse one module's source into `(imports, items)`, printing any
 /// lex/parse diagnostics. tokens move into `arena` so the parsed AST can borrow
-/// them for `'a`.
+/// them for `'a`. `extend`/method blocks are desugared to functions here, so the
+/// returned items are already method-free.
 fn parse_module<'a>(key: &'a str, src: &'a str, arena: &'a Bump)
     -> Result<(Vec<Import<'a>>, Vec<TopLevel<'a>>), ()>
 {
@@ -204,10 +275,22 @@ fn parse_module<'a>(key: &'a str, src: &'a str, arena: &'a Bump)
     for e in &parse_errs {
         diag::report("Parse error", &e.reason().to_string(), e.span(), &local);
     }
-    match parsed {
-        Some(pi) if parse_errs.is_empty() => Ok(pi),
-        _ => Err(()),
+    let (imports, mut items) = match parsed {
+        Some(pi) if parse_errs.is_empty() => pi,
+        _ => return Err(()),
+    };
+
+    // desugar `extend`/method blocks into functions before anything else looks at
+    // the items. errors here point into this one module, so `local` quotes them.
+    let method_errs = lower_methods(&mut items, arena);
+    if !method_errs.is_empty() {
+        for e in &method_errs {
+            diag::report_error("Method error", e, &local);
+        }
+        return Err(());
     }
+
+    Ok((imports, items))
 }
 
 /// Name-resolution scopes for one module.
@@ -284,13 +367,17 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// intrinsics, or errors caught later).
     fn call_name(&mut self, name: &mut &'a str, span: &Span) {
         let full: &str = *name;
-        if let Some((qual, _sym)) = full.split_once("::") {
-            // a data-enum constructor `Enum::Variant(...)` parses as a call whose
-            // callee is `Var("Enum::Variant")`. `Enum` names a type (enums live in
-            // the type namespace), not a module qualifier - so leave the whole name
-            // untouched for typecheck's constructor path instead of erroring on an
-            // "unknown module qualifier".
+        if let Some((qual, sym)) = full.split_once("::") {
+            // `Type::sym` where `Type` is a known type: either an associated-function
+            // call `Point::new(...)` or a data-enum constructor `Enum::Variant(...)`.
+            // Both are type-qualified, not module-qualified. If a desugared method
+            // `Type$sym` is in scope, this is the former - rewrite to it. Otherwise
+            // leave it untouched for typecheck's enum-constructor path.
             if self.scopes.types.contains_key(qual) {
+                let method = format!("{}${}", qual, sym);
+                if let Some(&f) = self.scopes.calls.get(method.as_str()) {
+                    *name = f;
+                }
                 return;
             }
         }
@@ -459,6 +546,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                     for (_, ty) in payload.iter_mut() { self.ty(ty, &gparams); }
                 }
             }
+            TopLevelNode::Extend { .. } => unreachable!("extend desugared before name resolution"),
         }
     }
 }
@@ -488,6 +576,8 @@ fn build_symtab<'a>(m: &Module<'a>, arena: &'a Bump) -> SymTab<'a> {
             TopLevelNode::Global { name, is_pub, attributes, .. } => {
                 st.fns.insert(name, Sym { name: final_global_name(m, name, attributes, arena), is_pub: *is_pub });
             }
+            // `extend` blocks were lowered to functions in `lower_methods`.
+            TopLevelNode::Extend { .. } => unreachable!("extend desugared before symtab"),
         }
     }
     st
@@ -753,6 +843,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
                     (*name, true, params.as_slice(), return_type),
                 TopLevelNode::Struct { .. } => { out.push(tl.clone()); continue; }
                 TopLevelNode::Enum { .. } => { out.push(tl.clone()); continue; }
+                TopLevelNode::Extend { .. } => unreachable!("extend desugared before merge"),
                 TopLevelNode::Global { name, .. } => {
                     if !seen_globals.insert(*name) {
                         merge_errs.push(Error::new(tl.span.clone(), format!(
@@ -771,6 +862,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
                     TopLevelNode::Extern { params, return_type, .. } =>
                         (true, params.as_slice(), return_type),
                     TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } => unreachable!("only callables are recorded"),
+                    TopLevelNode::Extend { .. } => unreachable!("extend desugared before merge"),
                     TopLevelNode::Global { .. } => unreachable!("globals are deduped separately"),
                 };
                 // signatures match on types only (param names are irrelevant to the ABI)

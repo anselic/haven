@@ -853,11 +853,89 @@ fn parse_attribute<'tks, 'src: 'tks>()
         .boxed()
 }
 
+/// A method inside a struct/enum body or an `extend` block:
+/// `[attrs] [pub] proc name[<generics>](receiver?, params...) [RetType] { body }`.
+/// The receiver is `self` (by value), `*self` (by pointer), or absent (an
+/// associated function). `proc` heads every method, so it cleanly delimits methods
+/// from the comma-separated fields/variants that precede them in a type body.
+fn parse_method<'tks, 'src: 'tks>()
+-> impl Parser<
+    'tks,
+    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
+    Method<'src>,
+    extra::Err<Rich<'tks, Token<'src>, Span>>,
+> {
+    let var = select_ref! { Token::Var(ident) => ident };
+
+    let generic_param = choice((
+        just(Token::Const)
+            .ignore_then(var.map(|s| *s))
+            .then_ignore(just(Token::Colon))
+            .then(parse_type())
+            .map(|(name, ty)| GenericParam::Const(name, ty)),
+        var.map(|s| GenericParam::Type(*s)),
+    ));
+    let generics = generic_param
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(
+            just(Token::BinaryOp(BinaryOp::Lt)),
+            just(Token::BinaryOp(BinaryOp::Gt)))
+        .or_not()
+        .map(|g| g.unwrap_or_default());
+
+    let normal_param = var.map(|s| *s)
+        .then_ignore(just(Token::Colon))
+        .then(parse_type())
+        .boxed();
+
+    // `self` or `*self`. A guard keeps the token uncommitted when it isn't
+    // literally `self`, so the associated-function alternative below backtracks
+    // cleanly on a normal first param like `(x: i32)`.
+    let self_recv = just(Token::BinaryOp(BinaryOp::Mul)).or_not()
+        .then(select_ref! { Token::Var(s) if *s == "self" => () })
+        .map(|(star, _)| if star.is_some() { Receiver::Pointer } else { Receiver::Value });
+
+    let params_inner = choice((
+        self_recv
+            .then(just(Token::Comma).ignore_then(normal_param.clone()).repeated().collect::<Vec<_>>())
+            .map(|(recv, ps)| (recv, ps)),
+        normal_param
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .map(|ps| (Receiver::Associated, ps)),
+    ))
+        .delimited_by(just(Token::LParen), just(Token::RParen));
+
+    parse_attribute()
+        .repeated().collect::<Vec<_>>()
+        .then(just(Token::Pub).or_not().map(|o| o.is_some()))
+        .then_ignore(just(Token::Proc))
+        .then(var.map(|s| *s))
+        .then(generics)
+        .then(params_inner)
+        .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
+        .then(
+            parse_stmt()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace))
+        )
+        .map_with(|((((((attributes, is_pub), name), generics), (receiver, params)), return_type), body), e|
+            Metadata::new(
+                MethodNode { is_pub, attributes, receiver, name, generics, params, return_type, body },
+                e.span(),
+            ))
+        .boxed()
+}
+
 fn parse_toplevel<'tks, 'src: 'tks>()
 -> impl Parser<
     'tks,
     MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    TopLevel<'src>,
+    Vec<TopLevel<'src>>,
     extra::Err<Rich<'tks, Token<'src>, Span>>,
 > {
     let var = select_ref! { Token::Var(ident) => ident };
@@ -915,7 +993,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|((((((attributes, is_pub), name), generics), params), return_type), body)| TopLevelNode::Function {
+        .map(|((((((attributes, is_pub), name), generics), params), return_type), body)| (TopLevelNode::Function {
             name,
             is_pub,
             attributes,
@@ -923,7 +1001,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
             params,
             return_type,
             body,
-        });
+        }, Vec::new()));
 
     let extern_ = item_header.clone()
         .then_ignore(just(Token::Extern))
@@ -940,15 +1018,18 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         )
         .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
         .then_ignore(just(Token::Semicolon))
-        .map(|(((((attributes, is_pub), name), generics), params), return_type)| TopLevelNode::Extern {
+        .map(|(((((attributes, is_pub), name), generics), params), return_type)| (TopLevelNode::Extern {
             name,
             is_pub,
             attributes,
             generics,
             params,
             return_type,
-        });
+        }, Vec::new()));
 
+    // struct body: comma-separated fields first, then zero or more methods. `proc`
+    // starts every method and can't start a field, so it's an unambiguous delimiter
+    // (methods must follow all fields - the roadmap's "fields first, then methods").
     let struct_ = item_header.clone()
         .then_ignore(just(Token::Struct))
         .then(var)
@@ -960,15 +1041,16 @@ fn parse_toplevel<'tks, 'src: 'tks>()
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
+                .then(parse_method().repeated().collect::<Vec<_>>())
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|((((attributes, is_pub), name), generics), fields)| TopLevelNode::Struct {
+        .map(|((((attributes, is_pub), name), generics), (fields, methods))| (TopLevelNode::Struct {
             name,
             is_pub,
             attributes,
             generics,
             fields,
-        });
+        }, methods));
 
     // module-level constant: `[attrs] [pub] const NAME: Type = <expr>;`
     let global = item_header.clone()
@@ -979,13 +1061,13 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .then_ignore(just(Token::Assign))
         .then(parse_expr())
         .then_ignore(just(Token::Semicolon))
-        .map(|((((attributes, is_pub), name), ty), value)| TopLevelNode::Global {
+        .map(|((((attributes, is_pub), name), ty), value)| (TopLevelNode::Global {
             name,
             is_pub,
             attributes,
             ty,
             value,
-        });
+        }, Vec::new()));
 
     // an enum variant: a name, an optional tuple payload `(T, U, ...)`, and an
     // optional explicit `= <int>` discriminant (a leading `-` is allowed for
@@ -1028,6 +1110,8 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .then(enum_discriminant.or_not())
         .map(|((name, payload), disc)| (name, disc, payload));
 
+    // enum body: comma-separated variants first, then zero or more methods, same
+    // `proc`-delimits-methods rule as structs.
     let enum_ = item_header.clone()
         .then_ignore(just(Token::Enum))
         .then(var.map(|s| *s))
@@ -1037,28 +1121,55 @@ fn parse_toplevel<'tks, 'src: 'tks>()
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
+                .then(parse_method().repeated().collect::<Vec<_>>())
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|((((attributes, is_pub), name), generics), variants)| TopLevelNode::Enum {
+        .map(|((((attributes, is_pub), name), generics), (variants, methods))| (TopLevelNode::Enum {
             name,
             is_pub,
             attributes,
             generics,
             variants,
-        });
+        }, methods));
+
+    // `extend Type { methods }` or `extend Type: Trait { methods }`. `extend` isn't
+    // a reserved keyword (it lexes as a `Var`), so match it by text. The trait name
+    // is recorded but unchecked in Stage 1.
+    let extend_ = select_ref! { Token::Var(s) if *s == "extend" => () }
+        .ignore_then(var.map(|s| *s))
+        .then(just(Token::Colon).ignore_then(var.map(|s| *s)).or_not())
+        .then(
+            parse_method()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace))
+        )
+        .map(|((target, trait_), methods)| (TopLevelNode::Extend { target, trait_, methods }, Vec::new()));
 
     choice((
         function,
         extern_,
         struct_,
         enum_,
+        extend_,
         global,
     ))
-        .map_with(|node, e| {
-            Metadata::new(
-                node,
-                e.span(),
-            )
+        .map_with(|(node, methods), e| {
+            let span = e.span();
+            // inherent methods on a struct/enum body become a synthesized `Extend`
+            // targeting that type, emitted right after the type node.
+            let mut out = vec![Metadata::new(node, span.clone())];
+            if !methods.is_empty() {
+                let target = match &out[0].value {
+                    TopLevelNode::Struct { name, .. } | TopLevelNode::Enum { name, .. } => *name,
+                    _ => unreachable!("only struct/enum bodies carry inherent methods"),
+                };
+                out.push(Metadata::new(
+                    TopLevelNode::Extend { target, trait_: None, methods },
+                    span,
+                ));
+            }
+            out
         })
         .boxed()
 }
@@ -1100,7 +1211,9 @@ fn parse_import<'tks, 'src: 'tks>()
 /// from the same stream and partitioned by `parse`.
 enum FileItem<'a> {
     Import(Import<'a>),
-    Item(TopLevel<'a>),
+    // one source item can expand to several top-levels: a struct/enum with a body
+    // of methods yields the type node plus a synthesized `Extend`.
+    Items(Vec<TopLevel<'a>>),
 }
 
 pub fn parse<'a>(file_path: String, len: usize, tokens: &'a [Metadata<Token<'a>>]) -> (
@@ -1109,7 +1222,7 @@ pub fn parse<'a>(file_path: String, len: usize, tokens: &'a [Metadata<Token<'a>>
 ) {
     let (out, errs) = choice((
             parse_import().map(FileItem::Import),
-            parse_toplevel().map(FileItem::Item),
+            parse_toplevel().map(FileItem::Items),
         ))
         .repeated()
         .collect::<Vec<_>>()
@@ -1126,7 +1239,7 @@ pub fn parse<'a>(file_path: String, len: usize, tokens: &'a [Metadata<Token<'a>>
         for item in items {
             match item {
                 FileItem::Import(i) => imports.push(i),
-                FileItem::Item(t) => tops.push(t),
+                FileItem::Items(ts) => tops.extend(ts),
             }
         }
         (imports, tops)

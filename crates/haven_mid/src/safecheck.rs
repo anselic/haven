@@ -208,6 +208,7 @@ fn compute_clean<'a>(program: &[TopLevel<'a>]) -> CleanMap<'a> {
             }
             TopLevelNode::Struct { .. } | TopLevelNode::Global { .. }
             | TopLevelNode::Enum { .. } => {}
+            TopLevelNode::Extend { .. } => unreachable!("extend desugared before safecheck"),
         }
     }
 

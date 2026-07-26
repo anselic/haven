@@ -27,6 +27,32 @@ pub struct GenericFnSig<'a> {
     pub return_type: Type<'a>,
 }
 
+/// How a receiver method call adjusts its base expression to form the `self`
+/// argument. `AddrOf` takes the address (a `*self` method called on a value `T`);
+/// `AsIs` passes the base's value straight through (a `*self` method called on a
+/// `*T`, or a value-`self` method - where the aggregate is already handled by
+/// pointer, and a scalar value is passed directly).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecvAdjust { AddrOf, AsIs }
+
+/// Resolution of a receiver method call `recv.method(args)`, keyed by the `Call`
+/// expression's node id. Produced by the typechecker (which alone knows the
+/// receiver's type) and consumed by MIL lowering, which emits a direct call to
+/// `target` with the adjusted receiver prepended to `args`. Associated calls
+/// (`Type::method`) don't appear here - name resolution already rewrote them to a
+/// plain function name.
+#[derive(Clone, Debug)]
+pub struct MethodCall<'a> {
+    /// Final function name to call, e.g. `Point$as_array_ref`.
+    pub target: &'a str,
+    /// How to turn the receiver base into the `self` argument.
+    pub adjust: RecvAdjust,
+    /// The method's full parameter types (including `self`), for arg coercion.
+    pub param_tys: Vec<Type<'a>>,
+    /// The method's return type.
+    pub return_type: Type<'a>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Context<'a> {
     /// Lexical scope stack. Each entry maps a name to its binding identity and
@@ -74,6 +100,10 @@ pub struct Context<'a> {
     /// or destructuring pattern binds these positionally via turbofish; monomorphization
     /// rewrites a concrete use to a flat instance before codegen.
     pub generic_enums: std::collections::HashMap<&'a str, Vec<GenericParam<'a>>>,
+    /// Receiver method calls (`recv.method(...)`), keyed by the `Call` node id.
+    /// Populated by `infer` and consumed by MIL lowering. Rebuilt on each typecheck
+    /// pass, so it always matches the AST that lowering will see.
+    pub method_calls: HashMap<usize, MethodCall<'a>>,
 }
 
 /// A declared enum's definition: the discriminant repr, variant discriminant
@@ -113,6 +143,7 @@ impl<'a> Context<'a> {
             global_consts: std::collections::HashSet::new(),
             enums: HashMap::new(),
             generic_enums: std::collections::HashMap::new(),
+            method_calls: HashMap::new(),
         }
     }
 
@@ -131,5 +162,12 @@ impl<'a> Context<'a> {
     /// Walk scopes from innermost to outermost, returning the first match for `name`
     pub fn lookup(&self, name: &str) -> Option<&(Option<Binding<'a>>, Type<'a>)> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
+    }
+
+    /// Like [`lookup`], but also returns the matched entry's interned `&'a str`
+    /// key. Used to recover a function's arena-lifetime name (e.g. to record a
+    /// method call's target) from a lookup keyed by a temporary `String`.
+    pub fn lookup_kv(&self, name: &str) -> Option<(&'a str, &(Option<Binding<'a>>, Type<'a>))> {
+        self.scopes.iter().rev().find_map(|scope| scope.get_key_value(name).map(|(k, v)| (*k, v)))
     }
 }

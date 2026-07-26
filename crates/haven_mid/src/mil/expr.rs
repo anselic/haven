@@ -1,5 +1,6 @@
 use haven_common::ast::*;
 use crate::intrinsics::Intrinsic;
+use crate::typecheck::RecvAdjust;
 use super::ir::*;
 use super::ctx::{LowerCtx, coerce, aggregate_struct_name, enum_const, ta_type, ta_const};
 
@@ -563,6 +564,50 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             let ExprNode::Var(name) = &func.value else { unreachable!() };
             let intrinsic = Intrinsic::lookup(name).unwrap();
             lower_intrinsic(cx, intrinsic, type_args, args)
+        }
+
+        // a receiver method call `recv.method(args)`, resolved by typecheck into
+        // `method_calls`. Lower to a direct call to the desugared function, passing
+        // the adjusted receiver (address-of, or as-is) as the leading `self` arg.
+        ExprNode::Call { func, args, .. } if cx.method_calls.contains_key(&expr.id) => {
+            let mc = cx.method_calls[&expr.id].clone();
+            let base = match &func.value {
+                ExprNode::Access { base, .. } => base,
+                _ => unreachable!("method call callee is always a field access"),
+            };
+            cx.emit(Inst::Comment(format!("method call {}(...)", mc.target)));
+
+            let recv_val = match mc.adjust {
+                RecvAdjust::AddrOf => Value::Reg(lower_lvalue(cx, base)),
+                RecvAdjust::AsIs => lower_expr(cx, base),
+            };
+            let mut lowered_args: Vec<(Value, Type<'a>)> = Vec::with_capacity(args.len() + 1);
+            lowered_args.push((recv_val, mc.param_tys[0].clone()));
+            for (i, arg) in args.iter().enumerate() {
+                let arg_ty = cx.node_types[&arg.id].clone();
+                let val = lower_expr(cx, arg);
+                let param_ty = mc.param_tys[i + 1].clone();
+                lowered_args.push((coerce(cx, val, &arg_ty, &param_ty), param_ty));
+            }
+
+            let callee = Callee::Direct(mc.target);
+            let return_type = mc.return_type.clone();
+            if let Some(sname) = aggregate_struct_name(&return_type) {
+                let slot = cx.fresh_reg();
+                cx.emit(Inst::AllocaStruct { dst: slot, name: sname, align: None });
+                cx.emit(Inst::Call {
+                    dst: None, callee, args: lowered_args,
+                    return_type: Type::Void, sret: Some((slot, sname)),
+                });
+                Value::Reg(slot)
+            } else if return_type == Type::Void {
+                cx.emit(Inst::Call { dst: None, callee, args: lowered_args, return_type, sret: None });
+                Value::Const(Const::Bool(false)) // placeholder
+            } else {
+                let dst = cx.fresh_reg();
+                cx.emit(Inst::Call { dst: Some(dst), callee, args: lowered_args, return_type, sret: None });
+                Value::Reg(dst)
+            }
         }
 
         ExprNode::Call { func, args, .. } => {
