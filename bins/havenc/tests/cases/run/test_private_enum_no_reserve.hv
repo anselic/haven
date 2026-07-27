@@ -1,0 +1,15 @@
+// A private enum in an imported module does not reserve its name: this module
+// declares its own `State`, unrelated to the helper's.
+//@ exit: 12
+
+import helpers/privstate { busy_code }
+
+enum State { Ready }
+
+@export
+proc main() i32 {
+    let s: State = State::Ready;
+    match (s) {
+        State::Ready -> { return busy_code() + 7; }
+    }
+}

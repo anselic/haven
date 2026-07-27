@@ -1212,10 +1212,9 @@ fn parse_toplevel<'tks, 'src: 'tks>()
     // can't use the shared `item_header` combinator (that one ends with a real
     // keyword token). The `pub` marker is spelled out here instead; attributes on
     // a trait are still not accepted, since `TopLevelNode::Trait` has nowhere to
-    // put them. Trait names are kept stable (unmangled) across modules, like enum
-    // names, so `pub` currently gates only whether another module can *import* the
-    // name - a bound `T: Trait` still resolves globally. See the module-system
-    // redesign notes.
+    // put them. `pub` is real: trait names are module-namespaced like struct and
+    // enum names, so a private trait is invisible to other modules rather than
+    // merely un-importable.
     let trait_ = just(Token::Pub).or_not().map(|o| o.is_some())
         .then_ignore(select_ref! { Token::Var(s) if *s == "trait" => () })
         .then(var.map(|s| *s))

@@ -1,0 +1,32 @@
+// A trait whose signature names a type from a third module, implemented here and
+// dispatched through a bound.
+//
+// The original failure: the trait's `String` and the implementor's `String` were
+// two different strings ("String" vs "m2_string$String"), so the impl was
+// reported as having a signature that does not match the trait, and the call
+// site as `Expected m2_string$String, got String`.
+//@ exit: 0
+
+import helpers/showable { Show }
+import std/string { String, string_from_str, string_as_str, string_free }
+
+struct Tag { n: i32,
+    proc new(n: i32) Tag { return Tag { n: n }; }
+}
+
+extend Tag: Show {
+    proc show(*self) String { return string_from_str("tag"); }
+}
+
+proc show_it<T: Show>(item: *T) {
+    let s: String = item.show();
+    println(string_as_str(&s));
+    string_free(&s);
+}
+
+@export
+proc main() i32 {
+    let t: Tag = Tag::new(1);
+    show_it::<Tag>(&t);
+    return 0;
+}

@@ -1,0 +1,29 @@
+// Helper for `run/test_same_name_types_xmod.hv`. Not collected by the harness.
+//
+// Declares an enum and a trait whose names are ALSO declared in `kinds_b.hv` and
+// in the entry module. Enum and trait names used to be emitted unmangled, so all
+// three collided with `Duplicate type definition` / `Duplicate trait definition`
+// - a name declared anywhere was reserved everywhere.
+pub enum Kind { Small, Large }
+
+pub trait Rank {
+    proc rank(*self) i32;
+}
+
+extend Kind: Rank {
+    proc rank(*self) i32 {
+        match (*self) {
+            Kind::Small -> { return 1; }
+            Kind::Large -> { return 2; }
+        }
+    }
+}
+
+// exercises this module's own `Kind`/`Rank` through a bound, so the entry module
+// doesn't need a 3-segment path to reach them.
+proc via_bound<T: Rank>(x: *T) i32 { return x.rank(); }
+
+pub proc a_rank() i32 {
+    let k: Kind = Kind::Large;
+    return via_bound::<Kind>(&k);
+}

@@ -1,0 +1,15 @@
+// Helper for `run/test_private_enum_no_reserve.hv`. Not collected by the harness.
+//
+// `State` has no `pub`, so it is not importable. It also must not *reserve* the
+// name: a private enum in some module used to be a hard, program-wide name
+// reservation, because enum names were emitted unmangled and typecheck's enum
+// table is keyed on that one flat name.
+enum State { Idle, Busy }
+
+pub proc busy_code() i32 {
+    let s: State = State::Busy;
+    match (s) {
+        State::Idle -> { return 0; }
+        State::Busy -> { return 5; }
+    }
+}

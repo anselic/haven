@@ -1,0 +1,19 @@
+// Second helper for `run/test_same_name_types_xmod.hv`: the same `Kind` and
+// `Rank` names again, with different variants and a different result, so the
+// test can tell the three apart at runtime.
+pub enum Kind { Only }
+
+pub trait Rank {
+    proc rank(*self) i32;
+}
+
+extend Kind: Rank {
+    proc rank(*self) i32 { return 40; }
+}
+
+proc via_bound<T: Rank>(x: *T) i32 { return x.rank(); }
+
+pub proc b_rank() i32 {
+    let k: Kind = Kind::Only;
+    return via_bound::<Kind>(&k);
+}

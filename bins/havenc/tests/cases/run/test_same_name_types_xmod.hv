@@ -1,0 +1,31 @@
+// Three modules each declare an enum named `Kind` and a trait named `Rank`, and
+// all three coexist. Each `extend Kind: Rank` binds the pair from its own module.
+//
+// Before enums and traits were namespaced this was `Duplicate type definition
+// 'Kind'` / `Duplicate trait definition 'Rank'`: both kinds were emitted
+// unmangled, because `E::V` references and bare `T: Rank` bounds were never
+// rewritten and so had to match a globally unique name.
+//@ exit: 44
+
+import helpers/kinds_a { a_rank }
+import helpers/kinds_b { b_rank }
+
+// this module's own `Kind` and `Rank`, distinct from both imports
+enum Kind { Mine }
+
+trait Rank {
+    proc rank(*self) i32;
+}
+
+extend Kind: Rank {
+    proc rank(*self) i32 { return 100; }
+}
+
+proc via_bound<T: Rank>(x: *T) i32 { return x.rank(); }
+
+@export
+proc main() i32 {
+    let k: Kind = Kind::Mine;
+    // 2 (kinds_a) + 40 (kinds_b) + 100 (here) - 98
+    return a_rank() + b_rank() + via_bound::<Kind>(&k) - 98;
+}

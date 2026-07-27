@@ -46,20 +46,28 @@
 //! prelude imports no `String`, reported three stages later as an impl whose
 //! signature "does not match the trait".
 //!
-//! four things legitimately don't resolve through a module scope, and each is an
+//! three things legitimately don't resolve through a module scope, and each is an
 //! explicit branch rather than a fallthrough: compiler intrinsics (`sizeof`,
 //! `__simd_*` - in no symbol table), `Self` in a trait method signature
-//! (substituted per impl by typecheck), `Enum::Variant` paths (enum names are
-//! never mangled, so they already read correctly), and generic parameters of the
-//! enclosing item - including *const* params, which the parser can't tell from
-//! type arguments inside a turbofish.
+//! (substituted per impl by typecheck), and generic parameters of the enclosing
+//! item - including *const* params, which the parser can't tell from type
+//! arguments inside a turbofish.
+//!
+//! ## namespacing
+//!
+//! every kind of top-level item is namespaced by its module. structs, enums and
+//! traits alike are emitted as `<module slug>$<name>`, so two modules may declare
+//! the same type name and a private one reserves nothing program-wide.
+//!
+//! for enums and traits that only holds because *every* reference to them is
+//! rewritten: an `Enum::Variant` path in call, value, struct-literal and match
+//! pattern position (see `variant_path`), and a bare `T: Trait` bound (see
+//! `bounds`). leaving any one of those unrewritten is why both used to be emitted
+//! unmangled, and therefore had to be globally unique.
 //!
 //! ## known v1 limitations
 //!
 //! * visibility is item-level only; struct *fields* are always public.
-//! * an enum or trait name is reserved program-wide, even when private: those
-//!   names are deliberately left unmangled, so `pub` on them gates only whether
-//!   another module can `import` the name.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -350,6 +358,8 @@ struct Scopes<'a> {
 /// place.
 struct Rewriter<'x, 'a> {
     scopes: &'x Scopes<'a>,
+    /// needed to mint rewritten `Enum::Variant` paths, whose enum half changes.
+    arena: &'a Bump,
     /// every method in the program, keyed by `(final type name, method name)`.
     /// what makes `Point::new()` resolve for an imported `Point`.
     members: &'x MemberTable<'a>,
@@ -380,6 +390,67 @@ impl<'x, 'a> Rewriter<'x, 'a> {
 
     fn is_local(&self, name: &str) -> bool {
         self.locals.iter().any(|n| *n == name)
+    }
+
+    /// Rewrite the enum half of an `Enum::Variant` path to the enum's final name,
+    /// returning `true` if `qual` named a type at all.
+    ///
+    /// Enum names are mangled like struct names, so every reference to a variant
+    /// has to be re-spelled - in call position (`E::V(x)`), value position (a unit
+    /// variant), struct-literal position (`E::V { .. }`) and match patterns. Miss
+    /// any one of them and the enum's name has to stay globally unique, which is
+    /// exactly the constraint this lifts.
+    fn variant_path(&mut self, name: &mut &'a str, qual: &str, sym: &str) -> bool {
+        let Some(&ty) = self.scopes.types.get(qual) else { return false };
+        if ty != qual {
+            *name = self.arena.alloc_str(&format!("{}::{}", ty, sym));
+        }
+        true
+    }
+
+    /// Rewrite the trait names in an item's generic bounds (`T: Display`). Traits
+    /// are mangled now, so a bound has to name the final trait for it to line up
+    /// with the conformance records and the trait table.
+    fn bounds(&mut self, generics: &mut [GenericParam<'a>]) {
+        for g in generics.iter_mut() {
+            let GenericParam::Type { bounds, .. } = g else { continue };
+            for b in bounds.iter_mut() {
+                match self.scopes.types.get(*b) {
+                    Some(&f) => *b = f,
+                    None => self.error_here(format!("unknown trait '{}'", b)),
+                }
+            }
+        }
+    }
+
+    /// Rewrite any enum paths a match pattern names, and collect the locals it
+    /// binds. Patterns used to be skipped entirely, which was only safe while enum
+    /// names were never mangled.
+    fn pattern(&mut self, pat: &mut PatternNode<'a>, out: &mut Vec<&'a str>) {
+        match pat {
+            PatternNode::Bind(name) => out.push(name),
+            PatternNode::Path(path) => {
+                if let Some((qual, sym)) = path.split_once("::") {
+                    let (qual, sym) = (qual.to_string(), sym.to_string());
+                    self.variant_path(path, &qual, &sym);
+                }
+            }
+            PatternNode::Variant { path, fields } => {
+                if let Some((qual, sym)) = path.split_once("::") {
+                    let (qual, sym) = (qual.to_string(), sym.to_string());
+                    self.variant_path(path, &qual, &sym);
+                }
+                for f in fields { self.pattern(&mut f.value, out); }
+            }
+            PatternNode::StructVariant { path, fields } => {
+                if let Some((qual, sym)) = path.split_once("::") {
+                    let (qual, sym) = (qual.to_string(), sym.to_string());
+                    self.variant_path(path, &qual, &sym);
+                }
+                for (_, f) in fields { self.pattern(&mut f.value, out); }
+            }
+            PatternNode::Wildcard | PatternNode::Int(_) => {}
+        }
     }
 
     /// Rewrite struct type names in `ty`, skipping names bound as generic params
@@ -450,11 +521,13 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // (`$` is unlexable), so `import geo { Point }` + `Point::new()` was
             // silently left unresolved.
             if let Some(&ty) = self.scopes.types.get(qual) {
-                if let Some(m) = self.members.get(&(ty, sym)) {
-                    *name = m.name;
+                match self.members.get(&(ty, sym)) {
+                    Some(m) => *name = m.name,
+                    // otherwise a data-enum constructor `Enum::Variant(...)`: only
+                    // the enum half is rewritten, and typecheck's constructor path
+                    // handles the rest.
+                    None => { self.variant_path(name, qual, sym); }
                 }
-                // otherwise a data-enum constructor `Enum::Variant(...)`, left for
-                // typecheck's constructor path.
                 return;
             }
         }
@@ -501,11 +574,10 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             ExprNode::Struct { name, type_args, fields } => {
                 let nm: &str = *name;
                 if let Some((qual, sym)) = nm.split_once("::") {
-                    if self.scopes.types.contains_key(qual) {
+                    if self.variant_path(name, qual, sym) {
                         // a struct-style enum variant literal, `Msg::Cc { id, val }`:
-                        // type-qualified, not module-qualified. enum names aren't
-                        // mangled, so it already reads correctly - leave it for
-                        // typecheck's variant path.
+                        // type-qualified, not module-qualified. the enum half is
+                        // rewritten above; typecheck routes the rest to the variant.
                     } else if let Some(&f) = self.scopes.quals.get(qual).and_then(|m| m.get(sym)) {
                         *name = f;
                     } else if self.scopes.quals.contains_key(qual) {
@@ -548,9 +620,10 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 } else if let Some(&f) = self.scopes.calls.get(full) {
                     *name = f;
                 } else if let Some((qual, sym)) = full.split_once("::") {
-                    if self.scopes.types.contains_key(qual) {
+                    if self.variant_path(name, qual, sym) {
                         // `Enum::Variant` read as a value (a unit variant), or an
-                        // associated fn taken by value: resolved in typecheck.
+                        // associated fn taken by value: the enum half is rewritten
+                        // above, the rest resolved in typecheck.
                     } else if let Some(&f) = self.scopes.quals.get(qual).and_then(|m| m.get(sym)) {
                         // a module-qualified value, `math::square`. previously not
                         // rewritten at all, which failed later as an unknown name.
@@ -598,17 +671,18 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.expr(condition, gparams);
                 self.stmt(body, gparams);
             }
-            // pattern *paths* (`_` / int / `Enum::Variant`) need no rewriting - enum
-            // names are never mangled, so they already read correctly. But a
-            // destructuring pattern's field bindings are locals for the duration of
-            // that arm, and have to be in scope while its body is walked, or a read
-            // of `pitch` in `Msg::Note(pitch, vel) => ...` looks like an unresolved
-            // top-level name.
+            // an arm's pattern needs two things: its `Enum::Variant` paths rewritten
+            // to the enum's final name, and its field bindings in scope while the
+            // arm body is walked - otherwise a read of `pitch` in
+            // `Msg::Note(pitch, vel) -> ...` looks like an unresolved top-level
+            // name. `Rewriter::pattern` does both.
             StmtNode::Match { scrutinee, arms } => {
                 self.expr(scrutinee, gparams);
                 for (pat, body) in arms {
                     let mark = self.locals.len();
-                    bind_pattern(&pat.value, &mut self.locals);
+                    let mut binds = Vec::new();
+                    self.pattern(&mut pat.value, &mut binds);
+                    self.locals.extend(binds);
                     self.stmt(body, gparams);
                     self.locals.truncate(mark);
                 }
@@ -627,6 +701,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 let gparams = generic_names(generics);
                 *name = self.scopes.calls.get(*name).copied()
                     .expect("a module's own callable is always in its own scope");
+                self.bounds(generics);
                 // a `const N: u64` generic param is read as an ordinary value in the
                 // body (`i + N`), so it binds like a param. only *type* params go in
                 // `gparams`, which is about type positions.
@@ -656,6 +731,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 let gparams = generic_names(generics);
                 *name = self.scopes.types.get(*name).copied()
                     .expect("a module's own struct is always in its own scope");
+                self.bounds(generics);
                 for (_, ty) in fields { self.ty(ty, &gparams); }
             }
             TopLevelNode::Global { name, ty, value, .. } => {
@@ -665,14 +741,16 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.ty(ty, &empty);
                 self.expr(value, &empty);
             }
-            // the enum's type name is kept stable (see build_symtab) and variant
-            // refs `E::V` pass through the Var arm untouched, resolved globally in
-            // typecheck - but a data-carrying variant's payload field types are
-            // types like any other and must be rewritten, exactly as struct
-            // fields are above. The enum's own type params shadow module type
+            // the enum's type name is now mangled like a struct's, so it is
+            // rewritten here and every `E::V` reference is re-spelled to match (see
+            // `variant_path`). A data-carrying variant's payload field types are
+            // types like any other. The enum's own type params shadow module type
             // names (a payload `T` is a param, not a module type).
-            TopLevelNode::Enum { generics, variants, .. } => {
+            TopLevelNode::Enum { name, generics, variants, .. } => {
                 let gparams = generic_names(generics);
+                *name = self.scopes.types.get(*name).copied()
+                    .expect("a module's own enum is always in its own scope");
+                self.bounds(generics);
                 for (_, _, payload) in variants.iter_mut() {
                     for (_, ty) in payload.iter_mut() { self.ty(ty, &gparams); }
                 }
@@ -681,8 +759,10 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // be rewritten like any other - a `String` in `proc display(*self)
             // String` resolves to the imported struct's mangled name. `Self` is
             // left untouched (typecheck substitutes it per implementing type).
-            TopLevelNode::Trait { methods, .. } => {
+            TopLevelNode::Trait { name, methods, .. } => {
                 let empty = HashSet::new();
+                *name = self.scopes.types.get(*name).copied()
+                    .expect("a module's own trait is always in its own scope");
                 for m in methods.iter_mut() {
                     for (_, ty) in m.params.iter_mut() { self.ty(ty, &empty); }
                     self.ty(&mut m.return_type, &empty);
@@ -706,21 +786,6 @@ fn generic_names<'a>(generics: &[GenericParam<'a>]) -> HashSet<&'a str> {
         GenericParam::Type { name, .. } => *name,
         GenericParam::Const(name, _) => *name,
     }).collect()
-}
-
-/// Collect the names a match pattern binds, appending them to `out`. Only
-/// destructuring patterns bind anything: a `Variant`'s positional fields and a
-/// `StructVariant`'s named ones, each of which is a `Bind` (naming it) or a
-/// `Wildcard` (ignoring it).
-fn bind_pattern<'a>(pat: &PatternNode<'a>, out: &mut Vec<&'a str>) {
-    match pat {
-        PatternNode::Bind(name) => out.push(name),
-        PatternNode::Variant { fields, .. } =>
-            for f in fields { bind_pattern(&f.value, out); },
-        PatternNode::StructVariant { fields, .. } =>
-            for (_, f) in fields { bind_pattern(&f.value, out); },
-        PatternNode::Wildcard | PatternNode::Int(_) | PatternNode::Path(_) => {}
-    }
 }
 
 /// Allocate a `DefId` for every top-level item in `m` and build the symbol table
@@ -758,14 +823,15 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump) -> Sym
                     linkage_of(m, name, attributes, false), &tl.span);
                 st.structs.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
             }
-            // enums live in the type namespace like structs, but their name is
-            // kept stable (unmangled) so the `E::V` variant refs that pass through
-            // resolution unchanged still line up in typecheck. Stage-1 limitation:
-            // enum type names must be globally unique across modules - which is
-            // why the linkage is `Fixed` regardless of module.
-            TopLevelNode::Enum { name, is_pub, .. } => {
-                def(defs, DefKind::Enum, name, *is_pub, Linkage::Fixed(name), &tl.span);
-                st.structs.insert(name, Sym { name, is_pub: *is_pub });
+            // enums live in the type namespace like structs, and are mangled like
+            // them. That is only sound because every `E::V` reference - in call,
+            // value, struct-literal *and* pattern position - is rewritten to the
+            // enum's final name; leaving any one of those unrewritten is why enum
+            // names used to be forced globally unique.
+            TopLevelNode::Enum { name, is_pub, attributes, .. } => {
+                let id = def(defs, DefKind::Enum, name, *is_pub,
+                    linkage_of(m, name, attributes, false), &tl.span);
+                st.structs.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
             }
             // globals live in the callable/value namespace (referenced as vars).
             TopLevelNode::Global { name, is_pub, attributes, .. } => {
@@ -773,13 +839,14 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump) -> Sym
                     linkage_of(m, name, attributes, false), &tl.span);
                 st.fns.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
             }
-            // traits live in the type namespace like structs/enums, and like enums
-            // their name is kept stable so bounds (`T: Display`) and conformance
-            // records line up across modules. Stage-2 limitation: trait names must
-            // be globally unique.
+            // traits live in the type namespace like structs/enums, and are mangled
+            // like them. Sound because trait *bounds* (`T: Display`) and the trait
+            // side of each conformance record are rewritten too; a trait declared
+            // in one module no longer reserves its name program-wide.
             TopLevelNode::Trait { name, is_pub, .. } => {
-                def(defs, DefKind::Trait, name, *is_pub, Linkage::Fixed(name), &tl.span);
-                st.structs.insert(name, Sym { name, is_pub: *is_pub });
+                let id = def(defs, DefKind::Trait, name, *is_pub,
+                    linkage_of(m, name, &[], false), &tl.span);
+                st.structs.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
             }
             // `extend` blocks were lowered to functions in `lower_methods`.
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before symtab"),
@@ -1036,6 +1103,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         let scopes = &all_scopes[id];
         let mut rw = Rewriter {
             scopes,
+            arena,
             members: defs.members(),
             errs: &mut errs,
             locals: Vec::new(),

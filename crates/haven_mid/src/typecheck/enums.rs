@@ -96,15 +96,20 @@ pub(crate) fn check_variant_pattern<'a>(cx: &Context<'a>, en: &'a str, path: &'a
 -> Result<&'a str, Error> {
     let (pat_enum, variant) = path.split_once("::")
         .ok_or_else(|| Error { msg: format!("invalid enum pattern `{}`", path), span: span.clone() })?;
-    // `en` may be a monomorphized instance name (`Option$i32`): the surface
-    // pattern is written against the ORIGINAL generic enum name (`Option::Some`),
-    // never the mangled one - mono rewrites construction call/struct-literal sites
-    // to the mangled name, but never touches match-pattern text (it has no type
-    // info to know which instantiation a bare pattern refers to; see mono.rs).
-    // `$` can't appear in a source identifier (mangling's own injectivity
-    // invariant), so stripping at the first `$` recovers the declared base name.
-    let en_base = en.split('$').next().unwrap_or(en);
-    if pat_enum != en_base {
+    // `en` may be a monomorphized instance (`std.option$Option$i32`) while the
+    // pattern names the generic template (`std.option$Option::Some`): mono rewrites
+    // construction call/struct-literal sites to the instance name, but never
+    // touches match-pattern text (it has no type info to know which instantiation
+    // a bare pattern refers to; see mono.rs).
+    //
+    // So the pattern's enum matches if it *is* `en`, or if `en` is one of its
+    // instances - i.e. `en` is `pat_enum` followed by a `$`-separated argument
+    // list. Requiring the `$` boundary is what keeps enum `Foo` from matching an
+    // instance of a different enum `FooBar`.
+    let is_instance = en.len() > pat_enum.len()
+        && en.starts_with(pat_enum)
+        && en.as_bytes()[pat_enum.len()] == b'$';
+    if pat_enum != en && !is_instance {
         return Err(Error { msg: format!("pattern `{}` is not a variant of enum '{}'", path, en), span: span.clone() });
     }
     if !cx.enums[en].variants.contains_key(variant) {

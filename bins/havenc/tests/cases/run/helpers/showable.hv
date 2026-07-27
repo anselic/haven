@@ -1,0 +1,13 @@
+// Helper for `run/test_trait_sig_xmod_type.hv`. Not collected by the harness.
+//
+// A trait declared in one module whose method signature names a type owned by a
+// THIRD module. This is the shape of the bug that started the module-system
+// work: `trait Display { proc display(*self) String; }` in `std/prelude.hv`,
+// which imports no `String`. Unresolved names now fail at the declaration, and
+// once the import is present the trait's `String` and the implementor's `String`
+// are the same type.
+import std/string { String }
+
+pub trait Show {
+    proc show(*self) String;
+}
