@@ -36,8 +36,11 @@ fn main() {
     // `files` holds every loaded module's path + source, indexed by the `FileId`
     // its spans carry, so diagnostics below quote the span's owning module - not
     // just the entry file.
-    let (ast, files, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
-        Ok(triple) => triple,
+    // `_defs` owns every top-level definition's identity and is what produced the
+    // symbol names now in `ast`. Nothing downstream consumes it yet - the later
+    // stages still work off those names - so it is only kept alive here.
+    let (ast, files, _defs, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
+        Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };
 

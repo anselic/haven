@@ -68,6 +68,7 @@ use bumpalo::Bump;
 
 use haven_common::ast::*;
 use crate::parse;
+use haven_common::defs::{Def, DefKind, DefId, Defs, Linkage, ModId};
 use haven_common::diag::{self, Files};
 use haven_common::intrinsics::Intrinsic;
 
@@ -94,8 +95,8 @@ struct Module<'a> {
     /// its canonical key (absolute path, or `std/...`, or `<prelude>`) and source
     /// text are stored there rather than duplicated here.
     file: FileId,
-    /// mangling prefix, unique per module, e.g. `m2_math`.
-    prefix: String,
+    /// this module's entry in `Defs`, which owns its symbol slug.
+    mid: ModId,
     is_entry: bool,
     imports: Vec<Import<'a>>,
     /// canonical key of each import (parallel to `imports`), or `None` if it
@@ -131,36 +132,20 @@ fn is_export(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| a.value.name == "export")
 }
 
-/// Name a top-level fn/struct is emitted under: prefixed with the module prefix,
-/// unless it must keep a stable spelling (`extern` link names and `@export`ed
-/// items keep theirs; the entry `main` stays `main`).
-fn final_fn_name<'a>(m: &Module<'_>, name: &str, attrs: &[Attribute], is_extern: bool, arena: &'a Bump) -> &'a str {
-    // entry module is unique so its names can't clash with the prefixed imported
-    // ones; leaving it unmangled keeps single-file diagnostics as they were.
+/// Whether an item keeps its source spelling as its emitted symbol, or gets the
+/// module slug prefixed. One rule, one place - this used to be re-derived by
+/// three near-identical `final_*_name` helpers, of which only the fn one knew
+/// about `extern`.
+///
+/// * `extern` - the name *is* the C link symbol.
+/// * `@export` - a host looks the symbol up by that name.
+/// * the entry module - its names can't clash with the mangled imported ones,
+///   and single-file diagnostics read better unmangled.
+fn linkage_of<'a>(m: &Module<'_>, name: &'a str, attrs: &[Attribute], is_extern: bool) -> Linkage<'a> {
     if is_extern || is_export(attrs) || m.is_entry {
-        arena.alloc_str(name)
+        Linkage::Fixed(name)
     } else {
-        arena.alloc_str(&format!("{}${}", m.prefix, name))
-    }
-}
-
-fn final_struct_name<'a>(m: &Module<'_>, name: &str, attrs: &[Attribute], arena: &'a Bump) -> &'a str {
-    if is_export(attrs) || m.is_entry {
-        arena.alloc_str(name)
-    } else {
-        arena.alloc_str(&format!("{}${}", m.prefix, name))
-    }
-}
-
-/// Final emitted name for a module-level global. Same rule as functions: an
-/// `@export`ed or entry-module global keeps its source name (a host looks the
-/// symbol up by that name), everything else is prefixed to avoid cross-module
-/// collisions.
-fn final_global_name<'a>(m: &Module<'_>, name: &str, attrs: &[Attribute], arena: &'a Bump) -> &'a str {
-    if is_export(attrs) || m.is_entry {
-        arena.alloc_str(name)
-    } else {
-        arena.alloc_str(&format!("{}${}", m.prefix, name))
+        Linkage::Mangled
     }
 }
 
@@ -703,36 +688,62 @@ fn bind_pattern<'a>(pat: &PatternNode<'a>, out: &mut Vec<&'a str>) {
     }
 }
 
-/// Build the symbol table a module exposes (its final emitted names).
-fn build_symtab<'a>(m: &Module<'a>, arena: &'a Bump) -> SymTab<'a> {
+/// Allocate a `DefId` for every top-level item in `m` and build the symbol table
+/// the module exposes.
+///
+/// This is where definition identity is minted. The emitted name in each `Sym`
+/// now comes from `Defs::symbol` rather than being formatted here, so mangling
+/// lives in exactly one function. The names themselves are unchanged in shape
+/// (`<prefix>$<name>`); only the prefix's derivation moved, from an enqueue index
+/// to the module's path.
+fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump) -> SymTab<'a> {
     let mut st = SymTab::default();
+    // register the def, then ask `Defs` what it is emitted as.
+    let def = |defs: &mut Defs<'a>, kind, name: &'a str, is_pub: bool,
+                   linkage, span: &Span| -> DefId {
+        defs.alloc(Def {
+            module: m.mid, kind, source_name: name, is_pub, linkage, span: *span,
+        })
+    };
+
     for tl in &m.items {
         match &tl.value {
             TopLevelNode::Function { name, is_pub, attributes, .. } => {
-                st.fns.insert(name, Sym { name: final_fn_name(m, name, attributes, false, arena), is_pub: *is_pub });
+                let id = def(defs, DefKind::Fn, name, *is_pub,
+                    linkage_of(m, name, attributes, false), &tl.span);
+                st.fns.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
             }
             TopLevelNode::Extern { name, is_pub, attributes, .. } => {
-                st.fns.insert(name, Sym { name: final_fn_name(m, name, attributes, true, arena), is_pub: *is_pub });
+                let id = def(defs, DefKind::Extern, name, *is_pub,
+                    linkage_of(m, name, attributes, true), &tl.span);
+                st.fns.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
             }
             TopLevelNode::Struct { name, is_pub, attributes, .. } => {
-                st.structs.insert(name, Sym { name: final_struct_name(m, name, attributes, arena), is_pub: *is_pub });
+                let id = def(defs, DefKind::Struct, name, *is_pub,
+                    linkage_of(m, name, attributes, false), &tl.span);
+                st.structs.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
             }
             // enums live in the type namespace like structs, but their name is
             // kept stable (unmangled) so the `E::V` variant refs that pass through
             // resolution unchanged still line up in typecheck. Stage-1 limitation:
-            // enum type names must be globally unique across modules.
+            // enum type names must be globally unique across modules - which is
+            // why the linkage is `Fixed` regardless of module.
             TopLevelNode::Enum { name, is_pub, .. } => {
+                def(defs, DefKind::Enum, name, *is_pub, Linkage::Fixed(name), &tl.span);
                 st.structs.insert(name, Sym { name, is_pub: *is_pub });
             }
             // globals live in the callable/value namespace (referenced as vars).
             TopLevelNode::Global { name, is_pub, attributes, .. } => {
-                st.fns.insert(name, Sym { name: final_global_name(m, name, attributes, arena), is_pub: *is_pub });
+                let id = def(defs, DefKind::Global, name, *is_pub,
+                    linkage_of(m, name, attributes, false), &tl.span);
+                st.fns.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
             }
-            // traits live in the type namespace like structs/enums, but their
-            // name is kept stable (unmangled) so bounds (`T: Display`) and
-            // conformance records line up across modules - Stage-2 limitation:
-            // trait names must be globally unique, like enum names.
+            // traits live in the type namespace like structs/enums, and like enums
+            // their name is kept stable so bounds (`T: Display`) and conformance
+            // records line up across modules. Stage-2 limitation: trait names must
+            // be globally unique.
             TopLevelNode::Trait { name, is_pub, .. } => {
+                def(defs, DefKind::Trait, name, *is_pub, Linkage::Fixed(name), &tl.span);
                 st.structs.insert(name, Sym { name, is_pub: *is_pub });
             }
             // `extend` blocks were lowered to functions in `lower_methods`.
@@ -743,7 +754,7 @@ fn build_symtab<'a>(m: &Module<'a>, arena: &'a Bump) -> SymTab<'a> {
 }
 
 pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a Bump)
-    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Vec<ImplDecl<'a>>), ()>
+    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>), ()>
 {
     // a module we've decided to load but haven't parsed yet.
     struct Pending<'a> {
@@ -781,6 +792,11 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
             return Err(());
         }
     };
+    // user module symbol slugs are relative to the entry file's directory, so a
+    // build is reproducible across machines (the canonical key is absolute, and
+    // would otherwise bake the developer's home directory into every symbol).
+    let entry_dir: Option<PathBuf> = entry_path.parent().map(|d| d.to_path_buf());
+
     worklist.push_back(Pending {
         key: entry_path.to_string_lossy().into_owned(),
         src: entry_src,
@@ -792,6 +808,9 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
     // spans carry. filled in as modules are popped, so a lex/parse error can quote
     // the module that produced it.
     let mut files: Files<'a> = Files::new();
+    // definition + module identities. modules register here as they're popped, so
+    // a module's symbol slug is fixed before any of its items are named.
+    let mut defs: Defs<'a> = Defs::new();
     let mut modules: Vec<Module<'a>> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut had_error = false;
@@ -809,14 +828,11 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
             Err(()) => { had_error = true; continue; }
         };
 
-        // FIXME: prefix is `m{id}_{basename}` and `id` is enqueue-order, so
-        // emitted symbol names shift whenever unrelated imports are added/removed.
-        // fine within a single link, bad for --shared/--static-lib ABI and for
-        // reproducible IR diffs. want a stable (content/path-based) key instead.
-        let prefix = format!("m{}_{}", id, p.key
-            .rsplit(['/', '\\']).next().unwrap_or("mod")
-            .trim_end_matches(".hv")
-            .replace(|c: char| !c.is_alphanumeric(), "_"));
+        // the module's symbol slug is derived from its *path* (see
+        // `defs::module_slug`), so it no longer shifts when an unrelated import
+        // is added or removed - which the old `m{id}_{basename}` prefix did, `id`
+        // being an enqueue index.
+        let mid = defs.add_module(p.key.clone(), file, p.is_entry, entry_dir.as_deref());
 
         // resolve + enqueue each import. errors point at the import statement in
         // this module.
@@ -849,7 +865,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
 
         modules.push(Module {
             file,
-            prefix,
+            mid,
             is_entry: p.is_entry,
             imports,
             import_keys,
@@ -862,8 +878,11 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         return Err(());
     }
 
-    // symbol table for every module (indexed by module id).
-    let symtabs: Vec<SymTab> = modules.iter().map(|m| build_symtab(m, arena)).collect();
+    // symbol table for every module (indexed by module id). also where each
+    // top-level item gets its `DefId`.
+    let symtabs: Vec<SymTab> = modules.iter()
+        .map(|m| build_symtab(m, &mut defs, arena))
+        .collect();
     let prelude_id = if has_prelude { Some(0usize) } else { None };
 
     let mut errs: Vec<Error> = Vec::new();
@@ -1068,5 +1087,5 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         return Err(());
     }
 
-    Ok((out, files, impls))
+    Ok((out, files, defs, impls))
 }

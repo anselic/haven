@@ -82,21 +82,21 @@ struct Mono<'p, 'a> {
     queue: VecDeque<Instantiation<'a>>,
     /// mangled name per instantiation we've already asked for, keyed by the
     /// mangled string, so repeated call sites reuse one instance (one alloc).
-    seen: HashMap<String, &'a str>,
+    seen: HashMap<InstanceKey<'a>, &'a str>,
     /// generic struct templates, by name (`Option` -> `struct Option<T> {...}`).
     struct_templates: HashMap<&'a str, &'p TopLevel<'a>>,
     /// generic-struct instantiations still to build.
     struct_queue: VecDeque<StructInstantiation<'a>>,
     /// mangled name per struct instance already requested, keyed by the mangled
     /// string, so every concrete `Option$i32` use shares one emitted struct.
-    struct_seen: HashMap<String, &'a str>,
+    struct_seen: HashMap<InstanceKey<'a>, &'a str>,
     /// generic enum templates, by name (`Option` -> `enum Option<T> {...}`).
     enum_templates: HashMap<&'a str, &'p TopLevel<'a>>,
     /// generic-enum instantiations still to build.
     enum_queue: VecDeque<EnumInstantiation<'a>>,
     /// mangled name per enum instance already requested, keyed by the mangled
     /// string, so every concrete `Option$i32` use shares one emitted enum.
-    enum_seen: HashMap<String, &'a str>,
+    enum_seen: HashMap<InstanceKey<'a>, &'a str>,
     /// best-effort span for the context currently being rebuilt, so a struct or
     /// enum instance requested deep inside `subst_ty` (which has no span of its
     /// own) still gets a source location for the depth-limit error.
@@ -130,10 +130,17 @@ impl<'a> Bindings<'a> {
 
 /// A fully concrete generic argument at an instantiation site: the value a type
 /// or const param is specialized to. Keys the instance cache and mangled name.
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum ConcreteArg<'a> {
     Type(Type<'a>),
     Const(usize),
 }
+
+/// What identifies one instantiation: the template's name plus the concrete
+/// arguments it was specialized with. The instance caches key on *this* rather
+/// than on the mangled string, so `mangle_ty` no longer has to be injective for
+/// the compiler to be correct - see its doc comment.
+type InstanceKey<'a> = (&'a str, Vec<ConcreteArg<'a>>);
 
 /// Substitute a bound const param with its literal value; leave literals and
 /// unbound params untouched.
@@ -169,9 +176,13 @@ fn const_literal<'a>(cb: &ConstBind<'a>) -> ExprNode<'a> {
 /// identifier and can never contain `.`, and the scalar keywords are a fixed set
 /// with no `.` - so a constructor fragment can never collide with a struct name
 /// or a scalar. Struct arguments are wrapped in balanced `.lt`/`.gt` so their
-/// boundaries stay unambiguous under nesting. (Two different types therefore
-/// never mangle alike, which matters because `request*` keys its instance cache
-/// on this string - a collision would silently share one instantiation.)
+/// boundaries stay unambiguous under nesting.
+///
+/// This is no longer load-bearing for *correctness*: `request*` keys its instance
+/// caches on `InstanceKey` (the structural args), not on this string. A collision
+/// would now mean two distinct instances emitted under one symbol - a duplicate
+/// symbol at link time, which is loud - rather than two instances silently
+/// sharing one instantiation.
 fn mangle_ty(ty: &Type) -> String {
     match ty {
         Type::Void => "void".into(),
@@ -251,11 +262,11 @@ impl<'p, 'a> Mono<'p, 'a> {
     /// Record an instantiation request, return its (stable) mangled name.
     /// de-dupes so each distinct instance is built exactly once.
     fn request(&mut self, base: &'a str, args: Vec<ConcreteArg<'a>>, span: Span) -> &'a str {
-        let key = mangle_name(base, &args);
+        let key = (base, args.clone());
         if let Some(&m) = self.seen.get(&key) {
             return m;
         }
-        let mangled: &'a str = self.arena.alloc_str(&key);
+        let mangled: &'a str = self.arena.alloc_str(&mangle_name(base, &args));
         self.seen.insert(key, mangled);
         self.display.insert(mangled, display_name(base, &args));
         self.queue.push_back(Instantiation { base, args, mangled, span });
@@ -266,11 +277,11 @@ impl<'p, 'a> Mono<'p, 'a> {
     /// (`Buf` + `[i32, 8]` -> `Buf$i32$8`). de-dupes so each concrete instance is
     /// built once. Enqueues onto the struct queue, drained after all functions.
     fn request_struct(&mut self, base: &'a str, args: Vec<ConcreteArg<'a>>) -> &'a str {
-        let key = mangle_name(base, &args);
+        let key = (base, args.clone());
         if let Some(&m) = self.struct_seen.get(&key) {
             return m;
         }
-        let mangled: &'a str = self.arena.alloc_str(&key);
+        let mangled: &'a str = self.arena.alloc_str(&mangle_name(base, &args));
         self.struct_seen.insert(key, mangled);
         self.display.insert(mangled, display_name(base, &args));
         self.struct_queue.push_back(StructInstantiation {
@@ -284,11 +295,11 @@ impl<'p, 'a> Mono<'p, 'a> {
     /// built once. Enqueues onto the enum queue, drained (interleaved with the
     /// struct queue, since either can request the other) after all functions.
     fn request_enum(&mut self, base: &'a str, args: Vec<ConcreteArg<'a>>) -> &'a str {
-        let key = mangle_name(base, &args);
+        let key = (base, args.clone());
         if let Some(&m) = self.enum_seen.get(&key) {
             return m;
         }
-        let mangled: &'a str = self.arena.alloc_str(&key);
+        let mangled: &'a str = self.arena.alloc_str(&mangle_name(base, &args));
         self.enum_seen.insert(key, mangled);
         self.display.insert(mangled, display_name(base, &args));
         self.enum_queue.push_back(EnumInstantiation {
