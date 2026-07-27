@@ -5,6 +5,7 @@ use chumsky::{
     prelude::*,
 };
 use haven_common::ast::*;
+use haven_common::defs::DefId;
 
 /// Field names for a tuple variant's payload: `Msg::Note(i32, i32)` gets fields
 /// `"0"` and `"1"`, so a tuple variant and a struct-style variant share one
@@ -350,7 +351,7 @@ fn parse_expr<'tks, 'src: 'tks>()
                         .delimited_by(just(Token::LBrace), just(Token::RBrace))
                 )
                 .map(|((name, type_args), fields)| ExprNode::Struct {
-                    name,
+                    name: NameRef::new(name),
                     type_args,
                     fields,
                 }),
@@ -360,7 +361,7 @@ fn parse_expr<'tks, 'src: 'tks>()
             // apart - it just records the segments and lets the module resolver
             // decide. A `::symbol` is only taken when followed by an ident, so a
             // turbofish `::<...>` is left for the call postfix.
-            path_of!(var).map(ExprNode::Path),
+            path_of!(var).map(|p| ExprNode::Path(NameRef::new(p))),
             expr.clone()
                 .separated_by(just(Token::Comma))
                 .allow_leading()
@@ -770,10 +771,13 @@ fn parse_stmt<'tks, 'src: 'tks>()
                 variant_tail.map(PatTail::Tuple),
                 struct_variant_tail.map(PatTail::Struct),
             )).or_not())
-            .map(|(path, tail)| match tail {
-                Some(PatTail::Tuple(fields))  => PatternNode::Variant { path, fields },
-                Some(PatTail::Struct(fields)) => PatternNode::StructVariant { path, fields },
-                None => PatternNode::Path(path),
+            .map(|(path, tail)| {
+                let path = NameRef::new(path);
+                match tail {
+                    Some(PatTail::Tuple(fields))  => PatternNode::Variant { path, fields },
+                    Some(PatTail::Struct(fields)) => PatternNode::StructVariant { path, fields },
+                    None => PatternNode::Path(path),
+                }
             });
         let wild_pat = var.try_map(|s, span| if *s == "_" {
             Ok(PatternNode::Wildcard)
@@ -877,7 +881,7 @@ fn parse_method<'tks, 'src: 'tks>()
             .then(
                 just(Token::Colon)
                     .ignore_then(
-                        var.map(|s| *s)
+                        var.map(|s| NameRef::new(Path::single(*s)))
                             .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
                             .at_least(1)
                             .collect::<Vec<_>>())
@@ -1008,7 +1012,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
             .then(
                 just(Token::Colon)
                     .ignore_then(
-                        var.map(|s| *s)
+                        var.map(|s| NameRef::new(Path::single(*s)))
                             .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
                             .at_least(1)
                             .collect::<Vec<_>>())
@@ -1061,6 +1065,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         )
         .map(|((((((attributes, is_pub), name), generics), params), return_type), body)| (TopLevelNode::Function {
             name,
+            def: DefId::UNRESOLVED,
             is_pub,
             attributes,
             generics,
@@ -1086,6 +1091,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .then_ignore(just(Token::Semicolon))
         .map(|(((((attributes, is_pub), name), generics), params), return_type)| (TopLevelNode::Extern {
             name,
+            def: DefId::UNRESOLVED,
             is_pub,
             attributes,
             generics,
@@ -1112,6 +1118,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         )
         .map(|((((attributes, is_pub), name), generics), (fields, methods))| (TopLevelNode::Struct {
             name,
+            def: DefId::UNRESOLVED,
             is_pub,
             attributes,
             generics,
@@ -1129,6 +1136,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .then_ignore(just(Token::Semicolon))
         .map(|((((attributes, is_pub), name), ty), value)| (TopLevelNode::Global {
             name,
+            def: DefId::UNRESOLVED,
             is_pub,
             attributes,
             ty,
@@ -1192,6 +1200,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         )
         .map(|((((attributes, is_pub), name), generics), (variants, methods))| (TopLevelNode::Enum {
             name,
+            def: DefId::UNRESOLVED,
             is_pub,
             attributes,
             generics,
@@ -1229,7 +1238,12 @@ fn parse_toplevel<'tks, 'src: 'tks>()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|((is_pub, name), methods)| (TopLevelNode::Trait { name, is_pub, methods }, Vec::new()));
+        .map(|((is_pub, name), methods)| (TopLevelNode::Trait {
+            name,
+            def: DefId::UNRESOLVED,
+            is_pub,
+            methods,
+        }, Vec::new()));
 
     choice((
         function,

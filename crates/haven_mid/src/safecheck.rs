@@ -242,7 +242,7 @@ pub fn alloc_check_program<'a>(
 
     // mono rewrites generic calls to their mangled instance name; prefer the
     // friendly spelling it recorded (`alloc::<Vec2>`) over `std.alloc$alloc$Vec2`
-    let show = |n: &'a str| defs.show(n);
+    let show = |n: &'a str| defs.show_symbol(n);
 
     // report each `@alloc(false)` function that came out dirty, pointing at the
     // offending immediate calls in its body. dirtiness always propagates through

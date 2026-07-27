@@ -109,7 +109,7 @@ fn main() {
                 std::process::exit(1);
             });
 
-            let mil = mil::lower(&mono_ast, &cx);
+            let mil = mil::lower(&mono_ast, &cx, &defs, &arena);
             let llvm_ir = llvm::emit(mil);
 
             let llvm_ir_output_path = args.output.with_extension("ll");

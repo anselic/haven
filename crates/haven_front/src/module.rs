@@ -128,7 +128,11 @@ struct Module<'a> {
 /// imports.
 #[derive(Clone, Copy)]
 struct Sym<'a> {
+    /// The symbol it is emitted under.
     name: &'a str,
+    /// What it *is*. Two modules may each export a `Buf`; these differ even
+    /// when — for an `@export`ed or entry-module item — the names do not.
+    def: DefId,
     is_pub: bool,
 }
 
@@ -293,6 +297,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
             synthesized.push(Metadata::new(
                 TopLevelNode::Function {
                     name: fname,
+                    def: DefId::UNRESOLVED,
                     is_pub: mnode.is_pub,
                     attributes: mnode.attributes.clone(),
                     generics: mnode.generics.clone(),
@@ -351,12 +356,30 @@ fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'
 /// Name-resolution scopes for one module.
 #[derive(Default)]
 struct Scopes<'a> {
-    /// unqualified callable names in scope -> final emitted name.
-    calls: HashMap<&'a str, &'a str>,
-    /// unqualified struct type names in scope -> final emitted name.
-    types: HashMap<&'a str, &'a str>,
-    /// `qualifier -> (symbol -> final name)` for selective imports.
-    quals: HashMap<&'a str, HashMap<&'a str, &'a str>>,
+    /// unqualified callable names in scope: functions, externs, globals.
+    calls: HashMap<&'a str, Sym<'a>>,
+    /// unqualified type names in scope: structs, enums and traits.
+    types: HashMap<&'a str, Sym<'a>>,
+    /// `qualifier -> that module's exports`, for whole-module imports.
+    quals: HashMap<&'a str, QualScope<'a>>,
+}
+
+/// What a whole-module import (`import std/math`) makes reachable as
+/// `math::sym`. Split by namespace like [`Scopes`] itself, so a module that
+/// exports both a `Buf` type and a `Buf` function doesn't have one hide the
+/// other — which a single flat map did, structs being inserted last.
+#[derive(Default)]
+struct QualScope<'a> {
+    calls: HashMap<&'a str, Sym<'a>>,
+    types: HashMap<&'a str, Sym<'a>>,
+}
+
+/// What [`Rewriter::type_head`] resolved a written type path to: a definition,
+/// or an abstract stand-in (a generic parameter, or `Self` in a trait method
+/// signature) that only typecheck can give meaning to.
+enum TypeHead<'a> {
+    Def(DefId),
+    Param(&'a str),
 }
 
 /// Holds the per-module scopes and error sink while rewriting a module's AST in
@@ -403,9 +426,9 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// variant), struct-literal position (`E::V { .. }`) and match patterns. Miss
     /// any one of them and the enum's name has to stay globally unique, which is
     /// exactly the constraint this lifts.
-    fn variant_path(&mut self, path: &mut Path<'a>) -> bool {
-        let Some(&ty) = self.scopes.types.get(path.segments[0]) else { return false };
-        *path = path.with_head(ty);
+    fn variant_path(&mut self, r: &mut NameRef<'a>) -> bool {
+        let Some(sym) = self.scopes.types.get(r.path.segments[0]) else { return false };
+        r.def = sym.def;
         true
     }
 
@@ -416,8 +439,8 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         for g in generics.iter_mut() {
             let GenericParam::Type { bounds, .. } = g else { continue };
             for b in bounds.iter_mut() {
-                match self.scopes.types.get(*b) {
-                    Some(&f) => *b = f,
+                match self.scopes.types.get(b.path.last()) {
+                    Some(sym) => b.def = sym.def,
                     None => self.error_here(format!("unknown trait '{}'", b)),
                 }
             }
@@ -459,9 +482,11 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 for a in args.iter_mut() {
                     if let GenericArg::Type(t) = a { self.ty(t, gparams); }
                 }
-                let name = self.type_head(path, gparams);
                 let args = std::mem::take(args);
-                *ty = Type::Struct { name, args };
+                *ty = match self.type_head(path, gparams) {
+                    TypeHead::Def(def) => Type::Named { def, args },
+                    TypeHead::Param(name) => Type::Param(name),
+                };
             }
             Type::Pointer(inner)
             | Type::Array(inner, _)
@@ -475,42 +500,43 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         }
     }
 
-    /// The final emitted name a written type path refers to. Reports an error and
-    /// falls back to the last segment if it resolves to nothing - letting it
-    /// through used to leave the source spelling in place, which then failed much
-    /// later as a mismatch against some *other* module's mangled name (see the
-    /// `Display`/`String` prelude bug).
-    fn type_head(&mut self, path: &Path<'a>, gparams: &HashSet<&str>) -> &'a str {
+    /// What a written type path denotes.
+    ///
+    /// An unresolvable path is an error here, and falls back to an abstract
+    /// `Param` — never to a real identity, so a bad name cannot be mistaken for
+    /// some other module's type. Errors are fatal before typecheck runs, so the
+    /// fallback exists only to let resolution finish and report the rest.
+    fn type_head(&mut self, path: &Path<'a>, gparams: &HashSet<&str>) -> TypeHead<'a> {
         if let Some(one) = path.as_single() {
             // a generic parameter of the enclosing item is a type param, not a
             // named type; `Self` in a trait method signature stands for the
             // implementing type and typecheck substitutes it per impl. Neither
-            // resolves through a module scope.
-            if gparams.contains(one) || one == "Self" { return one; }
+            // resolves through a module scope, and neither has an identity.
+            if gparams.contains(one) || one == "Self" { return TypeHead::Param(one); }
             return match self.scopes.types.get(one) {
-                Some(&f) => f,
+                Some(sym) => TypeHead::Def(sym.def),
                 None => {
                     self.error_here(format!("unknown type '{}'", one));
-                    one
+                    TypeHead::Param(one)
                 }
             };
         }
         let Some((qual, sym)) = path.as_variant() else {
             self.error_here(format!(
                 "'{}' has too many `::` segments; only `qualifier::Type` is supported", path));
-            return path.last();
+            return TypeHead::Param(path.last());
         };
-        match self.scopes.quals.get(qual).map(|m| m.get(sym)) {
-            Some(Some(&f)) => f,
+        match self.scopes.quals.get(qual).map(|m| m.types.get(sym)) {
+            Some(Some(s)) => TypeHead::Def(s.def),
             Some(None) => {
                 self.error_here(format!(
                     "type '{}' is not imported from module qualifier '{}'", sym, qual));
-                sym
+                TypeHead::Param(sym)
             }
             None => {
                 self.error_here(format!(
                     "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual));
-                sym
+                TypeHead::Param(sym)
             }
         }
     }
@@ -528,7 +554,8 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// `ExprNode::Path` - the one shape that survives resolution is an enum
     /// variant, whose head segment has been rewritten to the enum's final name in
     /// place.
-    fn value_path(&mut self, path: &mut Path<'a>, span: &Span, in_call: bool) -> Option<&'a str> {
+    fn value_path(&mut self, r: &mut NameRef<'a>, span: &Span, in_call: bool) -> Option<&'a str> {
+        let path = &mut r.path;
         if let Some(one) = path.as_single() {
             if self.is_local(one) {
                 // a param, `let`, or match-arm binding shadows any top-level
@@ -536,7 +563,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 // indirect call through a value, not a reference to the symbol.
                 return Some(one);
             }
-            if let Some(&f) = self.scopes.calls.get(one) { return Some(f); }
+            if let Some(sym) = self.scopes.calls.get(one) { return Some(sym.name); }
             if in_call && Intrinsic::lookup(one).is_some() {
                 // a compiler intrinsic (`sizeof`, `null`, `__simd_*`): not declared
                 // in any module, resolved by the typechecker. leave it untouched.
@@ -558,6 +585,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 "'{}' has too many `::` segments; only `qualifier::name` is supported", path));
             return Some(path.last());
         };
+        let (qual, sym) = (qual, sym);
 
         // `Type::sym` where `Type` is a known type: an associated-function call
         // `Point::new(...)`, or a data-enum variant `Enum::Variant`. Both are
@@ -569,17 +597,17 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         // this same module: no import form can name `Point$new` (`$` is unlexable),
         // so `import geo { Point }` + `Point::new()` was silently left unresolved.
         if let Some(&ty) = self.scopes.types.get(qual) {
-            if let Some(m) = self.members.get(&(ty, sym)) { return Some(m.name); }
-            // otherwise an enum variant: rewrite the enum half and leave the rest
-            // to typecheck's constructor/variant paths.
-            *path = path.with_head(ty);
+            if let Some(m) = self.members.get(&(ty.def, sym)) { return Some(m.name); }
+            // otherwise an enum variant: record which enum, and leave the rest to
+            // typecheck's constructor/variant paths.
+            r.def = ty.def;
             return None;
         }
 
         // a module-qualified value, `math::square`.
         match self.scopes.quals.get(qual) {
-            Some(map) => match map.get(sym) {
-                Some(&f) => Some(f),
+            Some(map) => match map.calls.get(sym) {
+                Some(s) => Some(s.name),
                 None => {
                     self.error(span, format!(
                         "'{}' is not imported from module qualifier '{}'", sym, qual));
@@ -612,18 +640,18 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 for a in args { self.expr(a, gparams); }
             }
             ExprNode::Struct { name, type_args, fields } => {
-                if let Some(one) = name.as_single() {
+                if let Some(one) = name.path.as_single() {
                     match self.scopes.types.get(one) {
-                        Some(&f) => *name = Path::single(f),
+                        Some(sym) => name.def = sym.def,
                         None => self.error_here(format!("unknown struct '{}'", one)),
                     }
-                } else if let Some((qual, sym)) = name.as_variant() {
+                } else if let Some((qual, sym)) = name.path.as_variant() {
                     if self.variant_path(name) {
                         // a struct-style enum variant literal, `Msg::Cc { id, val }`:
-                        // type-qualified, not module-qualified. the enum half is
-                        // rewritten above; typecheck routes the rest to the variant.
-                    } else if let Some(&f) = self.scopes.quals.get(qual).and_then(|m| m.get(sym)) {
-                        *name = Path::single(f);
+                        // type-qualified, not module-qualified. `def` is the enum;
+                        // typecheck routes the rest to the variant.
+                    } else if let Some(s) = self.scopes.quals.get(qual).and_then(|m| m.types.get(sym)) {
+                        name.def = s.def;
                     } else if self.scopes.quals.contains_key(qual) {
                         self.error_here(format!(
                             "type '{}' is not imported from module qualifier '{}'", sym, qual));
@@ -720,10 +748,12 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         // types, a trait method's signature); `stmt`/`expr` narrow it as they go.
         self.span = tl.span.clone();
         match &mut tl.value {
-            TopLevelNode::Function { name, generics, params, return_type, body, .. } => {
+            TopLevelNode::Function { name, def, generics, params, return_type, body, .. } => {
                 let gparams = generic_names(generics);
-                *name = self.scopes.calls.get(*name).copied()
+                let sym = *self.scopes.calls.get(*name)
                     .expect("a module's own callable is always in its own scope");
+                *name = sym.name;
+                *def = sym.def;
                 self.bounds(generics);
                 // a `const N: u64` generic param is read as an ordinary value in the
                 // body (`i + N`), so it binds like a param. only *type* params go in
@@ -741,26 +771,32 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 for s in body { self.stmt(s, &gparams); }
                 self.locals.clear();
             }
-            TopLevelNode::Extern { name, generics, params, return_type, .. } => {
+            TopLevelNode::Extern { name, def, generics, params, return_type, .. } => {
                 let gparams = generic_names(generics);
-                *name = self.scopes.calls.get(*name).copied()
+                let sym = *self.scopes.calls.get(*name)
                     .expect("a module's own callable is always in its own scope");
+                *name = sym.name;
+                *def = sym.def;
                 for (_, ty) in params { self.ty(ty, &gparams); }
                 self.ty(return_type, &gparams);
             }
-            TopLevelNode::Struct { name, generics, fields, .. } => {
+            TopLevelNode::Struct { name, def, generics, fields, .. } => {
                 // the struct's own type params shadow struct names when rewriting
                 // field types (a field `T` is a param, not a module type).
                 let gparams = generic_names(generics);
-                *name = self.scopes.types.get(*name).copied()
+                let sym = *self.scopes.types.get(*name)
                     .expect("a module's own struct is always in its own scope");
+                *name = sym.name;
+                *def = sym.def;
                 self.bounds(generics);
                 for (_, ty) in fields { self.ty(ty, &gparams); }
             }
-            TopLevelNode::Global { name, ty, value, .. } => {
+            TopLevelNode::Global { name, def, ty, value, .. } => {
                 let empty = HashSet::new();
-                *name = self.scopes.calls.get(*name).copied()
+                let sym = *self.scopes.calls.get(*name)
                     .expect("a module's own callable is always in its own scope");
+                *name = sym.name;
+                *def = sym.def;
                 self.ty(ty, &empty);
                 self.expr(value, &empty);
             }
@@ -769,10 +805,12 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // `variant_path`). A data-carrying variant's payload field types are
             // types like any other. The enum's own type params shadow module type
             // names (a payload `T` is a param, not a module type).
-            TopLevelNode::Enum { name, generics, variants, .. } => {
+            TopLevelNode::Enum { name, def, generics, variants, .. } => {
                 let gparams = generic_names(generics);
-                *name = self.scopes.types.get(*name).copied()
+                let sym = *self.scopes.types.get(*name)
                     .expect("a module's own enum is always in its own scope");
+                *name = sym.name;
+                *def = sym.def;
                 self.bounds(generics);
                 for (_, _, payload) in variants.iter_mut() {
                     for (_, ty) in payload.iter_mut() { self.ty(ty, &gparams); }
@@ -782,10 +820,12 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // be rewritten like any other - a `String` in `proc display(*self)
             // String` resolves to the imported struct's mangled name. `Self` is
             // left untouched (typecheck substitutes it per implementing type).
-            TopLevelNode::Trait { name, methods, .. } => {
+            TopLevelNode::Trait { name, def, methods, .. } => {
                 let empty = HashSet::new();
-                *name = self.scopes.types.get(*name).copied()
+                let sym = *self.scopes.types.get(*name)
                     .expect("a module's own trait is always in its own scope");
+                *name = sym.name;
+                *def = sym.def;
                 for m in methods.iter_mut() {
                     for (_, ty) in m.params.iter_mut() { self.ty(ty, &empty); }
                     self.ty(&mut m.return_type, &empty);
@@ -819,8 +859,10 @@ fn generic_names<'a>(generics: &[GenericParam<'a>]) -> HashSet<&'a str> {
 /// lives in exactly one function. The names themselves are unchanged in shape
 /// (`<prefix>$<name>`); only the prefix's derivation moved, from an enqueue index
 /// to the module's path.
-fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump) -> SymTab<'a> {
+fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
+                    errs: &mut Vec<Error>) -> SymTab<'a> {
     let mut st = SymTab::default();
+    let mut seen_types: HashSet<&'a str> = HashSet::new();
     // register the def, then ask `Defs` what it is emitted as.
     let def = |defs: &mut Defs<'a>, kind, name: &'a str, is_pub: bool,
                    linkage, span: &Span| -> DefId {
@@ -829,38 +871,70 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump) -> Sym
         })
     };
 
+    // Two declarations of the same type name in one module. This used to be
+    // caught in typecheck, whose tables were keyed by name so the second insert
+    // collided; keyed by identity they no longer do, and the module's own symbol
+    // table is where the collision is actually visible - and where the span
+    // points at the right module.
+    let mut dup: Vec<Error> = Vec::new();
+    for tl in &m.items {
+        let (kind, name) = match &tl.value {
+            TopLevelNode::Struct { name, .. } => ("type", *name),
+            TopLevelNode::Enum { name, .. } => ("type", *name),
+            TopLevelNode::Trait { name, .. } => ("trait", *name),
+            _ => continue,
+        };
+        if seen_types.contains(name) {
+            dup.push(Error::new(tl.span.clone(), format!(
+                "Duplicate {} definition '{}'", kind, name)));
+        }
+        seen_types.insert(name);
+    }
+    errs.append(&mut dup);
+
     for tl in &m.items {
         match &tl.value {
             TopLevelNode::Function { name, is_pub, attributes, .. } => {
                 let id = def(defs, DefKind::Fn, name, *is_pub,
                     linkage_of(m, name, attributes, false), &tl.span);
-                st.fns.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
+                st.fns.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             TopLevelNode::Extern { name, is_pub, attributes, .. } => {
                 let id = def(defs, DefKind::Extern, name, *is_pub,
                     linkage_of(m, name, attributes, true), &tl.span);
-                st.fns.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
+                st.fns.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             TopLevelNode::Struct { name, is_pub, attributes, .. } => {
                 let id = def(defs, DefKind::Struct, name, *is_pub,
                     linkage_of(m, name, attributes, false), &tl.span);
-                st.structs.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
+                st.structs.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             // enums live in the type namespace like structs, and are mangled like
             // them. That is only sound because every `E::V` reference - in call,
             // value, struct-literal *and* pattern position - is rewritten to the
             // enum's final name; leaving any one of those unrewritten is why enum
             // names used to be forced globally unique.
-            TopLevelNode::Enum { name, is_pub, attributes, .. } => {
+            TopLevelNode::Enum { name, is_pub, attributes, variants, .. } => {
                 let id = def(defs, DefKind::Enum, name, *is_pub,
                     linkage_of(m, name, attributes, false), &tl.span);
-                st.structs.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
+                let sym = defs.symbol(id, arena);
+                st.structs.insert(name, Sym { name: sym, def: id, is_pub: *is_pub });
+                // a data variant's payload is laid out as its own struct, so it
+                // needs an identity of its own. Minting it here - rather than
+                // where the mid end first needs it - keeps typecheck from having
+                // to invent identities, which matters because typecheck runs
+                // twice (before and after monomorphization) and would otherwise
+                // mint a second set on the second pass.
+                for (vname, _, payload) in variants {
+                    if payload.is_empty() { continue; }
+                    defs.add_payload(id, vname, arena.alloc_str(&format!("{}${}", sym, vname)));
+                }
             }
             // globals live in the callable/value namespace (referenced as vars).
             TopLevelNode::Global { name, is_pub, attributes, .. } => {
                 let id = def(defs, DefKind::Global, name, *is_pub,
                     linkage_of(m, name, attributes, false), &tl.span);
-                st.fns.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
+                st.fns.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             // traits live in the type namespace like structs/enums, and are mangled
             // like them. Sound because trait *bounds* (`T: Display`) and the trait
@@ -869,7 +943,7 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump) -> Sym
             TopLevelNode::Trait { name, is_pub, .. } => {
                 let id = def(defs, DefKind::Trait, name, *is_pub,
                     linkage_of(m, name, &[], false), &tl.span);
-                st.structs.insert(name, Sym { name: defs.symbol(id, arena), is_pub: *is_pub });
+                st.structs.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             // `extend` blocks were lowered to functions in `lower_methods`.
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before symtab"),
@@ -879,7 +953,7 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump) -> Sym
 }
 
 pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena: &'a Bump)
-    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>), ()>
+    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl>), ()>
 {
     // a module we've decided to load but haven't parsed yet.
     struct Pending<'a> {
@@ -1006,12 +1080,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
 
     // symbol table for every module (indexed by module id). also where each
     // top-level item gets its `DefId`.
+    let mut errs: Vec<Error> = Vec::new();
     let symtabs: Vec<SymTab> = modules.iter()
-        .map(|m| build_symtab(m, &mut defs, arena))
+        .map(|m| build_symtab(m, &mut defs, arena, &mut errs))
         .collect();
     let prelude_id = if has_prelude { Some(0usize) } else { None };
-
-    let mut errs: Vec<Error> = Vec::new();
 
     // pass 1: build every module's name-resolution scopes (owned; values are all
     // `&'a`, so `all_scopes` borrows nothing from `modules`/`symtabs`).
@@ -1024,8 +1097,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
         //    stays local to the prelude.
         if let Some(pid) = prelude_id {
             if id != pid {
-                for (&k, v) in &symtabs[pid].fns { if v.is_pub { scopes.calls.insert(k, v.name); } }
-                for (&k, v) in &symtabs[pid].structs { if v.is_pub { scopes.types.insert(k, v.name); } }
+                for (&k, v) in &symtabs[pid].fns { if v.is_pub { scopes.calls.insert(k, *v); } }
+                for (&k, v) in &symtabs[pid].structs { if v.is_pub { scopes.types.insert(k, *v); } }
             }
         }
 
@@ -1054,8 +1127,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
                     let map = scopes.quals.entry(qualifier).or_default();
                     // only `pub` items are importable; private ones are invisible
                     // outside their own module.
-                    for (&k, v) in &target.fns { if v.is_pub { map.insert(k, v.name); } }
-                    for (&k, v) in &target.structs { if v.is_pub { map.insert(k, v.name); } }
+                    for (&k, v) in &target.fns { if v.is_pub { map.calls.insert(k, *v); } }
+                    for (&k, v) in &target.structs { if v.is_pub { map.types.insert(k, *v); } }
                 }
                 Some(syms) => {
                     // selective: the named symbols visible unqualified. a name that
@@ -1068,21 +1141,21 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
                         let mut imported = false;
                         if let Some(f) = target.fns.get(sym).filter(|f| f.is_pub) {
                             imported = true;
-                            if from_import_calls.contains(sym) && scopes.calls.get(sym).copied() != Some(f.name) {
+                            if from_import_calls.contains(sym) && scopes.calls.get(sym).map(|s| s.def) != Some(f.def) {
                                 errs.push(Error::new(imp.span.clone(), format!(
                                     "'{}' is imported from more than one module; qualify it with a \
                                      whole-module `import` instead", sym)));
                             }
-                            scopes.calls.insert(sym, f.name);
+                            scopes.calls.insert(sym, *f);
                             from_import_calls.insert(sym);
                         }
                         if let Some(f) = target.structs.get(sym).filter(|f| f.is_pub) {
                             imported = true;
-                            if from_import_types.contains(sym) && scopes.types.get(sym).copied() != Some(f.name) {
+                            if from_import_types.contains(sym) && scopes.types.get(sym).map(|s| s.def) != Some(f.def) {
                                 errs.push(Error::new(imp.span.clone(), format!(
                                     "struct '{}' is imported from more than one module", sym)));
                             }
-                            scopes.types.insert(sym, f.name);
+                            scopes.types.insert(sym, *f);
                             from_import_types.insert(sym);
                         }
                         if !imported {
@@ -1100,8 +1173,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
 
         // 3. this module's own defs win over imports (inserted last). a module
         //    always sees all of its own symbols, `pub` or not.
-        for (&k, v) in &symtabs[id].fns { scopes.calls.insert(k, v.name); }
-        for (&k, v) in &symtabs[id].structs { scopes.types.insert(k, v.name); }
+        for (&k, v) in &symtabs[id].fns { scopes.calls.insert(k, *v); }
+        for (&k, v) in &symtabs[id].structs { scopes.types.insert(k, *v); }
 
         all_scopes.push(scopes);
     }
@@ -1115,13 +1188,16 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
     for (id, m) in modules.iter().enumerate() {
         let scopes = &all_scopes[id];
         for rm in &m.methods {
-            let ty = scopes.types.get(rm.target).copied().unwrap_or(rm.target);
-            let f = scopes.calls.get(rm.fn_name).copied().unwrap_or(rm.fn_name);
-            defs.add_member(ty, rm.name, Member { name: f, receiver: rm.receiver });
+            // an `extend` on an unknown type is reported when the block's `self`
+            // parameter is resolved; skip the member rather than inventing an
+            // identity for a type that doesn't exist.
+            let Some(ty) = scopes.types.get(rm.target) else { continue };
+            let f = scopes.calls.get(rm.fn_name).map(|s| s.name).unwrap_or(rm.fn_name);
+            defs.add_member(ty.def, rm.name, Member { name: f, receiver: rm.receiver });
         }
     }
 
-    let mut impls: Vec<ImplDecl<'a>> = Vec::new();
+    let mut impls: Vec<ImplDecl> = Vec::new();
     for (id, m) in modules.iter_mut().enumerate() {
         let scopes = &all_scopes[id];
         let mut rw = Rewriter {
@@ -1135,9 +1211,14 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
             rw.toplevel(tl);
         }
         for imp in &m.impls {
+            // as above: an `extend T: Trait` naming an unknown `T` or `Trait`
+            // has already produced an error through the type/bound paths, so
+            // dropping the record here loses no diagnostic.
+            let (Some(target), Some(trait_)) =
+                (scopes.types.get(imp.target), scopes.types.get(imp.trait_)) else { continue };
             impls.push(ImplDecl {
-                target: scopes.types.get(imp.target).copied().unwrap_or(imp.target),
-                trait_: scopes.types.get(imp.trait_).copied().unwrap_or(imp.trait_),
+                target: target.def,
+                trait_: trait_.def,
                 span: imp.span.clone(),
             });
         }

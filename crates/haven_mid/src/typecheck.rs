@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
-use haven_common::defs::Defs;
-use haven_common::layout;
+use haven_common::defs::{DefId, Defs};
+use haven_common::layout::{self, TypeInfo, TypeTable, EnumRepr};
 
 mod context;
 mod generics;
@@ -9,9 +9,9 @@ mod enums;
 mod infer;
 
 // Public surface re-exported for the rest of the crate (mil.rs) and the driver.
-pub use context::{Context, EnumDef, GenericFnSig, MethodCall, RecvAdjust, TraitDef, TraitMethodSig, ENUM_TAG_FIELD, ENUM_PAYLOAD_FIELD, enum_payload_struct_name};
+pub use context::{Context, EnumDef, GenericFnSig, MethodCall, RecvAdjust, TraitDef, TraitMethodSig, ENUM_TAG_FIELD, ENUM_PAYLOAD_FIELD};
 
-use generics::{resolve_type, check_const_scope, check_type_resolves, subst_self};
+use generics::{check_const_scope, check_type_resolves, subst_self};
 use enums::{enum_variant, enum_repr, enum_agg_deps_ready, payload_blob_type};
 use infer::{check_stmt, check_expr, always_returns};
 
@@ -20,8 +20,9 @@ use infer::{check_stmt, check_expr, always_returns};
 /// or I just don't know how to handle it.
 fn check_export_type<'a>(
     ty: &Type<'a>,
-    structs: &HashMap<&'a str, Vec<(&'a str, Type<'a>)>>,
-    enums: &HashMap<&'a str, EnumDef<'a>>,
+    types: &TypeTable<'a>,
+    enums: &HashMap<DefId, EnumDef<'a>>,
+    names: &HashMap<DefId, String>,
 ) -> Result<(), String> {
     match ty {
         // TODO check if this is correct
@@ -40,58 +41,59 @@ fn check_export_type<'a>(
         // *value* representation isn't a plain pointer. `*str` is fine - it is a
         // pointer to a pointer (`char**`).
         Type::Pointer(inner) => match &**inner {
-            Type::Struct { .. }
+            Type::Named { .. }
             | Type::Void | Type::Bool
             | Type::Int8 | Type::Int32 | Type::Int64
             | Type::Uint8 | Type::Uint32 | Type::Uint64
             | Type::Float32 | Type::Float64
             | Type::Str
             | Type::Pointer(_) => Ok(()),
-            _ => check_export_type(inner, structs, enums), // *[]f32, *simd<...> stay banned
+            _ => check_export_type(inner, types, enums, names), // *[]f32, *simd<...> stay banned
         },
         Type::Simd(_, _) =>
             Err(format!("SIMD type '{}' is not allowed in @export functions because its calling convention is target-specific and not guaranteed to match the expected caller, or that's what I'm told", ty)),
         Type::Function { .. } =>
             Err("function pointer types are not supported in @export functions".into()),
-        // A by-value struct is now ABI-lowered (SysV eightbyte classification),
-        // so it may cross the FFI boundary as long as every field is itself
-        // export-safe. Recurse so a struct hiding a slice/str/array is rejected.
-        Type::Struct { name, .. } => {
-            let fields = structs.get(name)
-                .ok_or_else(|| format!("unknown struct '{}'", name))?;
-            for (fname, fty) in fields {
-                check_export_type(fty, structs, enums)
-                    .map_err(|e| format!("field '{}' of struct '{}': {}", fname, name, e))?;
-            }
-            Ok(())
-        }
         Type::Param(_) =>
             Err("generic type parameters are not allowed in @export functions".into()),
-        // a field-less enum is its integer repr across FFI - a plain C enum.
-        Type::Enum { has_payload: false, .. } => Ok(()),
-        // a data-carrying enum is laid out as a `{ tag: repr, payload: union }`
-        // aggregate (see typecheck's data-enum pass 2), the same shape a C
-        // `struct { <repr> tag; union { ... }; }` tagged union would take -
+        // A named type. A by-value struct is ABI-lowered (SysV eightbyte
+        // classification), so it may cross the FFI boundary as long as every
+        // field is itself export-safe - recurse, so a struct hiding a
+        // slice/str/array is rejected.
+        //
+        // A field-less enum is its integer repr across FFI: a plain C enum,
+        // nothing to check. A data-carrying one is laid out as a `{ tag: repr,
+        // payload: union }` aggregate (see the data-enum pass below), the same
+        // shape a C `struct { <repr> tag; union { ... }; }` tagged union takes -
         // `haven_back::abi` classifies the payload as a real union of the variant
-        // payload structs (not raw bytes), so it may cross FFI as long as every
-        // variant's fields are themselves export-safe. That layout is identical
-        // whether or not `@repr` was written, but - mirroring Rust's requirement
-        // that `#[repr(C)]` be explicit before an enum is FFI-safe - we still
-        // require the author to have written it, so crossing the boundary is a
+        // payload structs, not raw bytes - so it may cross FFI as long as every
+        // variant's fields are export-safe. That layout is identical whether or
+        // not `@repr` was written, but - mirroring Rust's requirement that
+        // `#[repr(C)]` be explicit before an enum is FFI-safe - we still require
+        // the author to have written it, so crossing the boundary is a
         // deliberate, visible commitment rather than an accident of the default.
-        Type::Enum { has_payload: true, name, .. } => {
-            let def = enums.get(name)
-                .ok_or_else(|| format!("unknown enum '{}'", name))?;
-            if !def.has_explicit_repr {
-                return Err(format!(
-                    "data-carrying enum '{}' needs an explicit `@repr` (e.g. `@repr(C)`) \
-                     to cross an @export/extern boundary", name));
-            }
-            for (vname, fields) in &def.payloads {
-                for (fname, fty) in fields {
-                    check_export_type(fty, structs, enums)
-                        .map_err(|e| format!("field '{}' of variant '{}::{}': {}", fname, name, vname, e))?;
+        Type::Named { def, .. } => {
+            let name = names.get(def).cloned().unwrap_or_else(|| format!("#{}", def.0));
+            if let Some(edef) = enums.get(def) {
+                if !edef.has_payload { return Ok(()); }
+                if !edef.has_explicit_repr {
+                    return Err(format!(
+                        "data-carrying enum '{}' needs an explicit `@repr` (e.g. `@repr(C)`) \
+                         to cross an @export/extern boundary", name));
                 }
+                for (vname, fields) in &edef.payloads {
+                    for (fname, fty) in fields {
+                        check_export_type(fty, types, enums, names)
+                            .map_err(|e| format!("field '{}' of variant '{}::{}': {}", fname, name, vname, e))?;
+                    }
+                }
+                return Ok(());
+            }
+            let info = types.get(def)
+                .ok_or_else(|| format!("unknown struct '{}'", name))?;
+            for (fname, fty) in &info.fields {
+                check_export_type(fty, types, enums, names)
+                    .map_err(|e| format!("field '{}' of struct '{}': {}", fname, name, e))?;
             }
             Ok(())
         }
@@ -167,16 +169,16 @@ fn check_toplevel<'a>(
                 for (param_name, ty) in params {
                     // resolve enum names first (@export can't be generic) so an
                     // enum param is checked as its integer repr, not an unknown struct.
-                    let ty = resolve_type(&[], &cx.enums, ty);
-                    if let Err(msg) = check_export_type(&ty, &cx.structs, &cx.enums) {
+                    let ty = ty.clone();
+                    if let Err(msg) = check_export_type(&ty, &cx.types, &cx.enums, &cx.names) {
                         return Err(Error {
                             msg: format!("parameter '{}' in @export function '{}': {}", param_name, name, msg),
                             span: node.span.clone(),
                         });
                     }
                 }
-                let return_type = resolve_type(&[], &cx.enums, return_type);
-                if let Err(msg) = check_export_type(&return_type, &cx.structs, &cx.enums) {
+                let return_type = return_type.clone();
+                if let Err(msg) = check_export_type(&return_type, &cx.types, &cx.enums, &cx.names) {
                     return Err(Error {
                         msg: format!("return type in @export function '{}': {}", name, msg),
                         span: node.span.clone(),
@@ -198,14 +200,15 @@ fn check_toplevel<'a>(
             // trait bounds on this fn's type params, so a method call on a
             // `T`-typed receiver in the body resolves through the bound trait.
             cx.generic_bounds = generics.iter().filter_map(|g| match g {
-                GenericParam::Type { name, bounds } if !bounds.is_empty() => Some((*name, bounds.clone())),
+                GenericParam::Type { name, bounds } if !bounds.is_empty() =>
+                    Some((*name, bounds.iter().map(|b| b.def).collect())),
                 _ => None,
             }).collect();
             // every bound must name a declared trait.
             for g in generics {
                 if let GenericParam::Type { name: pn, bounds } = g {
                     for b in bounds {
-                        if !cx.traits.contains_key(b) {
+                        if !cx.traits.contains_key(&b.def) {
                             return Err(Error {
                                 msg: format!("unknown trait '{}' in bound '{}: {}' of '{}'", b, pn, b, name),
                                 span: node.span.clone(),
@@ -234,7 +237,7 @@ fn check_toplevel<'a>(
                 });
             }
 
-            let return_ty = resolve_type(&cx.generics, &cx.enums, return_type);
+            let return_ty = return_type.clone();
             if let Err(msg) = check_type_resolves(cx, &return_ty) {
                 return Err(Error {
                     msg: format!("return type of '{}': {}", name, msg),
@@ -255,7 +258,7 @@ fn check_toplevel<'a>(
 
             // push params into scope, resolving type-param references
             for (pname, ty) in params {
-                let resolved = resolve_type(&cx.generics, &cx.enums, ty);
+                let resolved = ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &resolved) {
                     return Err(Error {
                         msg: format!("parameter '{}' of '{}': {}", pname, name, msg),
@@ -295,13 +298,9 @@ fn check_toplevel<'a>(
         // extern declarations have no body to check, but their signature types
         // must still resolve (so an unknown or not-yet-supported generic struct
         // type is caught at typecheck, not by a codegen panic).
-        TopLevelNode::Extern { name, generics, params, return_type, .. } => {
-            let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                GenericParam::Type { name: n, .. } => Some(*n),
-                GenericParam::Const(_, _) => None,
-            }).collect();
+        TopLevelNode::Extern { name, params, return_type, .. } => {
             for (pname, ty) in params {
-                let resolved = resolve_type(&type_params, &cx.enums, ty);
+                let resolved = ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &resolved) {
                     return Err(Error {
                         msg: format!("parameter '{}' of extern '{}': {}", pname, name, msg),
@@ -309,7 +308,7 @@ fn check_toplevel<'a>(
                     });
                 }
             }
-            let resolved_ret = resolve_type(&type_params, &cx.enums, return_type);
+            let resolved_ret = return_type.clone();
             if let Err(msg) = check_type_resolves(cx, &resolved_ret) {
                 return Err(Error {
                     msg: format!("return type of extern '{}': {}", name, msg),
@@ -321,10 +320,6 @@ fn check_toplevel<'a>(
         TopLevelNode::Struct { name, generics, fields, .. } => {
             // the struct's own type and const params are in scope inside its fields:
             // `T` resolves to `Param`, and a `[T; N]` size names the const param `N`.
-            let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                GenericParam::Type { name: n, .. } => Some(*n),
-                GenericParam::Const(_, _) => None,
-            }).collect();
             let const_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
                 GenericParam::Const(n, _) => Some(*n),
                 GenericParam::Type { .. } => None,
@@ -340,7 +335,7 @@ fn check_toplevel<'a>(
                 }
                 // resolve the struct's own type params to `Param` first, so they
                 // aren't reported as unknown struct names.
-                let resolved = resolve_type(&type_params, &cx.enums, field_ty);
+                let resolved = field_ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &resolved) {
                     return Err(Error {
                         msg: format!("In field '{}' of struct '{}': {}", field_name, name, msg),
@@ -384,7 +379,7 @@ fn check_toplevel<'a>(
 pub fn typecheck_program<'a>(
     cx: &mut Context<'a>,
     program: &[TopLevel<'a>],
-    impls: &[ImplDecl<'a>],
+    impls: &[ImplDecl],
     defs: &Defs<'a>,
 ) -> Vec<Error> {
     let mut errors = Vec::new();
@@ -396,27 +391,29 @@ pub fn typecheck_program<'a>(
     // instance -> template, for matching a template-named pattern against an
     // instance-typed scrutinee. Empty until mono has run.
     cx.instances = defs.instances().iter().map(|(&m, i)| (m, i.template)).collect();
+    // the synthetic payload struct of each data variant, minted at resolution
+    // (and by `mono` for each instance), so nothing here has to build one.
+    cx.payloads = defs.payloads().clone();
+    // how each definition reads in a diagnostic.
+    cx.load_names(defs);
 
     // --- forward declaration pass
 
-    // enums come first: a struct field or function parameter may name an enum
-    // type, and `resolve_type` needs the enum table to rewrite `Struct(name)`
-    // into `Type::Enum`.
+    // enums come first: a struct field or function parameter may name an enum,
+    // and the aggregate pass below needs every enum's repr already recorded.
+    //
+    // A duplicate declaration is caught at resolution now (two `struct Point` in
+    // one module collide in that module's symbol table), so there is nothing to
+    // check here: each declaration has its own identity by construction.
     for node in program {
-        if let TopLevelNode::Enum { name, attributes, generics, variants, .. } = &node.value {
-            if cx.enums.contains_key(name) || cx.structs.contains_key(name) {
-                errors.push(Error {
-                    msg: format!("Duplicate type definition '{}'", name),
-                    span: node.span.clone(),
-                });
-                continue;
-            }
+        if let TopLevelNode::Enum { def, name, attributes, generics, variants, .. } = &node.value {
+            let def = *def;
             let (repr, has_explicit_repr) = match enum_repr(attributes) {
                 Ok(r) => r,
                 Err(msg) => { errors.push(Error { msg, span: node.span.clone() }); continue; }
             };
             if !generics.is_empty() {
-                cx.generic_enums.insert(name, generics.clone());
+                cx.generic_enums.insert(def, generics.clone());
             }
             // C-style discriminants: an unspecified variant is the previous one
             // plus one, starting at 0. Payload field types are collected here but
@@ -446,34 +443,26 @@ pub fn typecheck_program<'a>(
                 next = val + 1;
             }
             if dup { continue; }
-            cx.enums.insert(name, EnumDef { repr, variants: vmap, payloads, has_payload, has_explicit_repr });
+            // register the discriminant repr for layout/codegen. A field-less
+            // enum is a bare scalar and stops here; a data enum's `{ $tag,
+            // $payload }` field list is filled in by the aggregate pass below,
+            // once every payload struct can be measured.
+            cx.types.insert(def, TypeInfo {
+                fields: Vec::new(),
+                enum_: Some(EnumRepr { repr: repr.clone(), has_payload }),
+            });
+            cx.enums.insert(def, EnumDef { repr, variants: vmap, payloads, has_payload, has_explicit_repr });
         }
     }
 
     // forward declare structs so that they can be referenced in function signatures
     for node in program {
-        if let TopLevelNode::Struct { name, generics, fields, .. } = &node.value {
-            if cx.structs.contains_key(name) || cx.enums.contains_key(name) {
-                errors.push(Error {
-                    msg: format!("Duplicate type definition '{}'", name),
-                    span: node.span.clone(),
-                });
-                continue;
-            }
-            // resolve field types against the struct's own type params so a field
-            // referencing `T` is stored as `Type::Param(T)`, not a bogus struct
-            // name. (const params already arrive as `ConstVal::Param` from the
-            // parser. Body-level validation happens in the main pass below.)
-            let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                GenericParam::Type { name: n, .. } => Some(*n),
-                GenericParam::Const(_, _) => None,
-            }).collect();
-            let resolved_fields = fields.iter()
-                .map(|(fname, fty)| (*fname, resolve_type(&type_params, &cx.enums, fty)))
-                .collect();
-            cx.structs.insert(name, resolved_fields);
+        if let TopLevelNode::Struct { def, generics, fields, .. } = &node.value {
+            // field types arrive already resolved: a field naming the struct's
+            // own type param is a `Type::Param`, anything else an identity.
+            cx.types.insert(*def, TypeInfo::struct_(fields.clone()));
             if !generics.is_empty() {
-                cx.generic_structs.insert(name, generics.clone());
+                cx.generic_structs.insert(*def, generics.clone());
             }
         }
     }
@@ -485,7 +474,7 @@ pub fn typecheck_program<'a>(
     // $payload: [P x i8] }` where P is the largest variant payload. These reuse
     // the whole struct machinery (layout, FieldPtr, AllocaStruct, copy_struct,
     // sret) so the backend needs almost no new aggregate code.
-    let data_enums: Vec<&'a str> = cx.enums.iter()
+    let data_enums: Vec<DefId> = cx.enums.iter()
         .filter(|(_, d)| d.has_payload).map(|(n, _)| *n).collect();
     // pass 1: register every payload struct and stash the resolved payloads. The
     // payload struct's field names are exactly the variant's field names, so a
@@ -494,24 +483,13 @@ pub fn typecheck_program<'a>(
     // resolving its payloads, so a field naming one becomes `Type::Param`, exactly
     // like a generic struct's own fields - construction/match-arm checking then
     // substitutes it via `subst_param_type`, and monomorphization flattens it.
-    for ename in &data_enums {
-        let type_params: Vec<&'a str> = cx.generic_enums.get(ename)
-            .map(|params| params.iter().filter_map(|g| match g {
-                GenericParam::Type { name: n, .. } => Some(*n),
-                GenericParam::Const(_, _) => None,
-            }).collect())
-            .unwrap_or_default();
-        let raw: Vec<(&'a str, Vec<(&'a str, Type<'a>)>)> = cx.enums[ename].payloads.iter()
+    for &ename in &data_enums {
+        let raw: Vec<(&'a str, Vec<(&'a str, Type<'a>)>)> = cx.enums[&ename].payloads.iter()
             .map(|(v, fs)| (*v, fs.clone())).collect();
-        let mut resolved: HashMap<&'a str, Vec<(&'a str, Type<'a>)>> = HashMap::new();
         for (vname, fields) in raw {
-            let rfields: Vec<(&'a str, Type<'a>)> = fields.iter()
-                .map(|(n, t)| (*n, resolve_type(&type_params, &cx.enums, t)))
-                .collect();
-            cx.structs.insert(enum_payload_struct_name(ename, vname), rfields.clone());
-            resolved.insert(vname, rfields);
+            let pdef = cx.payloads[&(ename, vname)];
+            cx.types.insert(pdef, TypeInfo::struct_(fields));
         }
-        if let Some(def) = cx.enums.get_mut(ename) { def.payloads = resolved; }
     }
     // pass 2: register each aggregate, sizing its byte blob from the (now present)
     // payload structs. Skips a GENERIC enum template: its payload structs still
@@ -527,28 +505,33 @@ pub fn typecheck_program<'a>(
     // whatever's ready, retry the rest, stop when a full round makes no progress
     // (which - for anything that survived monomorphization's own type-depth limit -
     // only happens once every enum is done).
-    let mut pending: Vec<&'a str> = data_enums.iter()
-        .filter(|e| !cx.generic_enums.contains_key(*e)).cloned().collect();
+    let mut pending: Vec<DefId> = data_enums.iter()
+        .filter(|e| !cx.generic_enums.contains_key(e)).cloned().collect();
     loop {
         let mut still_pending = Vec::new();
         let mut progressed = false;
         for ename in pending {
-            if !enum_agg_deps_ready(ename, &cx.enums, &cx.structs) {
+            if !enum_agg_deps_ready(ename, &cx.enums, &cx.types) {
                 still_pending.push(ename);
                 continue;
             }
-            let repr = cx.enums[ename].repr.clone();
-            let payload_bytes = cx.enums[ename].payloads.keys()
-                .map(|v| layout::size_of(&Type::plain_struct(enum_payload_struct_name(ename, v)), &cx.structs))
+            let repr = cx.enums[&ename].repr.clone();
+            let repr2 = repr.clone();
+            let variants: Vec<&'a str> = cx.enums[&ename].payloads.keys().copied().collect();
+            let payload_bytes = variants.iter()
+                .map(|v| layout::size_of(&Type::named(cx.payloads[&(ename, *v)]), &cx.types))
                 .max().unwrap_or(0);
-            let payload_align = cx.enums[ename].payloads.keys()
-                .map(|v| layout::align_of(&Type::plain_struct(enum_payload_struct_name(ename, v)), &cx.structs))
+            let payload_align = variants.iter()
+                .map(|v| layout::align_of(&Type::named(cx.payloads[&(ename, *v)]), &cx.types))
                 .max().unwrap_or(1);
             let agg_fields = vec![
                 (ENUM_TAG_FIELD, repr),
                 (ENUM_PAYLOAD_FIELD, payload_blob_type(payload_bytes, payload_align)),
             ];
-            cx.structs.insert(ename, agg_fields);
+            cx.types.insert(ename, TypeInfo {
+                fields: agg_fields,
+                enum_: Some(EnumRepr { repr: repr2, has_payload: true }),
+            });
             progressed = true;
         }
         if still_pending.is_empty() || !progressed { break; }
@@ -562,16 +545,12 @@ pub fn typecheck_program<'a>(
             // ordinary function-type path, only through turbofish.
             TopLevelNode::Function { name, generics, params, return_type, .. }
                 if !generics.is_empty() => {
-                let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type { name: n, .. } => Some(*n),
-                    GenericParam::Const(_, _) => None,
-                }).collect();
                 // only type params get reclassified `Struct`->`Param`; const params
                 // already arrive as `ConstVal::Param` from the parser.
                 let resolved_params = params.iter()
-                    .map(|(_, ty)| resolve_type(&type_params, &cx.enums, ty))
+                    .map(|(_, ty)| ty.clone())
                     .collect();
-                let resolved_return = resolve_type(&type_params, &cx.enums, return_type);
+                let resolved_return = return_type.clone();
                 cx.generic_fns.insert(name, GenericFnSig {
                     generics: generics.clone(),
                     params: resolved_params,
@@ -585,14 +564,10 @@ pub fn typecheck_program<'a>(
             // the turbofish), so there's nothing to monomorphize.
             TopLevelNode::Extern { name, generics, params, return_type, .. }
                 if !generics.is_empty() => {
-                let type_params: Vec<&'a str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type { name: n, .. } => Some(*n),
-                    GenericParam::Const(_, _) => None,
-                }).collect();
                 let resolved_params = params.iter()
-                    .map(|(_, ty)| resolve_type(&type_params, &cx.enums, ty))
+                    .map(|(_, ty)| ty.clone())
                     .collect();
-                let resolved_return = resolve_type(&type_params, &cx.enums, return_type);
+                let resolved_return = return_type.clone();
                 cx.generic_fns.insert(name, GenericFnSig {
                     generics: generics.clone(),
                     params: resolved_params,
@@ -605,8 +580,8 @@ pub fn typecheck_program<'a>(
                 // signature uses `Type::Enum`, matching how a call's args infer;
                 // otherwise an enum param stays `Struct` and mismatches the arg.
                 cx.insert(name, None, Type::Function {
-                    params: params.iter().map(|(_, ty)| resolve_type(&[], &cx.enums, ty)).collect(),
-                    return_type: Box::new(resolve_type(&[], &cx.enums, return_type)),
+                    params: params.iter().map(|(_, ty)| ty.clone()).collect(),
+                    return_type: Box::new(return_type.clone()),
                 });
             }
             // globals share the value namespace with functions; register the name
@@ -628,14 +603,7 @@ pub fn typecheck_program<'a>(
     // the struct, an enum name -> `Type::Enum`); `Self` is left symbolic and
     // substituted per-impl / per-bound later.
     for node in program {
-        if let TopLevelNode::Trait { name, methods, .. } = &node.value {
-            if cx.traits.contains_key(name) {
-                errors.push(Error {
-                    msg: format!("Duplicate trait definition '{}'", name),
-                    span: node.span.clone(),
-                });
-                continue;
-            }
+        if let TopLevelNode::Trait { def, name, methods, .. } = &node.value {
             let mut ms: HashMap<&'a str, TraitMethodSig<'a>> = HashMap::new();
             let mut dup = false;
             for m in methods {
@@ -648,12 +616,12 @@ pub fn typecheck_program<'a>(
                     break;
                 }
                 let params = m.params.iter()
-                    .map(|(_, t)| resolve_type(&[], &cx.enums, t)).collect();
-                let return_type = resolve_type(&[], &cx.enums, &m.return_type);
+                    .map(|(_, t)| t.clone()).collect();
+                let return_type = m.return_type.clone();
                 ms.insert(m.name, TraitMethodSig { receiver: m.receiver, params, return_type });
             }
             if dup { continue; }
-            cx.traits.insert(name, TraitDef { methods: ms });
+            cx.traits.insert(*def, TraitDef { methods: ms });
         }
     }
 
@@ -681,19 +649,20 @@ pub fn typecheck_program<'a>(
 /// avoids a duplicate "does not implement" at the bound site). A method's
 /// receiver is expanded to the concrete `self` type and any `Self` in the trait
 /// signature is substituted with the implementing type before comparison.
-fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: &mut Vec<Error>) {
-    let trait_def = match cx.traits.get(imp.trait_) {
+fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl, errors: &mut Vec<Error>) {
+    let (target, trait_) = (cx.name_of(imp.target), cx.name_of(imp.trait_));
+    let trait_def = match cx.traits.get(&imp.trait_) {
         Some(d) => d.clone(),
         None => {
             errors.push(Error {
-                msg: format!("unknown trait '{}' in `extend {}: {}`", imp.trait_, imp.target, imp.trait_),
+                msg: format!("unknown trait '{}' in `extend {}: {}`", trait_, target, trait_),
                 span: imp.span.clone(),
             });
             return;
         }
     };
-    // the implementing type, resolved (a name that is an enum -> `Type::Enum`).
-    let self_ty = resolve_type(&[], &cx.enums, &Type::plain_struct(imp.target));
+    // the implementing type.
+    let self_ty = Type::named(imp.target);
 
     for (mname, sig) in &trait_def.methods {
         // the member table knows what the impl actually declared; this used to
@@ -712,7 +681,7 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
         let Some((params, return_type)) = found else {
             errors.push(Error {
                 msg: format!("type '{}' does not implement trait '{}': missing method '{}'",
-                    imp.target, imp.trait_, mname),
+                    target, trait_, mname),
                 span: imp.span.clone(),
             });
             continue;
@@ -735,7 +704,7 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
             errors.push(Error {
                 msg: format!(
                     "type '{}' implements '{}::{}' with a signature that does not match the trait",
-                    imp.target, imp.trait_, mname),
+                    target, trait_, mname),
                 span: imp.span.clone(),
             });
         }

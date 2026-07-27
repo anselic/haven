@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
 use crate::intrinsics::{Intrinsic, IntrinsicSig, TyConstraint, ConstBound};
-use super::context::{Context, EnumDef, GenericFnSig};
+use super::context::{Context, GenericFnSig};
 use super::infer::check_expr;
 
 /// Resolves a turbofish type argument (generic params → `Type::Param`), checks
@@ -16,7 +16,7 @@ fn check_type_arg<'a>(
     ty: &Type<'a>,
     span: &Span,
 ) -> Result<Type<'a>, Error> {
-    let ty = resolve_type(&cx.generics, &cx.enums, ty);
+    let ty = ty.clone();
     if let Err(msg) = check_type_resolves(cx, &ty) {
         return Err(Error { msg: format!("{}(): {}", intrinsic, msg), span: span.clone() });
     }
@@ -25,7 +25,7 @@ fn check_type_arg<'a>(
         TyConstraint::Numeric => {
             if !ty.is_numeric() && !matches!(ty, Type::Param(_)) {
                 return Err(Error {
-                    msg: format!("{}() expects a numeric type, got `{}`", intrinsic, ty),
+                    msg: format!("{}() expects a numeric type, got `{}`", intrinsic, cx.show(&ty)),
                     span: span.clone(),
                 });
             }
@@ -33,7 +33,7 @@ fn check_type_arg<'a>(
         TyConstraint::Pointer => {
             if !matches!(ty, Type::Pointer(_) | Type::Param(_)) {
                 return Err(Error {
-                    msg: format!("{}() expects a pointer type, got `{}`", intrinsic, ty),
+                    msg: format!("{}() expects a pointer type, got `{}`", intrinsic, cx.show(&ty)),
                     span: span.clone(),
                 });
             }
@@ -140,55 +140,10 @@ pub(crate) fn bind_generics<'a>(
 /// can take in a turbofish argument. Compound types are never const params.
 fn const_param_name<'a>(ty: &Type<'a>) -> Option<&'a str> {
     match ty {
-        // a forwarded const param is a bare ident: a no-arg struct name (or, once
-        // resolved, a `Param`). A struct with type args is never a const param.
-        Type::Struct { name, args } if args.is_empty() => Some(name),
+        // a forwarded const param arrives as a bare ident, which name resolution
+        // could not tell from a type parameter and so resolved to `Param`.
         Type::Param(name) => Some(name),
         _ => None,
-    }
-}
-
-/// Rewrites a bare named type into a `Type::Param` (generic param in scope),
-/// `Type::Enum` (declared enum), or leaves it a `Type::Struct`, recursing
-/// through compound types. The parser can't tell these apart (all bare idents),
-/// so this resolution happens once the generic list and enum table are known.
-pub(crate) fn resolve_type<'a>(generics: &[&'a str], enums: &HashMap<&'a str, EnumDef<'a>>, ty: &Type<'a>) -> Type<'a> {
-    match ty {
-        // a bare `T` that names an in-scope param becomes `Param`; any other named
-        // type keeps its name but has its generic args resolved recursively (a
-        // struct arg can itself mention `T`, e.g. `Option<T>`).
-        Type::Struct { name, args } if args.is_empty() && generics.contains(name) => Type::Param(name),
-        // a name that is a declared enum becomes `Type::Enum`, with the
-        // discriminant repr baked in so later stages need no enum table. Fires
-        // regardless of `args` (empty for a plain enum, populated for a generic
-        // one like `Option<i32>`) - args are resolved recursively, mirroring the
-        // `Struct` arg-resolution arm below; monomorphization flattens them later.
-        Type::Struct { name, args } if enums.contains_key(name) => Type::Enum {
-            name,
-            repr: Box::new(enums[name].repr.clone()),
-            has_payload: enums[name].has_payload,
-            args: args.iter().map(|a| match a {
-                GenericArg::Type(t) => GenericArg::Type(resolve_type(generics, enums, t)),
-                GenericArg::Const(_) => a.clone(),
-            }).collect(),
-        },
-        Type::Struct { name, args } => Type::Struct {
-            name,
-            // only type args can name a type param; const args pass through.
-            args: args.iter().map(|a| match a {
-                GenericArg::Type(t) => GenericArg::Type(resolve_type(generics, enums, t)),
-                GenericArg::Const(_) => a.clone(),
-            }).collect(),
-        },
-        Type::Pointer(inner)  => Type::Pointer(Box::new(resolve_type(generics, enums, inner))),
-        Type::Array(inner, n) => Type::Array(Box::new(resolve_type(generics, enums, inner)), n.clone()),
-        Type::Slice(inner)    => Type::Slice(Box::new(resolve_type(generics, enums, inner))),
-        Type::Simd(inner, n)  => Type::Simd(Box::new(resolve_type(generics, enums, inner)), n.clone()),
-        Type::Function { params, return_type } => Type::Function {
-            params: params.iter().map(|p| resolve_type(generics, enums, p)).collect(),
-            return_type: Box::new(resolve_type(generics, enums, return_type)),
-        },
-        other => other.clone(),
     }
 }
 
@@ -213,21 +168,12 @@ pub(crate) fn subst_param_type<'a>(
     };
     match ty {
         Type::Param(name) => types.get(name).cloned().unwrap_or_else(|| ty.clone()),
-        // a generic struct instance can mention params in its args (`Option<T>`,
+        // a generic instance can mention params in its args (`Option<T>`,
         // `Buf<T, N>`); recurse so both type and const args get substituted.
-        Type::Struct { name, args } => Type::Struct {
-            name,
-            args: args.iter().map(|a| match a {
-                GenericArg::Type(t) => GenericArg::Type(subst_param_type(types, consts, t)),
-                GenericArg::Const(cv) => GenericArg::Const(sub_cv(cv)),
-            }).collect(),
-        },
-        // same story for a generic-enum instance (`Option<T>`, `Result<T, E>`):
-        // its args can mention params too.
-        Type::Enum { name, repr, has_payload, args } => Type::Enum {
-            name,
-            repr: repr.clone(),
-            has_payload: *has_payload,
+        // Structs and enums needed separate copies of this when they were
+        // separate variants; now the identity is opaque and one arm does both.
+        Type::Named { def, args } => Type::Named {
+            def: *def,
             args: args.iter().map(|a| match a {
                 GenericArg::Type(t) => GenericArg::Type(subst_param_type(types, consts, t)),
                 GenericArg::Const(cv) => GenericArg::Const(sub_cv(cv)),
@@ -275,7 +221,7 @@ pub(crate) fn check_generic_call<'a>(
             (GenericParam::Type { name: pname, .. }, GenericArg::Type(ty)) => {
                 // resolve against the caller's own type params (a generic body
                 // can forward its `T`), then check any structs exist.
-                let ty = resolve_type(&cx.generics, &cx.enums, ty);
+                let ty = ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &ty) {
                     return Err(Error { msg: format!("{}(): {}", name, msg), span: span.clone() });
                 }
@@ -328,17 +274,16 @@ pub(crate) fn check_generic_call<'a>(
             let Some(arg_ty) = type_bindings.get(pname) else { continue };
             for bound in bounds {
                 let ok = match arg_ty {
-                    Type::Struct { name: tn, .. } | Type::Enum { name: tn, .. } =>
-                        cx.impls.contains(&(*tn, *bound)),
+                    Type::Named { def, .. } => cx.impls.contains(&(*def, bound.def)),
                     Type::Param(fp) =>
-                        cx.generic_bounds.get(fp).is_some_and(|bs| bs.contains(bound)),
+                        cx.generic_bounds.get(fp).is_some_and(|bs| bs.contains(&bound.def)),
                     _ => false,
                 };
                 if !ok {
                     return Err(Error {
                         msg: format!(
                             "type `{}` does not implement trait `{}`, required by `{}`'s bound `{}: {}`",
-                            arg_ty, bound, name, pname, bound),
+                            cx.show(arg_ty), bound, name, pname, bound),
                         span: span.clone(),
                     });
                 }
@@ -393,7 +338,7 @@ pub(crate) fn bind_struct_generics<'a>(
     for (gp, ga) in params.iter().zip(args) {
         match (gp, ga) {
             (GenericParam::Type { name: pname, .. }, GenericArg::Type(ty)) => {
-                let ty = resolve_type(&cx.generics, &cx.enums, ty);
+                let ty = ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &ty) {
                     return Err(Error { msg: format!("struct '{}': {}", name, msg), span: span.clone() });
                 }
@@ -433,13 +378,14 @@ pub(crate) fn bind_struct_generics<'a>(
     Ok((type_subst, const_subst, resolved))
 }
 
-/// Substitute the special `Self` type (which the parser leaves as a bare
-/// `Type::Struct { name: "Self" }`) with `self_ty`, recursing through compound
+/// Substitute the special `Self` type (which name resolution leaves as
+/// `Type::Param("Self")`, it having no definition of its own) with `self_ty`,
+/// recursing through compound
 /// types. Used to specialize a trait method signature to a concrete implementing
 /// type (conformance) or to a bounded type param (bounded call resolution).
 pub(crate) fn subst_self<'a>(ty: &Type<'a>, self_ty: &Type<'a>) -> Type<'a> {
     match ty {
-        Type::Struct { name, args } if *name == "Self" && args.is_empty() => self_ty.clone(),
+        Type::Param(name) if *name == "Self" => self_ty.clone(),
         Type::Pointer(inner)  => Type::Pointer(Box::new(subst_self(inner, self_ty))),
         Type::Array(inner, n) => Type::Array(Box::new(subst_self(inner, self_ty)), n.clone()),
         Type::Slice(inner)    => Type::Slice(Box::new(subst_self(inner, self_ty))),
@@ -477,100 +423,65 @@ pub(crate) fn check_const_scope<'a>(in_scope: &[&'a str], ty: &Type<'a>) -> Resu
     }
 }
 
-/// Recursively verifies that every Type::Struct referenced in each Type exists
-/// in cx.structs.
+/// Recursively verifies that every named type in `ty` exists, and that its
+/// generic arguments match the declaration in count and kind.
+///
+/// Structs and enums used to need two near-identical copies of this, because
+/// they were separate `Type` variants carrying separate name tables. A resolved
+/// named type no longer says which it is - that is a property of its definition
+/// - so one walk covers both, and the only thing the two cases still disagree
+/// about is the word to use in the message.
 pub(crate) fn check_type_resolves<'a>(cx: &Context<'a>, ty: &Type<'a>) -> Result<(), String> {
     match ty {
-        Type::Struct { name, args } => {
-            if !cx.structs.contains_key(name) {
-                return Err(format!("unknown type '{}'", name));
+        Type::Named { def, args } => {
+            let is_enum = cx.enums.contains_key(def);
+            if !is_enum && !cx.types.contains_key(def) {
+                return Err(format!("unknown type '{}'", cx.name_of(*def)));
             }
             // recurse into type arguments (`Option<Unknown>` must still error).
             for a in args {
                 if let GenericArg::Type(t) = a { check_type_resolves(cx, t)?; }
             }
-            // validate the applied argument count against the struct's declared
-            // arity: 0 for a non-generic struct, `params.len()` for a generic one.
-            let params = cx.generic_structs.get(name);
+            let kind = if is_enum { "enum" } else { "struct" };
+            let name = cx.name_of(*def);
+            // validate the applied argument count against the declared arity:
+            // 0 for a non-generic type, `params.len()` for a generic one.
+            let params = if is_enum { cx.generic_enums.get(def) } else { cx.generic_structs.get(def) };
             let arity = params.map_or(0, |p| p.len());
             if args.len() != arity {
                 return Err(if arity == 0 {
-                    format!("struct '{}' is not generic; no type arguments expected", name)
+                    format!("{} '{}' is not generic; no type arguments expected", kind, name)
                 } else {
                     format!(
-                        "struct '{}' expects {} type argument{}, got {}",
-                        name, arity,
+                        "{} '{}' expects {} type argument{}, got {}",
+                        kind, name, arity,
                         if arity == 1 { "" } else { "s" }, args.len(),
                     )
                 });
             }
             // each applied arg's kind must match its param (type vs const);
-            // forwarding a const param into a struct type isn't supported yet.
+            // forwarding a const param into a named type isn't supported yet.
             if let Some(params) = params {
                 for (gp, ga) in params.iter().zip(args) {
                     match (gp, ga) {
                         (GenericParam::Type { .. }, GenericArg::Type(_)) => {}
                         (GenericParam::Const(_, _), GenericArg::Const(ConstVal::Lit(_))) => {}
                         (GenericParam::Const(pn, _), GenericArg::Const(ConstVal::Param(f))) =>
-                            return Err(format!("struct '{}': forwarding const parameter '{}' to '{}' is not supported yet", name, f, pn)),
+                            return Err(format!("{} '{}': forwarding const parameter '{}' to '{}' is not supported yet", kind, name, f, pn)),
                         (GenericParam::Type { name: pn, .. }, GenericArg::Const(_)) =>
-                            return Err(format!("struct '{}': expected a type argument for '{}', got a const value", name, pn)),
+                            return Err(format!("{} '{}': expected a type argument for '{}', got a const value", kind, name, pn)),
                         (GenericParam::Const(pn, _), GenericArg::Type(t)) => {
                             if const_param_name(t).is_some_and(|n| cx.const_generics.contains(&n)) {
-                                return Err(format!("struct '{}': forwarding const parameter '{}' to '{}' is not supported yet", name, const_param_name(t).unwrap(), pn));
+                                return Err(format!("{} '{}': forwarding const parameter '{}' to '{}' is not supported yet", kind, name, const_param_name(t).unwrap(), pn));
                             }
-                            return Err(format!("struct '{}': expected a const argument for '{}', got a type", name, pn));
+                            return Err(format!("{} '{}': expected a const argument for '{}', got a type", kind, name, pn));
                         }
                     }
                 }
             }
-            // A concrete generic-struct use (`Option<i32>`, `Buf<i32, 8>`) is now
-            // valid: monomorphization rewrites it to a flat instance before any
-            // later stage.
-            Ok(())
-        }
-        // mirrors the `Struct` arm above: validate arg count/kind against the
-        // enum's declared generics (0 for a plain enum). `resolve_type` only ever
-        // produces a `Type::Enum` for a name already in `cx.enums`, so the
-        // existence check can't actually fail - kept for parity/defensiveness.
-        Type::Enum { name, args, .. } => {
-            if !cx.enums.contains_key(name) {
-                return Err(format!("unknown type '{}'", name));
-            }
-            for a in args {
-                if let GenericArg::Type(t) = a { check_type_resolves(cx, t)?; }
-            }
-            let params = cx.generic_enums.get(name);
-            let arity = params.map_or(0, |p| p.len());
-            if args.len() != arity {
-                return Err(if arity == 0 {
-                    format!("enum '{}' is not generic; no type arguments expected", name)
-                } else {
-                    format!(
-                        "enum '{}' expects {} type argument{}, got {}",
-                        name, arity,
-                        if arity == 1 { "" } else { "s" }, args.len(),
-                    )
-                });
-            }
-            if let Some(params) = params {
-                for (gp, ga) in params.iter().zip(args) {
-                    match (gp, ga) {
-                        (GenericParam::Type { .. }, GenericArg::Type(_)) => {}
-                        (GenericParam::Const(_, _), GenericArg::Const(ConstVal::Lit(_))) => {}
-                        (GenericParam::Const(pn, _), GenericArg::Const(ConstVal::Param(f))) =>
-                            return Err(format!("enum '{}': forwarding const parameter '{}' to '{}' is not supported yet", name, f, pn)),
-                        (GenericParam::Type { name: pn, .. }, GenericArg::Const(_)) =>
-                            return Err(format!("enum '{}': expected a type argument for '{}', got a const value", name, pn)),
-                        (GenericParam::Const(pn, _), GenericArg::Type(t)) => {
-                            if const_param_name(t).is_some_and(|n| cx.const_generics.contains(&n)) {
-                                return Err(format!("enum '{}': forwarding const parameter '{}' to '{}' is not supported yet", name, const_param_name(t).unwrap(), pn));
-                            }
-                            return Err(format!("enum '{}': expected a const argument for '{}', got a type", name, pn));
-                        }
-                    }
-                }
-            }
+            // A concrete generic use (`Option<i32>`, `Buf<i32, 8>`) is valid:
+            // monomorphization rewrites it to a flat instance before any later
+            // stage.
             Ok(())
         }
         Type::Pointer(inner)

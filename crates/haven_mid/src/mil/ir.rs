@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use haven_common::ast::*;
+use haven_common::defs::DefId;
+use haven_common::layout::TypeTable;
 
 // Unique SSA temps that will never be reassigned
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -100,7 +102,7 @@ pub enum Inst<'a> {
         // when the callee returns a struct, the result is passed back through
         // this caller-allocated slot (sret) instead of a return value, and the
         // call itself returns void. Some((slot, struct_name))
-        sret: Option<(Register, &'a str)>,
+        sret: Option<(Register, DefId)>,
     },
 
     // %dst = getelemptr %slice, %index (for slice indexing)
@@ -111,7 +113,7 @@ pub enum Inst<'a> {
     // %dst = extractvalue %val, index (for extracting from fat pointer struct, e.g. data pointer or length)
     ExtractValue { dst: Register, val: Value, index: usize },
     // %dst = getelementptr %Name, ptr %base, i32 0, i32 <field_index>
-    FieldPtr { dst: Register, struct_name: &'a str, base: Register, field_index: usize },
+    FieldPtr { dst: Register, struct_def: DefId, base: Register, field_index: usize },
     // %dst = ptr to a module-level global @name (a zero-offset gep, so %dst == @name)
     GlobalPtr { dst: Register, name: &'a str },
 
@@ -128,7 +130,7 @@ pub enum Inst<'a> {
     // %dst = getelemptr [length X ty] %array, %index
     IndexArray { dst: Register, ty: Type<'a>, length: usize, array: Register, index: usize },
     // %dst = alloca %struct_ty, align N
-    AllocaStruct { dst: Register, name: &'a str, align: Option<usize> },
+    AllocaStruct { dst: Register, def: DefId, align: Option<usize> },
 
     // Intrinsic/SIMD related instructions
     // %dst = ptrtoint of `getelementptr ty, ptr null, i32 1` -> size of `ty` in bytes (u64)
@@ -213,7 +215,7 @@ pub struct Function<'a> {
     pub blocks: Vec<BasicBlock<'a>>, // blocks[0] is always the entry
     // for struct-returning functions: the hidden sret out-pointer parameter
     // (its register and the struct name). The function returns void in LLVM
-    pub sret: Option<(Register, &'a str)>,
+    pub sret: Option<(Register, DefId)>,
 }
 
 /// The constant value initializing a module-level global. A restricted subset of
@@ -247,7 +249,16 @@ pub struct Module<'a> {
     pub functions: Vec<Function<'a>>,
     pub externs: Vec<ExternDecl<'a>>,
     /// Struct definitions, in declaration order: name -> ordered (field name, field type)
-    pub structs: Vec<(&'a str, Vec<(&'a str, Type<'a>)>)>,
+    /// Aggregates to declare, in emission order. Their field lists live in
+    /// `types`; this is just the order, which a `HashMap` cannot carry and which
+    /// matters for readable IR (a struct must precede its users).
+    pub structs: Vec<DefId>,
+    /// Layout of every named type, for `layout`/`abi` during emission.
+    pub types: TypeTable<'a>,
+    /// Emitted symbol per definition. This is the seam: everything upstream
+    /// works in identities, everything downstream in names, and this map is the
+    /// one place the two meet.
+    pub symbols: HashMap<DefId, &'a str>,
     /// Module-level constants, emitted as LLVM `constant` globals.
     pub globals: Vec<Global<'a>>,
     /// Interned, escape-resolved string-literal blobs. Index `i` is emitted as
@@ -259,5 +270,5 @@ pub struct Module<'a> {
     /// the variant payload structs - each variant classified independently and
     /// merged (SysV union rule) - instead of raw bytes, which would wrongly force
     /// every payload into the INTEGER class regardless of what it actually holds.
-    pub enum_unions: HashMap<&'a str, Vec<&'a str>>,
+    pub enum_unions: HashMap<DefId, Vec<DefId>>,
 }

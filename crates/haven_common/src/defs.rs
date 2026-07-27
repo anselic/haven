@@ -5,11 +5,17 @@
 //! from, what kind it is, and — crucially — how its emitted symbol name is
 //! derived. [`Defs::symbol`] is the *only* place a symbol name is constructed.
 //!
-//! This is the first half of moving definition identity off of mangled strings.
-//! Today the AST still carries names as `&str`, and those names still come from
-//! `Defs::symbol`; later stages replace the strings in `Type`/`ExprNode` with
-//! `DefId`s directly, at which point mangling stops being load-bearing for
-//! anything except linking.
+//! Definition identity is no longer a mangled string. A resolved named type is
+//! `Type::Named { def, .. }`, a resolved variant reference is a `NameRef`, and
+//! every table that has anything to say about a definition - its fields, its
+//! members, its conformances, its instances - is keyed by `DefId`. Nothing
+//! between name resolution and MIL lowering compares, constructs or parses a
+//! name; mangling is load-bearing only for linking.
+//!
+//! MIL lowering is the seam. It asks for [`Defs::symbols`] once, and everything
+//! downstream of it works in emitted names - which is all the backend wants,
+//! since by then monomorphization has flattened every generic and no two types
+//! can share a name anyway.
 //!
 //! ## symbol scheme
 //!
@@ -29,9 +35,11 @@
 //! unrelated import renamed every symbol in the program — bad for `--shared` and
 //! `--static-lib` ABI, and for reading `--emit-ir` diffs.
 //!
-//! The `$` between slug and name is deliberate: several downstream stages still
-//! recover the item name with `rsplit('$')`, and dots inside the slug keep that
-//! working while making the module part readable.
+//! The `$` between slug and name is a separator only - nothing takes a symbol
+//! apart to recover the item name any more. Diagnostics get the source spelling
+//! from [`Def::source_name`] instead, which is why an instance now reads as
+//! `alloc::<Vec2>` rather than being recovered by stripping everything before
+//! the last `$`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -44,12 +52,33 @@ use crate::ast::{FileId, Receiver, Span};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct DefId(pub u32);
 
+impl DefId {
+    /// The identity a parser-produced node carries until name resolution fills
+    /// it in. Resolution either overwrites every one of these or reports an
+    /// unknown-name error, so it must never reach a later stage; [`Defs::get`]
+    /// panics on it rather than returning a plausible-looking wrong answer.
+    ///
+    /// A sentinel rather than an `Option` because the alternative is unwrapping
+    /// at every one of the ~40 sites that read a resolved id, all of which would
+    /// be `expect`ing the same invariant.
+    pub const UNRESOLVED: DefId = DefId(u32::MAX);
+
+    pub fn is_resolved(self) -> bool { self != DefId::UNRESOLVED }
+}
+
 /// Identity of one loaded module.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ModId(pub u32);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DefKind { Fn, Extern, Global, Struct, Enum, Trait }
+pub enum DefKind {
+    Fn, Extern, Global, Struct, Enum, Trait,
+    /// The synthetic struct holding one data variant's payload fields. Has no
+    /// source declaration of its own: [`Defs::add_payload`] mints one per data
+    /// variant, so a payload struct is a type identity like any other rather
+    /// than a leaked `format!("{enum}${variant}")` string.
+    EnumPayload,
+}
 
 /// How a definition's emitted symbol name is chosen.
 ///
@@ -95,9 +124,9 @@ pub struct Member<'a> {
 /// type names are not slug-prefixed while their methods' names are. Those cases
 /// were silently unreachable outside the entry module.
 ///
-/// Keyed by *emitted type name* for now. Stage 4 re-keys it to `(DefId, &str)`,
-/// which is a type change here and at the three lookup sites, nothing more.
-pub type MemberTable<'a> = HashMap<(&'a str, &'a str), Member<'a>>;
+/// Keyed by the receiver type's identity, so two modules may each declare a
+/// `Point` with an `area` method without one shadowing the other.
+pub type MemberTable<'a> = HashMap<(DefId, &'a str), Member<'a>>;
 
 /// What a monomorphized instance came from.
 ///
@@ -108,16 +137,16 @@ pub type MemberTable<'a> = HashMap<(&'a str, &'a str), Member<'a>>;
 /// has no type information with which to rewrite a bare pattern; and diagnostics
 /// want to say `alloc::<Vec2>` rather than `std.alloc$alloc$Vec2`.
 #[derive(Clone, Debug)]
-pub struct Instance<'a> {
-    /// Emitted name of the generic template this specializes.
-    pub template: &'a str,
+pub struct Instance {
+    /// The generic template this specializes.
+    pub template: DefId,
     /// How the instance reads back to a human: `alloc::<Vec2>`. Diagnostics only;
     /// never fed back into the compiler.
     pub display: String,
 }
 
-/// Every monomorphized instance in the program, keyed by its emitted name.
-pub type Instances<'a> = HashMap<&'a str, Instance<'a>>;
+/// Every monomorphized instance in the program, keyed by its own identity.
+pub type Instances = HashMap<DefId, Instance>;
 
 pub struct ModInfo {
     pub file: FileId,
@@ -135,7 +164,17 @@ pub struct Defs<'a> {
     /// slugs already handed out, so two modules never share one.
     slugs: HashMap<String, ModId>,
     members: MemberTable<'a>,
-    instances: Instances<'a>,
+    instances: Instances,
+    /// `(enum, variant name) -> the synthetic struct holding that variant's
+    /// payload fields`. Minted at resolution for declared enums and by `mono`
+    /// for each instance it creates, so the mid end can look a payload struct up
+    /// instead of rebuilding its name.
+    payloads: HashMap<(DefId, &'a str), DefId>,
+    /// Reverse index over the definitions whose symbol is fixed - which is every
+    /// instance `mono` mints. Lets a stage that only has a symbol in hand (the
+    /// alloc check works on MIL callee names) recover the definition and so its
+    /// friendly spelling.
+    by_symbol: HashMap<&'a str, DefId>,
 }
 
 impl<'a> Defs<'a> {
@@ -161,33 +200,85 @@ impl<'a> Defs<'a> {
 
     pub fn alloc(&mut self, def: Def<'a>) -> DefId {
         let id = DefId(self.defs.len() as u32);
+        if let Linkage::Fixed(sym) = def.linkage { self.by_symbol.insert(sym, id); }
         self.defs.push(def);
         id
     }
 
     /// Record a method or associated function on `ty`. Returns the previous
     /// entry, if the same `(type, name)` pair was already claimed.
-    pub fn add_member(&mut self, ty: &'a str, name: &'a str, m: Member<'a>) -> Option<Member<'a>> {
+    pub fn add_member(&mut self, ty: DefId, name: &'a str, m: Member<'a>) -> Option<Member<'a>> {
         self.members.insert((ty, name), m)
     }
 
     pub fn members(&self) -> &MemberTable<'a> { &self.members }
 
-    /// Record that `mangled` is `template` specialized to some arguments.
+    /// Mint the synthetic payload struct for one data variant of `enum_`. Its
+    /// symbol is `<enum symbol>$<variant>`, which is why it is `Fixed`: it is
+    /// derived from the enum's already-final symbol, not from the enum's source
+    /// name plus its own module slug.
+    pub fn add_payload(&mut self, enum_: DefId, variant: &'a str, symbol: &'a str) -> DefId {
+        if let Some(&existing) = self.payloads.get(&(enum_, variant)) { return existing; }
+        let def = self.get(enum_);
+        let (module, span) = (def.module, def.span.clone());
+        let id = self.alloc(Def {
+            module,
+            kind: DefKind::EnumPayload,
+            source_name: variant,
+            is_pub: true,
+            linkage: Linkage::Fixed(symbol),
+            span,
+        });
+        self.payloads.insert((enum_, variant), id);
+        id
+    }
+
+    /// The payload struct of `enum_`'s `variant`, if that variant carries data.
+    pub fn payload(&self, enum_: DefId, variant: &str) -> Option<DefId> {
+        self.payloads.get(&(enum_, variant)).copied()
+    }
+
+    pub fn payloads(&self) -> &HashMap<(DefId, &'a str), DefId> { &self.payloads }
+
+    /// Record that `inst` is `template` specialized to some arguments.
     /// Called by `mono` for every function, struct and enum instance it mints.
-    pub fn add_instance(&mut self, mangled: &'a str, template: &'a str, display: String) {
-        self.instances.insert(mangled, Instance { template, display });
+    pub fn add_instance(&mut self, inst: DefId, template: DefId, display: String) {
+        self.instances.insert(inst, Instance { template, display });
     }
 
-    pub fn instances(&self) -> &Instances<'a> { &self.instances }
+    pub fn instances(&self) -> &Instances { &self.instances }
 
-    /// The friendliest spelling of an emitted name: an instance's turbofish form
-    /// if it is one, otherwise the name unchanged.
-    pub fn show<'s>(&'s self, name: &'s str) -> &'s str {
-        self.instances.get(name).map(|i| i.display.as_str()).unwrap_or(name)
+    /// The template `id` specializes, if it is a monomorphized instance.
+    ///
+    /// Load-bearing for matching: a match pattern always names the *template*
+    /// (`Option::Some`), because `mono` has no type information with which to
+    /// rewrite a bare pattern to the instance it belongs to, while the
+    /// scrutinee's type names the *instance* (`Option$i32`). Comparing through
+    /// this link is what lets the two meet.
+    pub fn template_of(&self, id: DefId) -> Option<DefId> {
+        self.instances.get(&id).map(|i| i.template)
     }
 
-    pub fn get(&self, id: DefId) -> &Def<'a> { &self.defs[id.0 as usize] }
+    /// The friendliest spelling of an emitted symbol: the turbofish form if it
+    /// names an instance, otherwise the symbol unchanged.
+    pub fn show_symbol<'s>(&'s self, sym: &'s str) -> &'s str {
+        self.by_symbol.get(sym)
+            .and_then(|id| self.instances.get(id))
+            .map_or(sym, |i| i.display.as_str())
+    }
+
+    /// How to name this definition to a human: `std/math::square` for an
+    /// imported item, a bare `square` for one in the entry module, and an
+    /// instance's turbofish form (`alloc::<Vec2>`) for anything `mono` minted.
+    pub fn show(&self, id: DefId) -> String {
+        if let Some(i) = self.instances.get(&id) { return i.display.clone(); }
+        self.display(id)
+    }
+
+    pub fn get(&self, id: DefId) -> &Def<'a> {
+        assert!(id.is_resolved(), "an unresolved DefId survived name resolution");
+        &self.defs[id.0 as usize]
+    }
     pub fn module(&self, id: ModId) -> &ModInfo { &self.mods[id.0 as usize] }
     pub fn len(&self) -> usize { self.defs.len() }
     pub fn is_empty(&self) -> bool { self.defs.is_empty() }
@@ -203,6 +294,17 @@ impl<'a> Defs<'a> {
                 arena.alloc_str(&format!("{}${}", slug, def.source_name))
             }
         }
+    }
+
+    /// Every definition's emitted symbol, computed once.
+    ///
+    /// The mid end hands this to MIL lowering, which is the seam where identity
+    /// stops mattering and linkage starts: everything downstream of it works in
+    /// symbol names, so nothing downstream needs `Defs` at all.
+    pub fn symbols(&self, arena: &'a Bump) -> HashMap<DefId, &'a str> {
+        (0..self.defs.len() as u32)
+            .map(|i| (DefId(i), self.symbol(DefId(i), arena)))
+            .collect()
     }
 
     /// How to name this definition to a human: `std/math::square`. Uses the

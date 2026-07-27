@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
+use haven_common::defs::DefId;
+use haven_common::layout::{TypeTable, TypeInfo, EnumRepr};
 use super::context::{Context, EnumDef};
 
 /// Whether every aggregate (struct, or data-enum) that `ename`'s payload fields
@@ -8,22 +10,34 @@ use super::context::{Context, EnumDef};
 /// "pass 2" (aggregate registration) into a fixpoint: a data enum's payload can
 /// itself be another (unregistered) data enum (`Option<Option<i32>>`).
 pub(crate) fn enum_agg_deps_ready<'a>(
-    ename: &str,
-    enums: &HashMap<&'a str, EnumDef<'a>>,
-    structs: &HashMap<&'a str, Vec<(&'a str, Type<'a>)>>,
+    ename: DefId,
+    enums: &HashMap<DefId, EnumDef<'a>>,
+    types: &TypeTable<'a>,
 ) -> bool {
-    fn ty_ready<'a>(ty: &Type<'a>, structs: &HashMap<&'a str, Vec<(&'a str, Type<'a>)>>) -> bool {
+    fn ty_ready<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> bool {
         match ty {
-            Type::Struct { name, .. } => structs.contains_key(name),
-            Type::Enum { name, has_payload: true, .. } => structs.contains_key(name),
+            // a named type blocks readiness until it can actually be measured.
+            //
+            // Every enum is registered with its discriminant repr as soon as it
+            // is declared, so mere presence in the table is not enough: a data
+            // enum's `{ $tag, $payload }` field list is filled in by the very
+            // pass this gates, and until then it is empty and would measure as
+            // zero bytes. A field-less enum is a bare scalar and is ready at
+            // once; so is any struct, whose fields are known at declaration.
+            Type::Named { def, .. } => match types.get(def) {
+                None => false,
+                Some(TypeInfo { enum_: Some(EnumRepr { has_payload: true, .. }), fields }) =>
+                    !fields.is_empty(),
+                Some(_) => true,
+            },
             // a pointer is a fixed-size opaque handle: doesn't need its pointee's
             // own layout, so it never blocks readiness.
             Type::Pointer(_) => true,
-            Type::Array(inner, _) | Type::Slice(inner) | Type::Simd(inner, _) => ty_ready(inner, structs),
+            Type::Array(inner, _) | Type::Slice(inner) | Type::Simd(inner, _) => ty_ready(inner, types),
             _ => true,
         }
     }
-    enums[ename].payloads.values().all(|fields| fields.iter().all(|(_, ty)| ty_ready(ty, structs)))
+    enums[&ename].payloads.values().all(|fields| fields.iter().all(|(_, ty)| ty_ready(ty, types)))
 }
 
 /// The `$payload` byte-blob type for a data enum's aggregate: an array sized to
@@ -79,62 +93,61 @@ pub(crate) fn enum_repr<'a>(attributes: &[Attribute<'a>]) -> Result<(Type<'a>, b
     Ok((Type::Int32, false))
 }
 
-/// If `path` is an `Enum::Variant` reference to a declared enum, return the
-/// enum's name, the variant's discriminant value, and the discriminant repr.
-/// The enum name comes from the table key so it carries the `'a` lifetime.
-pub(crate) fn enum_variant<'a>(cx: &Context<'a>, path: &Path<'a>) -> Option<(&'a str, i64, Type<'a>)> {
-    let (ename, variant) = path.as_variant()?;
-    let (&ekey, def) = cx.enums.get_key_value(ename)?;
-    let val = *def.variants.get(variant)?;
-    Some((ekey, val, def.repr.clone()))
+/// If `r` refers to a variant of a declared enum, return the enum, the
+/// variant's discriminant value, and the discriminant repr.
+pub(crate) fn enum_variant<'a>(cx: &Context<'a>, r: &NameRef<'a>) -> Option<(DefId, i64, Type<'a>)> {
+    let def = cx.enums.get(&r.def)?;
+    let val = *def.variants.get(r.variant())?;
+    Some((r.def, val, def.repr.clone()))
 }
 
-/// Validate that `path` (an `E::V`) names a variant of enum `en`; returns the
-/// variant name. Shared by the field-less `Path` and the destructuring `Variant`
-/// match-arm patterns.
-pub(crate) fn check_variant_pattern<'a>(cx: &Context<'a>, en: &'a str, path: &Path<'a>, span: &Span)
+/// Validate that `r` names a variant of enum `en`; returns the variant name.
+/// Shared by the field-less `Path` and the destructuring `Variant` match-arm
+/// patterns.
+pub(crate) fn check_variant_pattern<'a>(cx: &Context<'a>, en: DefId, r: &NameRef<'a>, span: &Span)
 -> Result<&'a str, Error> {
-    let (pat_enum, variant) = path.as_variant()
-        .ok_or_else(|| Error { msg: format!("invalid enum pattern `{}`", path), span: span.clone() })?;
-    // `en` may be a monomorphized instance (`std.option$Option$i32`) while the
-    // pattern names the generic template (`std.option$Option::Some`): mono rewrites
-    // construction call/struct-literal sites to the instance name, but never
-    // touches match-pattern text (it has no type info to know which instantiation
-    // a bare pattern refers to; see mono.rs).
+    let variant = r.variant();
+    // `en` may be a monomorphized instance while the pattern names the generic
+    // template: mono rewrites construction call/struct-literal sites to the
+    // instance, but never touches match patterns (it has no type info to know
+    // which instantiation a bare pattern refers to; see mono.rs).
     //
     // So the pattern's enum matches if it *is* `en`, or if `en` is an instance
-    // that mono recorded as specializing it. This used to be inferred from the
-    // shape of the name; going through the recorded template means the pipeline
-    // no longer relies on any invariant about what a `$` in a symbol separates.
-    let is_instance = cx.instances.get(en).is_some_and(|t| *t == pat_enum);
-    if pat_enum != en && !is_instance {
-        return Err(Error { msg: format!("pattern `{}` is not a variant of enum '{}'", path, en), span: span.clone() });
+    // that mono recorded as specializing it.
+    let is_instance = cx.instances.get(&en).is_some_and(|t| *t == r.def);
+    if r.def != en && !is_instance {
+        return Err(Error {
+            msg: format!("pattern `{}` is not a variant of enum '{}'", r, cx.name_of(en)),
+            span: span.clone(),
+        });
     }
-    if !cx.enums[en].variants.contains_key(variant) {
-        return Err(Error { msg: format!("enum '{}' has no variant '{}'", en, variant), span: span.clone() });
+    if !cx.enums[&en].variants.contains_key(variant) {
+        return Err(Error {
+            msg: format!("enum '{}' has no variant '{}'", cx.name_of(en), variant),
+            span: span.clone(),
+        });
     }
     Ok(variant)
 }
 
-/// If `path` is `E::V` naming a variant of a declared enum, returns the enum's
-/// name and the variant's payload field types (empty for a unit variant). Used
-/// to recognize a constructor call `E::V(...)` in `infer`/`lower_expr`.
-pub(crate) fn enum_variant_ctor<'a>(cx: &Context<'a>, path: &Path<'a>) -> Option<(&'a str, Vec<Type<'a>>)> {
-    let (ename, variant) = path.as_variant()?;
-    let (&ekey, def) = cx.enums.get_key_value(ename)?;
+/// If `r` names a variant of a declared enum, returns the enum and the
+/// variant's payload field types (empty for a unit variant). Used to recognize
+/// a constructor call `E::V(...)` in `infer`/`lower_expr`.
+pub(crate) fn enum_variant_ctor<'a>(cx: &Context<'a>, r: &NameRef<'a>) -> Option<(DefId, Vec<Type<'a>>)> {
+    let def = cx.enums.get(&r.def)?;
+    let variant = r.variant();
     if !def.variants.contains_key(variant) { return None; }
     let tys = def.payloads.get(variant)
         .map(|fs| fs.iter().map(|(_, t)| t.clone()).collect())
         .unwrap_or_default();
-    Some((ekey, tys))
+    Some((r.def, tys))
 }
 
-/// If `path` is `E::V` naming a variant of a declared enum, returns the (enum,
-/// variant) names carrying the `'a` lifetime from the table keys. Used to route
-/// a struct-literal `E::V { ... }` and a `StructVariant` pattern to the variant.
-pub(crate) fn split_enum_variant<'a>(cx: &Context<'a>, path: &Path<'a>) -> Option<(&'a str, &'a str)> {
-    let (ename, variant) = path.as_variant()?;
-    let (&ekey, def) = cx.enums.get_key_value(ename)?;
-    let (&vkey, _) = def.variants.get_key_value(variant)?;
-    Some((ekey, vkey))
+/// If `r` names a variant of a declared enum, returns the enum and the variant
+/// name carrying the `'a` lifetime from the table key. Used to route a
+/// struct-literal `E::V { ... }` and a `StructVariant` pattern to the variant.
+pub(crate) fn split_enum_variant<'a>(cx: &Context<'a>, r: &NameRef<'a>) -> Option<(DefId, &'a str)> {
+    let def = cx.enums.get(&r.def)?;
+    let (&vkey, _) = def.variants.get_key_value(r.variant())?;
+    Some((r.def, vkey))
 }

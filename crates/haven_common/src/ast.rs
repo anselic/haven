@@ -1,5 +1,7 @@
 use std::fmt::{Display, Formatter};
 
+use crate::defs::DefId;
+
 /// Index of a source file in the [`crate::diag::Files`] table. Every token and
 /// every AST node carries one inside its `Span`, so it is deliberately a `Copy`
 /// integer: the filename itself is stored once, in `Files`.
@@ -340,50 +342,51 @@ pub enum Type<'a> {
     /// PRE-RESOLUTION ONLY: a named type as the parser saw it, before anything
     /// knows whether it denotes a struct, an enum or a type parameter — or even
     /// whether it exists. Name resolution rewrites every one of these into
-    /// `Struct`, `Enum` or `Param`, and errors if it can't; no stage after
+    /// `Named` or `Param`, and errors if it can't; no stage after
     /// `haven_front::module` ever constructs or matches one.
     ///
     /// This is what used to be spelled `Struct { name }` in parser output, where
     /// "struct" was a lie roughly a third of the time and both typecheck and
     /// monomorphization had to re-disambiguate it independently.
     Path { path: Path<'a>, args: Vec<GenericArg<'a>> },
-    /// A named struct type, with any generic arguments applied, e.g. `Vec2`
-    /// (`args` empty), `Option<i32>` (one type arg) or `Buf<i32, 8>` (a type arg
-    /// and a const arg - hence `GenericArg`, not `Type`). `args` is always empty
-    /// after monomorphization: a generic struct type is rewritten to a concrete
-    /// instance with a mangled `name` and no `args` (like generic functions). Use
-    /// [`Type::plain_struct`] to build the common no-args case.
-    Struct { name: &'a str, args: Vec<GenericArg<'a>> },
-    /// A named enum, with any generic arguments applied (mirrors `Struct.args`;
-    /// `args` is always empty after monomorphization - a generic enum type is
-    /// rewritten to a concrete instance with a mangled `name`, like a generic
-    /// struct). `repr` is the integer type its discriminant is stored as (default
-    /// `i32`, or set by `@repr(<int>)`). `has_payload` is `false` for a field-less
-    /// C-style enum - a bare scalar discriminant, zero overhead - and `true` for a
-    /// data-carrying (ADT / sum-type) enum, which is an aggregate `{ tag: repr,
-    /// payload: [P x i8] }` laid out via a synthetic struct of the same `name`
-    /// (see the mid end's forward-declaration pass). The repr is baked into the
-    /// type so scalar layout/codegen just delegate to it; `name` keeps enum
-    /// values distinct from a plain integer for typechecking. Produced by
-    /// typecheck when a `Struct(name)` resolves to a declared enum.
-    Enum { name: &'a str, repr: Box<Self>, has_payload: bool, args: Vec<GenericArg<'a>> },
-    /// A generic type parameter, e.g. `T`.
-    /// Produced during typechecking by resolving a `Struct(name)` where the name
-    /// matches a type param in scope. It is abstract and must never survive to
+    /// FRONT + MID: a named type, identified by the definition it refers to.
+    ///
+    /// This is the resolved form of `Path`, and the only named type the resolver,
+    /// the typechecker and monomorphization ever see. Whether it is a struct, an
+    /// enum or an enum's synthetic payload struct is a property of the *definition*
+    /// (`Defs::get(def).kind`), not of the type — which is the whole point: two
+    /// modules may each declare a `Buf`, and a private `Option` in one module no
+    /// longer reserves that name program-wide, because nothing compares names to
+    /// decide whether two types are the same.
+    ///
+    /// `args` is always empty after monomorphization, which rewrites a generic use
+    /// to a freshly minted instance `DefId` with no arguments.
+    ///
+    /// MIL lowering converts these to `Struct`/`Enum` (see `mil::ctx::lower_ty`);
+    /// no stage after that seam sees a `Named`.
+    Named { def: DefId, args: Vec<GenericArg<'a>> },
+    /// A generic type parameter, e.g. `T`, and `Self` inside a trait method
+    /// signature. Produced by name resolution for a path naming a type parameter
+    /// of the enclosing item. It is abstract and must never survive to the
     /// codegen stage.
     Param(&'a str),
 }
 
 impl<'a> Type<'a> {
-    /// A non-generic struct type (no type arguments) - the common case, and the
-    /// only shape any stage after monomorphization ever produces.
-    pub fn plain_struct(name: &'a str) -> Self {
-        Type::Struct { name, args: Vec::new() }
-    }
-
     /// A named type as written, before resolution.
     pub fn path(path: Path<'a>) -> Self {
         Type::Path { path, args: Vec::new() }
+    }
+
+    /// A resolved named type with no generic arguments - the common case, and
+    /// the only shape that survives monomorphization.
+    pub fn named(def: DefId) -> Self {
+        Type::Named { def, args: Vec::new() }
+    }
+
+    /// The definition a resolved named type refers to, if it is one.
+    pub fn def(&self) -> Option<DefId> {
+        match self { Type::Named { def, .. } => Some(*def), _ => None }
     }
 
     /// Reject a [`Type::Path`] that reached a stage past name resolution. Every
@@ -434,18 +437,50 @@ impl<'a> Display for Type<'a> {
                 let args_str = args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
                 write!(f, "{}<{}>", path, args_str)
             },
-            Struct { name, args } if args.is_empty() => write!(f, "{}", name),
-            Struct { name, args } => {
+            // a `Named` has no name to print without `Defs` in hand. Every
+            // diagnostic that can reach one goes through `Context::show`, which
+            // does have it; this fallback exists so `Debug`-ish uses and the
+            // backend's `Display` keep working, and is deliberately ugly so a
+            // missed site is obvious in output rather than merely wrong.
+            Named { def, args } if args.is_empty() => write!(f, "#{}", def.0),
+            Named { def, args } => {
                 let args_str = args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
-                write!(f, "{}<{}>", name, args_str)
-            },
-            Enum { name, args, .. } if args.is_empty() => write!(f, "{}", name),
-            Enum { name, args, .. } => {
-                let args_str = args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
-                write!(f, "{}<{}>", name, args_str)
+                write!(f, "#{}<{}>", def.0, args_str)
             },
             Param(name) => write!(f, "{}", name),
         }
+    }
+}
+
+/// A reference to a named type, in an expression or a pattern.
+///
+/// The parser records only what was written; `def` starts as
+/// [`DefId::UNRESOLVED`] and name resolution replaces it with the identity of
+/// the struct or enum the path names. `path` is kept afterwards for diagnostics
+/// — and, for an `Enum::Variant` reference, its last segment is the variant
+/// name, which stays a string because a variant is not a definition in its own
+/// right: it has no symbol of its own, being a discriminant of its enum.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NameRef<'a> {
+    pub def: DefId,
+    pub path: Path<'a>,
+}
+
+impl<'a> NameRef<'a> {
+    /// As written by the parser, before resolution.
+    pub fn new(path: Path<'a>) -> Self {
+        NameRef { def: DefId::UNRESOLVED, path }
+    }
+
+    /// The variant name. Only meaningful once resolution has confirmed this is
+    /// an `Enum::Variant` reference, which is the only two-segment form that
+    /// survives it.
+    pub fn variant(&self) -> &'a str { self.path.last() }
+}
+
+impl<'a> Display for NameRef<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.path)
     }
 }
 
@@ -470,15 +505,16 @@ pub enum ExprNode<'a> {
     /// collapses to a `Var` under its resolved name, while an enum variant stays
     /// a two-segment `Path` whose first segment is now the enum's *resolved*
     /// name. So downstream, `Path` means exactly one thing — `Enum::Variant` —
-    /// and reads it by index instead of by `split_once("::")`.
-    Path(Path<'a>),
+    /// whose `def` is the enum and whose `variant()` is the variant.
+    Path(NameRef<'a>),
     Slice(Vec<Expr<'a>>),
 
     Struct {
         /// The type being constructed: a one-segment path for a struct literal,
-        /// or `[enum, variant]` for a struct-style variant literal. Resolution
-        /// rewrites the head segment to the resolved type name.
-        name: Path<'a>,
+        /// or `[enum, variant]` for a struct-style variant literal. Either way
+        /// resolution sets `def` to the named *type* — the struct, or the enum
+        /// the variant belongs to.
+        name: NameRef<'a>,
         /// Turbofish generic arguments for a generic struct, e.g. the `i32` in
         /// `Option::<i32> { ... }` or the `i32, 8` in `Buf::<i32, 8> { ... }`.
         /// Empty for a non-generic struct literal.
@@ -580,7 +616,12 @@ pub enum GenericParam<'a> {
     /// implement; empty for an unbounded param. A bounded param's method calls
     /// resolve through the trait in the typechecker, and monomorphization picks
     /// the concrete impl (static dispatch).
-    Type { name: &'a str, bounds: Vec<&'a str> },
+    ///
+    /// A bound names a trait, so it resolves to that trait's identity — which is
+    /// what the conformance table is keyed by. Without that, a bound could only
+    /// be checked by comparing trait *names*, and a `Display` declared in two
+    /// modules would satisfy each other's bounds.
+    Type { name: &'a str, bounds: Vec<NameRef<'a>> },
     /// A compile-time constant parameter, e.g. `const N: u32`.
     Const(&'a str, Type<'a>),
 }
@@ -589,7 +630,10 @@ impl<'a> Display for GenericParam<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             GenericParam::Type { name, bounds } if bounds.is_empty() => write!(f, "{}", name),
-            GenericParam::Type { name, bounds } => write!(f, "{}: {}", name, bounds.join(" + ")),
+            GenericParam::Type { name, bounds } => {
+                let bs = bounds.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(" + ");
+                write!(f, "{}: {}", name, bs)
+            },
             GenericParam::Const(name, ty) => write!(f, "const {}: {}", name, ty),
         }
     }
@@ -674,18 +718,17 @@ pub enum PatternNode<'a> {
     /// an integer-literal pattern, e.g. `5` or `-1`.
     Int(i64),
     /// a field-less enum-variant pattern, e.g. `Status::Continue`. Always the two
-    /// segments `[enum, variant]`; resolution rewrites the enum segment to its
-    /// resolved name.
-    Path(Path<'a>),
+    /// segments `[enum, variant]`; resolution sets `def` to the enum.
+    Path(NameRef<'a>),
     /// a data-carrying enum-variant pattern that destructures the payload, e.g.
     /// `Msg::Note(pitch, vel)`. `path` is `[enum, variant]`; `fields` is one
     /// sub-pattern per payload field (`Bind` to name it, `Wildcard` to ignore).
-    Variant { path: Path<'a>, fields: Vec<Pattern<'a>> },
+    Variant { path: NameRef<'a>, fields: Vec<Pattern<'a>> },
     /// a struct-style variant pattern that destructures a named payload by field,
     /// e.g. `Msg::Cc { id, val }` or `Msg::Cc { id: x, val: _ }`. Each entry is
     /// `(field_name, sub_pattern)`; binding is by field name, so order is free.
     /// The shorthand `{ id }` desugars to `(id, Bind(id))` at parse time.
-    StructVariant { path: Path<'a>, fields: Vec<(&'a str, Pattern<'a>)> },
+    StructVariant { path: NameRef<'a>, fields: Vec<(&'a str, Pattern<'a>)> },
     /// a binding introduced by a `Variant` field, e.g. the `pitch` in
     /// `Msg::Note(pitch, vel)`. Metadata-wrapped so each binding has a unique node
     /// id (its binding identity, mirroring how a `Declare` keys its local).
@@ -826,11 +869,12 @@ pub struct TraitMethod<'a> {
 /// module resolver (which desugars the block's methods to functions but keeps
 /// this relation) and consumed by the typechecker, which verifies `Target`
 /// implements every method of `Trait` and registers the impl so a `T: Trait`
-/// bound can be checked at a generic call site. Names are final (post-mangling).
+/// bound can be checked at a generic call site.
 #[derive(Clone, Debug)]
-pub struct ImplDecl<'a> {
-    pub target: &'a str,
-    pub trait_: &'a str,
+pub struct ImplDecl {
+    /// The implementing type, and the trait it conforms to.
+    pub target: DefId,
+    pub trait_: DefId,
     pub span: Span,
 }
 
@@ -838,6 +882,11 @@ pub struct ImplDecl<'a> {
 pub enum TopLevelNode<'a> {
     Function {
         name: &'a str,
+        /// This item's identity, assigned by name resolution. Everything that
+        /// needs to talk about this definition — its members, its instances, its
+        /// fields, its conformances — keys on this rather than on `name`, which
+        /// is only the symbol it happens to be emitted under.
+        def: DefId,
         /// `true` if declared `pub`; controls whether other modules may import
         /// it. Default (no `pub`) is module-private. See `haven_front::module`.
         is_pub: bool,
@@ -849,6 +898,11 @@ pub enum TopLevelNode<'a> {
     },
     Extern {
         name: &'a str,
+        /// This item's identity, assigned by name resolution. Everything that
+        /// needs to talk about this definition — its members, its instances, its
+        /// fields, its conformances — keys on this rather than on `name`, which
+        /// is only the symbol it happens to be emitted under.
+        def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
         generics: Vec<GenericParam<'a>>,
@@ -858,6 +912,11 @@ pub enum TopLevelNode<'a> {
 
     Struct {
         name: &'a str,
+        /// This item's identity, assigned by name resolution. Everything that
+        /// needs to talk about this definition — its members, its instances, its
+        /// fields, its conformances — keys on this rather than on `name`, which
+        /// is only the symbol it happens to be emitted under.
+        def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
         generics: Vec<GenericParam<'a>>,
@@ -877,6 +936,11 @@ pub enum TopLevelNode<'a> {
     /// field types, e.g. `enum Option<T> { None, Some(T) }`; empty for a plain enum.
     Enum {
         name: &'a str,
+        /// This item's identity, assigned by name resolution. Everything that
+        /// needs to talk about this definition — its members, its instances, its
+        /// fields, its conformances — keys on this rather than on `name`, which
+        /// is only the symbol it happens to be emitted under.
+        def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
         generics: Vec<GenericParam<'a>>,
@@ -889,6 +953,11 @@ pub enum TopLevelNode<'a> {
     /// so a host can look the symbol up (see the CLAP `clap_entry` use case).
     Global {
         name: &'a str,
+        /// This item's identity, assigned by name resolution. Everything that
+        /// needs to talk about this definition — its members, its instances, its
+        /// fields, its conformances — keys on this rather than on `name`, which
+        /// is only the symbol it happens to be emitted under.
+        def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
         ty: Type<'a>,
@@ -917,6 +986,11 @@ pub enum TopLevelNode<'a> {
     /// re-resolving the method call on the concrete instance.
     Trait {
         name: &'a str,
+        /// This item's identity, assigned by name resolution. Everything that
+        /// needs to talk about this definition — its members, its instances, its
+        /// fields, its conformances — keys on this rather than on `name`, which
+        /// is only the symbol it happens to be emitted under.
+        def: DefId,
         is_pub: bool,
         methods: Vec<TraitMethod<'a>>,
     },
@@ -925,7 +999,7 @@ pub enum TopLevelNode<'a> {
 impl<'a> Display for TopLevelNode<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            TopLevelNode::Function { name, is_pub, attributes, generics, params, return_type, body } => {
+            TopLevelNode::Function { name, is_pub, attributes, generics, params, return_type, body, .. } => {
                 let attrs_str = if attributes.is_empty() {
                     String::new()
                 } else {
@@ -938,7 +1012,7 @@ impl<'a> Display for TopLevelNode<'a> {
 
                 write!(f, "{}{}proc {}{}({}) {} {{\n{}}}", attrs_str, pub_str, name, generics_str, params_str, return_type, body_str)
             },
-            TopLevelNode::Extern { name, is_pub, attributes, generics, params, return_type } => {
+            TopLevelNode::Extern { name, is_pub, attributes, generics, params, return_type, .. } => {
                 let attrs_str = if attributes.is_empty() {
                     String::new()
                 } else {
@@ -950,7 +1024,7 @@ impl<'a> Display for TopLevelNode<'a> {
 
                 write!(f, "{}{}extern {}{}({}) {};", attrs_str, pub_str, name, generics_str, params_str, return_type)
             },
-            TopLevelNode::Struct { name, is_pub, attributes, generics, fields } => {
+            TopLevelNode::Struct { name, is_pub, attributes, generics, fields, .. } => {
                 let attrs_str = if attributes.is_empty() {
                     String::new()
                 } else {
@@ -962,7 +1036,7 @@ impl<'a> Display for TopLevelNode<'a> {
 
                 write!(f, "{}{}struct {}{} {{\n{}}}", attrs_str, pub_str, name, generics_str, fields_str)
             },
-            TopLevelNode::Global { name, is_pub, attributes, ty, value } => {
+            TopLevelNode::Global { name, is_pub, attributes, ty, value, .. } => {
                 let attrs_str = if attributes.is_empty() {
                     String::new()
                 } else {
@@ -972,7 +1046,7 @@ impl<'a> Display for TopLevelNode<'a> {
 
                 write!(f, "{}{}const {}: {} = {};", attrs_str, pub_str, name, ty, value.value)
             },
-            TopLevelNode::Enum { name, is_pub, attributes, generics, variants } => {
+            TopLevelNode::Enum { name, is_pub, attributes, generics, variants, .. } => {
                 let attrs_str = if attributes.is_empty() {
                     String::new()
                 } else {
@@ -1013,7 +1087,7 @@ impl<'a> Display for TopLevelNode<'a> {
                 }).collect::<String>();
                 write!(f, "extend {}{} {{\n{}}}", target, trait_str, methods_str)
             },
-            TopLevelNode::Trait { name, is_pub, methods } => {
+            TopLevelNode::Trait { name, is_pub, methods, .. } => {
                 let pub_str = if *is_pub { "pub " } else { "" };
                 let methods_str = methods.iter().map(|m| {
                     let recv = match m.receiver {

@@ -15,13 +15,15 @@ use std::collections::{HashMap, VecDeque};
 use bumpalo::Bump;
 
 use haven_common::ast::*;
-use haven_common::defs::Defs;
+use haven_common::defs::{Def, DefId, Defs, Linkage};
 
 /// one requested instantiation: `base` specialized to `args`, emitted as
 /// `mangled`. `span` is the call site that first asked for it (for errors).
 struct Instantiation<'a> {
-    base: &'a str,
+    base: DefId,
     args: Vec<ConcreteArg<'a>>,
+    /// The identity minted for this instance, and the symbol it is emitted as.
+    def: DefId,
     mangled: &'a str,
     span: Span,
 }
@@ -31,8 +33,10 @@ struct Instantiation<'a> {
 /// const values, matching the struct's declared params. `span` points at the
 /// context that first named the type, for the depth-limit diagnostic.
 struct StructInstantiation<'a> {
-    base: &'a str,
+    base: DefId,
     args: Vec<ConcreteArg<'a>>,
+    /// The identity minted for this instance, and the symbol it is emitted as.
+    def: DefId,
     mangled: &'a str,
     span: Span,
 }
@@ -42,8 +46,10 @@ struct StructInstantiation<'a> {
 /// data-carrying enum is lowered as a struct-shaped aggregate, so once
 /// monomorphized it goes through exactly the same downstream machinery.
 struct EnumInstantiation<'a> {
-    base: &'a str,
+    base: DefId,
     args: Vec<ConcreteArg<'a>>,
+    /// The identity minted for this instance, and the symbol it is emitted as.
+    def: DefId,
     mangled: &'a str,
     span: Span,
 }
@@ -77,27 +83,29 @@ struct Mono<'p, 'a> {
     /// arena the mangled names live in. outlives the AST we produce, so the
     /// `&'a str` names it hands out are valid for `'a`.
     arena: &'a Bump,
-    /// generic function templates, by name.
-    templates: HashMap<&'a str, &'p TopLevel<'a>>,
+    /// generic function templates, by emitted name - which is how a call site
+    /// still names its callee. The identity comes along so an instance can be
+    /// registered against it.
+    templates: HashMap<&'a str, (DefId, &'p TopLevel<'a>)>,
     /// instantiations still to build.
     queue: VecDeque<Instantiation<'a>>,
     /// mangled name per instantiation we've already asked for, keyed by the
     /// mangled string, so repeated call sites reuse one instance (one alloc).
-    seen: HashMap<InstanceKey<'a>, &'a str>,
-    /// generic struct templates, by name (`Option` -> `struct Option<T> {...}`).
-    struct_templates: HashMap<&'a str, &'p TopLevel<'a>>,
+    seen: HashMap<InstanceKey<'a>, (DefId, &'a str)>,
+    /// generic struct templates, by identity.
+    struct_templates: HashMap<DefId, &'p TopLevel<'a>>,
     /// generic-struct instantiations still to build.
     struct_queue: VecDeque<StructInstantiation<'a>>,
     /// mangled name per struct instance already requested, keyed by the mangled
     /// string, so every concrete `Option$i32` use shares one emitted struct.
-    struct_seen: HashMap<InstanceKey<'a>, &'a str>,
-    /// generic enum templates, by name (`Option` -> `enum Option<T> {...}`).
-    enum_templates: HashMap<&'a str, &'p TopLevel<'a>>,
+    struct_seen: HashMap<InstanceKey<'a>, (DefId, &'a str)>,
+    /// generic enum templates, by identity.
+    enum_templates: HashMap<DefId, &'p TopLevel<'a>>,
     /// generic-enum instantiations still to build.
     enum_queue: VecDeque<EnumInstantiation<'a>>,
     /// mangled name per enum instance already requested, keyed by the mangled
     /// string, so every concrete `Option$i32` use shares one emitted enum.
-    enum_seen: HashMap<InstanceKey<'a>, &'a str>,
+    enum_seen: HashMap<InstanceKey<'a>, (DefId, &'a str)>,
     /// best-effort span for the context currently being rebuilt, so a struct or
     /// enum instance requested deep inside `subst_ty` (which has no span of its
     /// own) still gets a source location for the depth-limit error.
@@ -137,11 +145,11 @@ enum ConcreteArg<'a> {
     Const(usize),
 }
 
-/// What identifies one instantiation: the template's name plus the concrete
-/// arguments it was specialized with. The instance caches key on *this* rather
-/// than on the mangled string, so `mangle_ty` no longer has to be injective for
-/// the compiler to be correct - see its doc comment.
-type InstanceKey<'a> = (&'a str, Vec<ConcreteArg<'a>>);
+/// What identifies one instantiation: the template plus the concrete arguments
+/// it was specialized with. The instance caches key on *this* rather than on the
+/// mangled string, so `mangle_ty` no longer has to be injective for the compiler
+/// to be correct - see its doc comment.
+type InstanceKey<'a> = (DefId, Vec<ConcreteArg<'a>>);
 
 /// Substitute a bound const param with its literal value; leave literals and
 /// unbound params untouched.
@@ -184,7 +192,8 @@ fn const_literal<'a>(cb: &ConstBind<'a>) -> ExprNode<'a> {
 /// would now mean two distinct instances emitted under one symbol - a duplicate
 /// symbol at link time, which is loud - rather than two instances silently
 /// sharing one instantiation.
-fn mangle_ty(ty: &Type) -> String {
+fn mangle_ty<'a>(defs: &Defs<'a>, arena: &'a Bump, ty: &Type<'a>) -> String {
+    let mangle_ty = |t: &Type<'a>| mangle_ty(defs, arena, t);
     match ty {
         Type::Void => "void".into(),
         Type::Bool => "bool".into(),
@@ -198,18 +207,21 @@ fn mangle_ty(ty: &Type) -> String {
         Type::Float64 => "f64".into(),
         Type::Str => "str".into(),
         Type::Path { path, .. } => Type::unresolved(path),
-        Type::Enum { name, .. } => (*name).into(),
         Type::Pointer(inner) => format!(".ptr{}", mangle_ty(inner)),
         Type::Array(inner, n) => format!(".arr{}.{}", n.expect_lit(), mangle_ty(inner)),
         Type::Slice(inner) => format!(".slice{}", mangle_ty(inner)),
         Type::Simd(inner, n) => format!(".simd{}.{}", n.expect_lit(), mangle_ty(inner)),
-        Type::Struct { name, args } if args.is_empty() => (*name).into(),
-        // a generic struct instance is normally flattened to a bare name before it
+        // a named type mangles as its emitted symbol, which is already unique
+        // across the program.
+        Type::Named { def, args } if args.is_empty() => defs.symbol(*def, arena).into(),
+        // a generic instance is normally flattened to a bare identity before it
         // reaches here (subst_ty requests it); encode defensively with balanced
         // brackets so nested args stay unambiguous.
-        Type::Struct { name, args } => {
-            let inner = args.iter().map(mangle_generic_arg).collect::<Vec<_>>().join(".");
-            format!(".struct.{}.{}", name, inner)
+        Type::Named { def, args } => {
+            let inner = args.iter()
+                .map(|a| mangle_generic_arg(defs, arena, a))
+                .collect::<Vec<_>>().join(".");
+            format!(".struct.{}.{}", defs.symbol(*def, arena), inner)
         }
         // Neither should appear in a fully-concrete instantiation; encode them
         // defensively rather than panicking so a bug surfaces as a bad symbol.
@@ -223,9 +235,9 @@ fn mangle_ty(ty: &Type) -> String {
 
 /// Mangle a generic argument in a struct type's arg list (a type or a const
 /// value). Only reached on the defensive not-yet-flattened path in `mangle_ty`.
-fn mangle_generic_arg(ga: &GenericArg) -> String {
+fn mangle_generic_arg<'a>(defs: &Defs<'a>, arena: &'a Bump, ga: &GenericArg<'a>) -> String {
     match ga {
-        GenericArg::Type(t) => mangle_ty(t),
+        GenericArg::Type(t) => mangle_ty(defs, arena, t),
         GenericArg::Const(cv) => cv.to_string(),
     }
 }
@@ -233,125 +245,153 @@ fn mangle_generic_arg(ga: &GenericArg) -> String {
 /// Identifier-safe fragment for one generic arg: a mangled type, or a const's
 /// decimal value (`4`). Const values are pure digits and no type mangles to bare
 /// digits, so the two never collide within a single arg list.
-fn mangle_arg(arg: &ConcreteArg) -> String {
+fn mangle_arg<'a>(defs: &Defs<'a>, arena: &'a Bump, arg: &ConcreteArg<'a>) -> String {
     match arg {
-        ConcreteArg::Type(t) => mangle_ty(t),
+        ConcreteArg::Type(t) => mangle_ty(defs, arena, t),
         ConcreteArg::Const(n) => n.to_string(),
     }
 }
 
 /// `id`, `[i32]` -> `id$slice_i32`; `splat`, `f32`, `4` -> `splat$f32$4`.
-fn mangle_name(base: &str, args: &[ConcreteArg]) -> String {
-    let parts = args.iter().map(mangle_arg).collect::<Vec<_>>().join("$");
+fn mangle_name<'a>(defs: &Defs<'a>, arena: &'a Bump, base: &str, args: &[ConcreteArg<'a>]) -> String {
+    let parts = args.iter().map(|a| mangle_arg(defs, arena, a)).collect::<Vec<_>>().join("$");
     format!("{}${}", base, parts)
 }
 
-/// Human-readable spelling of an instance, for diagnostics only. Strips the
-/// module slug off `base` (`std.alloc$alloc` -> `alloc`, since the slug is a
-/// linkage detail, not something the user wrote) and re-attaches the turbofish:
-/// `alloc`, `[Vec2]` -> `alloc::<Vec2>`. Best-effort; never fed back into the
-/// compiler.
-fn display_name(base: &str, args: &[ConcreteArg]) -> String {
-    let leaf = base.rsplit('$').next().unwrap_or(base);
+/// Human-readable spelling of an instance, for diagnostics only: `alloc`,
+/// `[Vec2]` -> `alloc::<Vec2>`.
+///
+/// The template's *source* name is used, not its symbol, so the module slug
+/// never appears - it is a linkage detail, not something the user wrote. That
+/// used to be recovered by stripping everything before the last `$`, which only
+/// worked because the slug happened to contain no `$` of its own.
+fn display_name<'a>(defs: &Defs<'a>, base: DefId, args: &[ConcreteArg<'a>]) -> String {
     let targs = args.iter().map(|a| match a {
+        ConcreteArg::Type(Type::Named { def, .. }) => defs.show(*def),
         ConcreteArg::Type(t) => t.to_string(),
         ConcreteArg::Const(n) => n.to_string(),
     }).collect::<Vec<_>>().join(", ");
-    format!("{}::<{}>", leaf, targs)
+    format!("{}::<{}>", defs.get(base).source_name, targs)
 }
 
 impl<'p, 'a> Mono<'p, 'a> {
     /// Record an instantiation request, return its (stable) mangled name.
     /// de-dupes so each distinct instance is built exactly once.
-    fn request(&mut self, base: &'a str, args: Vec<ConcreteArg<'a>>, span: Span) -> &'a str {
+    fn request(&mut self, base_name: &'a str, args: Vec<ConcreteArg<'a>>, span: Span) -> &'a str {
+        let base = self.templates[base_name].0;
         let key = (base, args.clone());
-        if let Some(&m) = self.seen.get(&key) {
+        if let Some(&(_, m)) = self.seen.get(&key) {
             return m;
         }
-        let mangled: &'a str = self.arena.alloc_str(&mangle_name(base, &args));
-        self.seen.insert(key, mangled);
-        self.defs.add_instance(mangled, base, display_name(base, &args));
-        self.queue.push_back(Instantiation { base, args, mangled, span });
+        let (def, mangled) = self.mint(base, &args);
+        self.seen.insert(key, (def, mangled));
+        self.queue.push_back(Instantiation { base, args, def, mangled, span });
         mangled
+    }
+
+    /// The template `base` names, for the instantiation loops.
+    fn template_of(&self, base: DefId) -> &'p TopLevel<'a> {
+        self.templates.values().find(|(d, _)| *d == base).expect("function template").1
+    }
+
+    /// Mint the identity for one instance of `base`: a fresh `DefId` emitted
+    /// under the mangled symbol, recorded against the template it specializes.
+    ///
+    /// The instance is `Fixed`, not `Mangled`: its symbol is derived from the
+    /// template's already-final symbol plus the arguments, not from a source name
+    /// plus a module slug.
+    fn mint(&mut self, base: DefId, args: &[ConcreteArg<'a>]) -> (DefId, &'a str) {
+        let base_sym = self.defs.symbol(base, self.arena);
+        let mangled: &'a str =
+            self.arena.alloc_str(&mangle_name(self.defs, self.arena, base_sym, args));
+        let display = display_name(self.defs, base, args);
+        let t = self.defs.get(base);
+        let (module, kind, source_name, is_pub, span) =
+            (t.module, t.kind, t.source_name, t.is_pub, t.span.clone());
+        let def = self.defs.alloc(Def {
+            module, kind, source_name, is_pub, linkage: Linkage::Fixed(mangled), span,
+        });
+        self.defs.add_instance(def, base, display);
+        (def, mangled)
     }
 
     /// Record a generic-struct instantiation request, return its mangled name
     /// (`Buf` + `[i32, 8]` -> `Buf$i32$8`). de-dupes so each concrete instance is
     /// built once. Enqueues onto the struct queue, drained after all functions.
-    fn request_struct(&mut self, base: &'a str, args: Vec<ConcreteArg<'a>>) -> &'a str {
+    fn request_struct(&mut self, base: DefId, args: Vec<ConcreteArg<'a>>) -> DefId {
         let key = (base, args.clone());
-        if let Some(&m) = self.struct_seen.get(&key) {
-            return m;
+        if let Some(&(d, _)) = self.struct_seen.get(&key) {
+            return d;
         }
-        let mangled: &'a str = self.arena.alloc_str(&mangle_name(base, &args));
-        self.struct_seen.insert(key, mangled);
-        self.defs.add_instance(mangled, base, display_name(base, &args));
+        let (def, mangled) = self.mint(base, &args);
+        self.struct_seen.insert(key, (def, mangled));
         self.struct_queue.push_back(StructInstantiation {
-            base, args, mangled, span: self.cur_span.clone(),
+            base, args, def, mangled, span: self.cur_span.clone(),
         });
-        mangled
+        def
     }
 
     /// Record a generic-enum instantiation request, return its mangled name
     /// (`Option` + `[i32]` -> `Option$i32`). de-dupes so each concrete instance is
     /// built once. Enqueues onto the enum queue, drained (interleaved with the
     /// struct queue, since either can request the other) after all functions.
-    fn request_enum(&mut self, base: &'a str, args: Vec<ConcreteArg<'a>>) -> &'a str {
+    fn request_enum(&mut self, base: DefId, args: Vec<ConcreteArg<'a>>) -> DefId {
         let key = (base, args.clone());
-        if let Some(&m) = self.enum_seen.get(&key) {
-            return m;
+        if let Some(&(d, _)) = self.enum_seen.get(&key) {
+            return d;
         }
-        let mangled: &'a str = self.arena.alloc_str(&mangle_name(base, &args));
-        self.enum_seen.insert(key, mangled);
-        self.defs.add_instance(mangled, base, display_name(base, &args));
+        let (def, mangled) = self.mint(base, &args);
+        self.enum_seen.insert(key, (def, mangled));
+        // a data variant's payload struct is an identity of its own, and the
+        // instance needs its own set - the template's payloads are typed in terms
+        // of the template's parameters.
+        let TopLevelNode::Enum { variants, .. } = &self.enum_templates[&base].value
+        else { unreachable!("enum template is not an enum") };
+        let data_variants: Vec<&'a str> = variants.iter()
+            .filter(|(_, _, payload)| !payload.is_empty())
+            .map(|(v, _, _)| *v).collect();
+        for v in data_variants {
+            let sym = self.arena.alloc_str(&format!("{}${}", mangled, v));
+            self.defs.add_payload(def, v, sym);
+        }
         self.enum_queue.push_back(EnumInstantiation {
-            base, args, mangled, span: self.cur_span.clone(),
+            base, args, def, mangled, span: self.cur_span.clone(),
         });
-        mangled
+        def
     }
 
     /// Substitute bound type and const params in `ty` with their concrete
-    /// bindings. In the raw pre-typecheck AST a type param looks like
-    /// `Type::Struct(name)` (parser can't tell it from a real struct), so both
-    /// Struct and Param get substituted when bound.
+    /// bindings.
     ///
-    /// A concrete generic-struct type (`Option<i32>`, args non-empty) is
-    /// monomorphized here: its args are substituted, the instance is requested,
-    /// and the mangled flat name (`Option$i32`, no args) is returned. Every
-    /// downstream pass therefore only ever sees ordinary no-arg structs.
+    /// A concrete generic type (`Option<i32>`, args non-empty) is monomorphized
+    /// here: its args are substituted, the instance is requested, and the flat
+    /// instance identity (no args) is returned. Every downstream pass therefore
+    /// only ever sees ordinary no-arg named types.
     ///
-    /// FIXME: a real struct named the same as a bound type param gets wrongly
-    /// rewritten inside a generic body (e.g. `struct T` used inside `f<T>`). no
-    /// scope check distinguishes them. edge case, but there's no guard.
+    /// A type parameter is a `Type::Param` and a real type is a `Type::Named`,
+    /// so the two can no longer be confused. This used to carry a FIXME: both
+    /// arrived as `Type::Struct { name }`, and a real `struct T` used inside an
+    /// `f<T>` was substituted as if it were the parameter. A `DefId` is not a
+    /// name a parameter can collide with, so that is now impossible to write.
     fn subst_ty(&mut self, ty: &Type<'a>, b: &Bindings<'a>) -> Type<'a> {
         match ty {
             Type::Param(n) if b.types.contains_key(n) => b.types[n].clone(),
-            // a bare struct name that's actually a bound type param; substitute it.
-            Type::Struct { name, args } if args.is_empty() && b.types.contains_key(name) =>
-                b.types[name].clone(),
-            // a concrete generic-struct instance: substitute inside its args
-            // (types and const values), then mangle + request it, collapsing to the
-            // flat instance name. The raw (pre-typecheck) AST never distinguishes a
-            // struct name from an enum name - both parse as `Type::Struct{name,args}`
-            // (see the front end's own comment on this) - so which queue to request
-            // from is decided here by template-table membership. Either way the
-            // result stays `Type::plain_struct(mangled)`: the SECOND typecheck pass
-            // (post-mono) re-derives `Type::Enum` from this bare form via its own
-            // `resolve_type`, once it sees the concrete instance's own declaration.
-            Type::Struct { name, args } if !args.is_empty() => {
+            // a concrete generic instance: substitute inside its args (types and
+            // const values), then request it, collapsing to the flat instance.
+            // Whether it is a struct or an enum is decided by template-table
+            // membership; either way the result is a no-arg `Named`.
+            Type::Named { def, args } if !args.is_empty() => {
                 let cargs: Vec<ConcreteArg<'a>> = args.iter().map(|a| match a {
                     GenericArg::Type(t) => ConcreteArg::Type(self.subst_ty(t, b)),
                     GenericArg::Const(cv) => ConcreteArg::Const(subst_cv(cv, b).expect_lit()),
                 }).collect();
-                let mangled = if self.enum_templates.contains_key(name) {
-                    self.request_enum(name, cargs)
+                let inst = if self.enum_templates.contains_key(def) {
+                    self.request_enum(*def, cargs)
                 } else {
-                    self.request_struct(name, cargs)
+                    self.request_struct(*def, cargs)
                 };
-                Type::plain_struct(mangled)
+                Type::named(inst)
             }
-            // an ordinary (non-generic) struct: copy through.
-            Type::Struct { name, .. } => Type::plain_struct(name),
             Type::Pointer(inner)  => Type::Pointer(Box::new(self.subst_ty(inner, b))),
             Type::Array(inner, n) => Type::Array(Box::new(self.subst_ty(inner, b)), subst_cv(n, b)),
             Type::Slice(inner)    => Type::Slice(Box::new(self.subst_ty(inner, b))),
@@ -373,8 +413,6 @@ impl<'p, 'a> Mono<'p, 'a> {
         match ga {
             GenericArg::Type(Type::Param(n)) if b.consts.contains_key(n) =>
                 GenericArg::Const(ConstVal::Lit(b.consts[n].val)),
-            GenericArg::Type(Type::Struct { name, args }) if args.is_empty() && b.consts.contains_key(name) =>
-                GenericArg::Const(ConstVal::Lit(b.consts[name].val)),
             GenericArg::Type(t) => GenericArg::Type(self.subst_ty(t, b)),
             GenericArg::Const(cv) => GenericArg::Const(subst_cv(cv, b)),
         }
@@ -413,9 +451,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                         ExprNode::Call { func: Box::new(new_func), type_args: subst_targs, args: new_args }
                     }
                 } else if let ExprNode::Path(path) = &func.value {
-                    if let Some((ename, _)) = path.as_variant()
-                        .filter(|(en, _)| self.enum_templates.contains_key(en))
-                    {
+                    if self.enum_templates.contains_key(&path.def) {
                         // a generic-enum tuple/unit variant constructor with
                         // turbofish (`Option::Some::<i32>(5)`, `Option::None::<i32>()`):
                         // mangle to the concrete instance and rewrite the path's enum
@@ -426,9 +462,11 @@ impl<'p, 'a> Mono<'p, 'a> {
                             GenericArg::Type(t) => ConcreteArg::Type(t.clone()),
                             GenericArg::Const(cv) => ConcreteArg::Const(cv.expect_lit()),
                         }).collect();
-                        let mangled = self.request_enum(ename, concrete);
+                        let inst = self.request_enum(path.def, concrete);
+                        let mut new_path = path.clone();
+                        new_path.def = inst;
                         let new_func = Metadata::new(
-                            ExprNode::Path(path.with_head(mangled)), func.span.clone());
+                            ExprNode::Path(new_path), func.span.clone());
                         ExprNode::Call {
                             func: Box::new(new_func),
                             type_args: Vec::new(),
@@ -452,9 +490,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                     fields.iter().map(|(f, e)| (*f, self.rebuild_expr(e, b))).collect();
                 if type_args.is_empty() {
                     ExprNode::Struct { name: name.clone(), type_args: Vec::new(), fields: new_fields }
-                } else if let Some((ename, _)) = name.as_variant()
-                    .filter(|(en, _)| self.enum_templates.contains_key(en))
-                {
+                } else if self.enum_templates.contains_key(&name.def) {
                     // a generic-enum struct-style variant literal with turbofish
                     // (`Result::Ok::<i32, str> { val: x }`): mangle to the concrete
                     // instance and rewrite the literal's enum segment to it
@@ -464,18 +500,22 @@ impl<'p, 'a> Mono<'p, 'a> {
                         GenericArg::Type(t) => ConcreteArg::Type(self.subst_ty(t, b)),
                         GenericArg::Const(cv) => ConcreteArg::Const(subst_cv(cv, b).expect_lit()),
                     }).collect();
-                    let mangled = self.request_enum(ename, cargs);
-                    ExprNode::Struct { name: name.with_head(mangled), type_args: Vec::new(), fields: new_fields }
+                    let inst = self.request_enum(name.def, cargs);
+                    let mut new_name = name.clone();
+                    new_name.def = inst;
+                    ExprNode::Struct { name: new_name, type_args: Vec::new(), fields: new_fields }
                 } else {
                     // a generic struct literal -> its concrete instance. mangle
                     // exactly like the generic *type* `Option<i32>`: substitute the
                     // args, request the instance, swap in the flat name and drop the
                     // turbofish (mil looks the fields up by this name).
-                    let concrete = Type::Struct { name: name.last(), args: type_args.clone() };
-                    let Type::Struct { name: mangled, .. } = self.subst_ty(&concrete, b) else {
-                        unreachable!("subst_ty of a Struct is always a Struct")
+                    let concrete = Type::Named { def: name.def, args: type_args.clone() };
+                    let Type::Named { def: inst, .. } = self.subst_ty(&concrete, b) else {
+                        unreachable!("subst_ty of a Named is always a Named")
                     };
-                    ExprNode::Struct { name: Path::single(mangled), type_args: Vec::new(), fields: new_fields }
+                    let mut new_name = name.clone();
+                    new_name.def = inst;
+                    ExprNode::Struct { name: new_name, type_args: Vec::new(), fields: new_fields }
                 }
             }
             ExprNode::Access { base, field } =>
@@ -560,9 +600,9 @@ impl<'p, 'a> Mono<'p, 'a> {
         &mut self,
         tl: &TopLevel<'a>,
         b: &Bindings<'a>,
-        name_override: Option<&'a str>,
+        name_override: Option<(DefId, &'a str)>,
     ) -> TopLevel<'a> {
-        let TopLevelNode::Function { name, is_pub, attributes, params, return_type, body, .. } = &tl.value
+        let TopLevelNode::Function { name, def, is_pub, attributes, params, return_type, body, .. } = &tl.value
         else { unreachable!("rebuild_function called on a non-function") };
 
         // any struct instance requested while substituting this function's types
@@ -575,7 +615,8 @@ impl<'p, 'a> Mono<'p, 'a> {
 
         Metadata::new(
             TopLevelNode::Function {
-                name: name_override.unwrap_or(name),
+                name: name_override.map_or(*name, |(_, n)| n),
+                def: name_override.map_or(*def, |(d, _)| d),
                 is_pub: *is_pub,
                 attributes: attributes.clone(),
                 generics: Vec::new(),
@@ -595,7 +636,7 @@ impl<'p, 'a> Mono<'p, 'a> {
     /// rewritten and its instance emitted, or downstream passes never see it. For
     /// a struct with only scalar / plain-struct fields this is a no-op copy.
     fn rebuild_struct(&mut self, tl: &TopLevel<'a>, b: &Bindings<'a>) -> TopLevel<'a> {
-        let TopLevelNode::Struct { name, is_pub, attributes, fields, .. } = &tl.value
+        let TopLevelNode::Struct { name, def, is_pub, attributes, fields, .. } = &tl.value
         else { unreachable!("rebuild_struct called on a non-struct") };
 
         // instances requested while substituting these fields report against the
@@ -608,6 +649,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         Metadata::new(
             TopLevelNode::Struct {
                 name,
+                def: *def,
                 is_pub: *is_pub,
                 attributes: attributes.clone(),
                 generics: Vec::new(),
@@ -623,7 +665,7 @@ impl<'p, 'a> Mono<'p, 'a> {
     /// its flat instance name and requested. Discriminants and field names pass
     /// through unchanged.
     fn rebuild_enum(&mut self, tl: &TopLevel<'a>, b: &Bindings<'a>) -> TopLevel<'a> {
-        let TopLevelNode::Enum { name, is_pub, attributes, variants, .. } = &tl.value
+        let TopLevelNode::Enum { name, def, is_pub, attributes, variants, .. } = &tl.value
         else { unreachable!("rebuild_enum called on a non-enum") };
 
         self.cur_span = tl.span.clone();
@@ -638,6 +680,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         Metadata::new(
             TopLevelNode::Enum {
                 name,
+                def: *def,
                 is_pub: *is_pub,
                 attributes: attributes.clone(),
                 generics: Vec::new(),
@@ -659,26 +702,28 @@ impl<'p, 'a> Mono<'p, 'a> {
 pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'a Bump)
     -> Result<Vec<TopLevel<'a>>, Error>
 {
-    let templates: HashMap<&'a str, &TopLevel<'a>> = program.iter()
+    // functions stay keyed by emitted name: a call site names its callee, and
+    // there is no `Type` involved to carry an identity. Types key by identity.
+    let templates: HashMap<&'a str, (DefId, &TopLevel<'a>)> = program.iter()
         .filter_map(|tl| match &tl.value {
-            TopLevelNode::Function { name, generics, .. } if !generics.is_empty() =>
-                Some((*name, tl)),
+            TopLevelNode::Function { name, def, generics, .. } if !generics.is_empty() =>
+                Some((*name, (*def, tl))),
             _ => None,
         })
         .collect();
 
-    let struct_templates: HashMap<&'a str, &TopLevel<'a>> = program.iter()
+    let struct_templates: HashMap<DefId, &TopLevel<'a>> = program.iter()
         .filter_map(|tl| match &tl.value {
-            TopLevelNode::Struct { name, generics, .. } if !generics.is_empty() =>
-                Some((*name, tl)),
+            TopLevelNode::Struct { def, generics, .. } if !generics.is_empty() =>
+                Some((*def, tl)),
             _ => None,
         })
         .collect();
 
-    let enum_templates: HashMap<&'a str, &TopLevel<'a>> = program.iter()
+    let enum_templates: HashMap<DefId, &TopLevel<'a>> = program.iter()
         .filter_map(|tl| match &tl.value {
-            TopLevelNode::Enum { name, generics, .. } if !generics.is_empty() =>
-                Some((*name, tl)),
+            TopLevelNode::Enum { def, generics, .. } if !generics.is_empty() =>
+                Some((*def, tl)),
             _ => None,
         })
         .collect();
@@ -728,9 +773,10 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
     // NOTE: the depth/count guards below fire after pop, i.e. after this item was
     // already built+queued - so we overshoot the cutoff by one instance. fine as
     // a backstop, just not a tight bound.
-    let mut instances: HashMap<&'a str, Vec<TopLevel<'a>>> = HashMap::new();
+    let mut instances: HashMap<DefId, Vec<TopLevel<'a>>> = HashMap::new();
     let mut materialized = 0usize;
     while let Some(inst) = m.queue.pop_front() {
+        let base_name = m.defs.get(inst.base).source_name;
         materialized += 1;
         if let Some(deep) = inst.args.iter().find_map(|a| match a {
             ConcreteArg::Type(t) if type_depth(t) > TYPE_DEPTH_LIMIT => Some(t),
@@ -741,7 +787,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
                     "monomorphization of '{}' produced a type argument nested deeper \
                      than {} (`{}`); this usually means unbounded generic recursion \
                      (a generic function calling itself at an ever-growing type)",
-                    inst.base, TYPE_DEPTH_LIMIT, deep,
+                    base_name, TYPE_DEPTH_LIMIT, deep,
                 ),
                 span: inst.span,
             });
@@ -750,12 +796,12 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
             return Err(Error {
                 msg: format!(
                     "monomorphization exceeded {} instantiations at call to '{}'",
-                    INSTANTIATION_LIMIT, inst.base,
+                    INSTANTIATION_LIMIT, base_name,
                 ),
                 span: inst.span,
             });
         }
-        let tl = m.templates[inst.base];
+        let tl = m.template_of(inst.base);
         let TopLevelNode::Function { generics, .. } = &tl.value else { unreachable!() };
         // pair each declared generic param with its concrete arg (positional).
         let mut bindings = Bindings::empty();
@@ -770,7 +816,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
                 _ => unreachable!("generic param/arg kind mismatch - validated in typecheck"),
             }
         }
-        let f = m.rebuild_function(tl, &bindings, Some(inst.mangled));
+        let f = m.rebuild_function(tl, &bindings, Some((inst.def, inst.mangled)));
         instances.entry(inst.base).or_default().push(f);
     }
 
@@ -781,11 +827,12 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
     // same depth/count guards backstop growing recursion (`struct Bad<T> { p:
     // *Bad<*T> }`). fn instances above already seeded these queues via their
     // param/return/body types.
-    let mut struct_instances: HashMap<&'a str, Vec<TopLevel<'a>>> = HashMap::new();
-    let mut enum_instances: HashMap<&'a str, Vec<TopLevel<'a>>> = HashMap::new();
+    let mut struct_instances: HashMap<DefId, Vec<TopLevel<'a>>> = HashMap::new();
+    let mut enum_instances: HashMap<DefId, Vec<TopLevel<'a>>> = HashMap::new();
     let mut materialized = 0usize;
     loop {
         if let Some(inst) = m.struct_queue.pop_front() {
+            let base_name = m.defs.get(inst.base).source_name;
             materialized += 1;
             if let Some(deep) = inst.args.iter().find_map(|a| match a {
                 ConcreteArg::Type(t) if type_depth(t) > TYPE_DEPTH_LIMIT => Some(t),
@@ -796,7 +843,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
                         "monomorphization of struct '{}' produced a type argument nested \
                          deeper than {} (`{}`); this usually means an unbounded generic \
                          struct (one whose field mentions itself at an ever-growing type)",
-                        inst.base, TYPE_DEPTH_LIMIT, deep,
+                        base_name, TYPE_DEPTH_LIMIT, deep,
                     ),
                     span: inst.span,
                 });
@@ -805,12 +852,12 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
                 return Err(Error {
                     msg: format!(
                         "monomorphization exceeded {} struct/enum instantiations at '{}'",
-                        INSTANTIATION_LIMIT, inst.base,
+                        INSTANTIATION_LIMIT, base_name,
                     ),
                     span: inst.span,
                 });
             }
-            let tl = m.struct_templates[inst.base];
+            let tl = m.struct_templates[&inst.base];
             let TopLevelNode::Struct { generics, fields, attributes, is_pub, .. } = &tl.value
             else { unreachable!() };
             // bind each declared param to its concrete arg (positional): type params
@@ -835,6 +882,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
             let s = Metadata::new(
                 TopLevelNode::Struct {
                     name: inst.mangled,
+                    def: inst.def,
                     is_pub: *is_pub,
                     attributes: attributes.clone(),
                     generics: Vec::new(),
@@ -846,6 +894,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
             continue;
         }
         if let Some(inst) = m.enum_queue.pop_front() {
+            let base_name = m.defs.get(inst.base).source_name;
             materialized += 1;
             if let Some(deep) = inst.args.iter().find_map(|a| match a {
                 ConcreteArg::Type(t) if type_depth(t) > TYPE_DEPTH_LIMIT => Some(t),
@@ -856,7 +905,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
                         "monomorphization of enum '{}' produced a type argument nested \
                          deeper than {} (`{}`); this usually means an unbounded generic \
                          enum (one whose payload mentions itself at an ever-growing type)",
-                        inst.base, TYPE_DEPTH_LIMIT, deep,
+                        base_name, TYPE_DEPTH_LIMIT, deep,
                     ),
                     span: inst.span,
                 });
@@ -865,12 +914,12 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
                 return Err(Error {
                     msg: format!(
                         "monomorphization exceeded {} struct/enum instantiations at '{}'",
-                        INSTANTIATION_LIMIT, inst.base,
+                        INSTANTIATION_LIMIT, base_name,
                     ),
                     span: inst.span,
                 });
             }
-            let tl = m.enum_templates[inst.base];
+            let tl = m.enum_templates[&inst.base];
             let TopLevelNode::Enum { generics, variants, attributes, is_pub, .. } = &tl.value
             else { unreachable!() };
             let mut bindings = Bindings::empty();
@@ -899,6 +948,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
             let e = Metadata::new(
                 TopLevelNode::Enum {
                     name: inst.mangled,
+                    def: inst.def,
                     is_pub: *is_pub,
                     attributes: attributes.clone(),
                     generics: Vec::new(),
@@ -917,16 +967,16 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
     let mut output: Vec<TopLevel<'a>> = Vec::with_capacity(program.len());
     for (i, tl) in program.iter().enumerate() {
         match &tl.value {
-            TopLevelNode::Function { name, generics, .. } if !generics.is_empty() => {
-                if let Some(insts) = instances.remove(name) {
+            TopLevelNode::Function { def, generics, .. } if !generics.is_empty() => {
+                if let Some(insts) = instances.remove(def) {
                     output.extend(insts);
                 }
             }
             TopLevelNode::Function { .. } => output.push(concrete.remove(&i).unwrap()),
             // a generic struct template drops out (its `Param` fields never lay
             // out), replaced by its concrete instances - emitted here, next to it.
-            TopLevelNode::Struct { name, generics, .. } if !generics.is_empty() => {
-                if let Some(insts) = struct_instances.remove(name) {
+            TopLevelNode::Struct { def, generics, .. } if !generics.is_empty() => {
+                if let Some(insts) = struct_instances.remove(def) {
                     output.extend(insts);
                 }
             }
@@ -934,8 +984,8 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
             // concrete instances (each a plain, fully-substituted data enum - the
             // typecheck/mil/backend pipeline handles it exactly like a hand-written
             // one, per the field-less/data-enum machinery already in place).
-            TopLevelNode::Enum { name, generics, .. } if !generics.is_empty() => {
-                if let Some(insts) = enum_instances.remove(name) {
+            TopLevelNode::Enum { def, generics, .. } if !generics.is_empty() => {
+                if let Some(insts) = enum_instances.remove(def) {
                     output.extend(insts);
                 }
             }

@@ -2,7 +2,10 @@
 use haven_common::ast::*;
 use haven_mid::mil::*;
 use crate::abi::{self, Abi, Reg, UnionTable};
-use crate::layout::{self, StructTable};
+use std::collections::HashMap;
+
+use haven_common::defs::DefId;
+use crate::layout::{self, TypeTable, TypeInfo, EnumRepr};
 
 fn emit_value(val: Value) -> String {
     match val {
@@ -13,7 +16,7 @@ fn emit_value(val: Value) -> String {
     }
 }
 
-fn emit_type(ty: &Type) -> String {
+fn emit_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> String {
     use Type::*;
 
     match ty {
@@ -32,23 +35,25 @@ fn emit_type(ty: &Type) -> String {
         Float64 => "double".to_string(),
         Pointer(_) => "ptr".to_string(),
 
-        Array(t, n) => format!("[{} x {}]", n.expect_lit(), emit_type(t)),
+        Array(t, n) => format!("[{} x {}]", n.expect_lit(), emit_type(t, types)),
         Slice(_) => "{ ptr, i32 }".to_string(), // struct { ptr, len }
         // `str` is a raw NUL-terminated `*const u8` (a C string), so a bare `ptr`
         Str => "ptr".to_string(),
-        // a field-less enum lowers to its integer discriminant repr; a data enum
-        // is an aggregate, referenced (like a struct) by opaque pointer.
-        Enum { has_payload: false, repr, .. } => emit_type(repr),
-        Enum { has_payload: true, .. } => "ptr".to_string(),
+        // a field-less enum lowers to its integer discriminant repr; a data
+        // enum, like a struct, is an aggregate referenced by opaque pointer.
+        // Struct values are always referenced via pointer in our codegen (see
+        // `lower_function` and `lower_expr` for `ExprNode::Struct`); the named
+        // LLVM type `%Name` is only used by `AllocaStruct` and `FieldPtr`, which
+        // emit it directly rather than going through here.
+        Named { def, .. } => match types.get(def) {
+            Some(TypeInfo { enum_: Some(EnumRepr { repr, has_payload: false }), .. }) =>
+                emit_type(repr, types),
+            _ => "ptr".to_string(),
+        },
         // <size x element_type>
-        Simd(ty, size) => format!("<{} x {}>", size.expect_lit(), emit_type(ty)),
+        Simd(ty, size) => format!("<{} x {}>", size.expect_lit(), emit_type(ty, types)),
         // a function pointer is a plain opaque pointer
         Function { .. } => "ptr".to_string(),
-        // struct values are always referenced via pointer in our codegen
-        // (see lower_function and lower_expr for ExprNode::Struct)
-        // the named LLVM type `%Name` is only used by AllocaStruct and FieldPtr,
-        // which emit it directly without going through emit_type
-        Struct { .. } => "ptr".to_string(),
         // generic functions are skipped during MIL lowering, so a type param
         // should never reach codegen.
         Param(name) => unreachable!("generic type parameter `{name}` survived to LLVM codegen"),
@@ -58,15 +63,17 @@ fn emit_type(ty: &Type) -> String {
 /// Layout type for a field *inside* a struct definition. Differs from
 /// `emit_type` only for structs because a struct value is normally a `ptr`
 /// handle, but as a field it is inlined as the named type `%Name`.
-fn emit_field_type(ty: &Type) -> String {
+fn emit_field_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>, symbols: &HashMap<DefId, &'a str>) -> String {
     match ty {
-        Type::Struct { name, .. } => format!("%{name}"),
-        // a data enum inlined as a field is its named aggregate `%Name`; a
+        // an aggregate inlined as a field is its named type `%Name`; a
         // field-less enum is just its scalar repr (falls through to emit_type).
-        Type::Enum { name, has_payload: true, .. } => format!("%{name}"),
-        Type::Array(t, n) => format!("[{} x {}]", n.expect_lit(), emit_field_type(t)),
-        Type::Simd(t, n) => format!("<{} x {}>", n.expect_lit(), emit_field_type(t)),
-        _ => emit_type(ty),
+        Type::Named { def, .. } if !matches!(
+            types.get(def),
+            Some(TypeInfo { enum_: Some(EnumRepr { has_payload: false, .. }), .. }),
+        ) => format!("%{}", symbols[def]),
+        Type::Array(t, n) => format!("[{} x {}]", n.expect_lit(), emit_field_type(t, types, symbols)),
+        Type::Simd(t, n) => format!("<{} x {}>", n.expect_lit(), emit_field_type(t, types, symbols)),
+        _ => emit_type(ty, types),
     }
 }
 
@@ -113,12 +120,16 @@ impl FastMathFlags {
 struct EmitCtx<'a> {
     buf: String,
     current_fast_math_flags: FastMathFlags,
-    /// Struct layouts, for on-the-fly SysV ABI classification of by-value structs.
-    structs: StructTable<'a>,
-    /// Data-enum aggregate name -> variant payload-struct names, so a by-value
-    /// enum crossing an FFI boundary classifies its payload as a real union
-    /// (see `abi::classify_into`) instead of raw bytes.
-    unions: UnionTable<'a>,
+    /// Named-type layouts, for on-the-fly SysV ABI classification of by-value
+    /// aggregates.
+    types: TypeTable<'a>,
+    /// Emitted symbol per definition. This is the only thing codegen needs from
+    /// the definition table: everything else about a type is in `types`.
+    symbols: HashMap<DefId, &'a str>,
+    /// Data-enum aggregate -> its variant payload structs, so a by-value enum
+    /// crossing an FFI boundary classifies its payload as a real union (see
+    /// `abi::classify_into`) instead of raw bytes.
+    unions: UnionTable,
     /// Fresh-name counter for ABI coercion temporaries (`%abi.N`), kept separate
     /// from MIL's `%tN` registers so the two never collide.
     abi_ctr: usize,
@@ -141,15 +152,29 @@ impl<'a> EmitCtx<'a> {
         name
     }
 
-    /// ABI classification of a by-value aggregate (struct, or data-enum
-    /// aggregate) named `name`.
-    fn struct_abi(&self, name: &str) -> Abi {
-        abi::classify(&Type::plain_struct(name), &self.structs, &self.unions)
+    /// ABI classification of a by-value aggregate: a struct, or a data enum's
+    /// `{ $tag, $payload }` aggregate.
+    fn struct_abi(&self, def: DefId) -> Abi {
+        abi::classify(&Type::named(def), &self.types, &self.unions)
     }
 
-    /// Byte alignment of struct `name`, for `byval`/`sret` attributes.
-    fn struct_align(&self, name: &str) -> usize {
-        layout::align_of(&Type::plain_struct(name), &self.structs)
+    /// Byte alignment of an aggregate, for `byval`/`sret` attributes.
+    fn struct_align(&self, def: DefId) -> usize {
+        layout::align_of(&Type::named(def), &self.types)
+    }
+
+    /// Whether `def` is laid out as an aggregate - a struct or a data-carrying
+    /// enum - rather than a bare scalar discriminant.
+    fn is_aggregate(&self, def: DefId) -> bool {
+        !matches!(
+            self.types.get(&def),
+            Some(TypeInfo { enum_: Some(EnumRepr { has_payload: false, .. }), .. }),
+        )
+    }
+
+    /// The symbol an aggregate is declared under: its LLVM `%Name`.
+    fn sym(&self, def: DefId) -> &'a str {
+        self.symbols[&def]
     }
 }
 
@@ -184,7 +209,7 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 Type::Simd(inner, _) => inner.as_ref(),
                 _ => &ty,
             };
-            let ty_str = emit_type(&ty);
+            let ty_str = emit_type(&ty, &cx.types);
             if matches!(inner, Type::Float32 | Type::Float64) {
                 emitln!(cx, "    {dst} = fneg {ty_str} {}", emit_value(val));
             } else {
@@ -276,7 +301,7 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 Shr if is_signed_int => "ashr",
                 Shr if is_unsigned_int => "lshr",
                 Shr => unreachable!("{}", ty),
-            }, emit_type(&ty), emit_value(lhs), emit_value(rhs));
+            }, emit_type(&ty, &cx.types), emit_value(lhs), emit_value(rhs));
         }
         Call { dst, callee, args, return_type, sret } => {
             // %result = call <return_type> <callee>(<arg_type> <arg_val>, ...)
@@ -290,7 +315,7 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             let mut arg_frags: Vec<String> = Vec::new();
             for (val, ty) in args {
                 match &ty {
-                    Type::Struct { name, .. } | Type::Enum { has_payload: true, name, .. } => match cx.struct_abi(name) {
+                    Type::Named { def, .. } if cx.is_aggregate(*def) => match cx.struct_abi(*def) {
                         Abi::Direct(regs) => {
                             let ptr = emit_value(val);
                             for (t, v) in emit_struct_to_regs(cx, &ptr, &regs) {
@@ -301,9 +326,9 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                         // copies our storage into the callee's frame, so the
                         // callee owns its copy (matches the C ABI).
                         Abi::Memory => arg_frags.push(format!(
-                            "ptr byval(%{name}) align {} {}", cx.struct_align(name), emit_value(val))),
+                            "ptr byval(%{}) align {} {}", cx.sym(*def), cx.struct_align(*def), emit_value(val))),
                     },
-                    _ => arg_frags.push(format!("{} {}", emit_type(&ty), emit_value(val))),
+                    _ => arg_frags.push(format!("{} {}", emit_type(&ty, &cx.types), emit_value(val))),
                 }
             }
             let args_str = arg_frags.join(", ");
@@ -328,7 +353,7 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                     }
                     // Memory struct return: void call with a leading sret slot arg.
                     Abi::Memory => {
-                        let sret_arg = format!("ptr sret(%{name}) align {} {slot}", cx.struct_align(name));
+                        let sret_arg = format!("ptr sret(%{}) align {} {slot}", cx.sym(name), cx.struct_align(name));
                         let all_args = if args_str.is_empty() {
                             sret_arg
                         } else {
@@ -339,7 +364,7 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 },
                 None => {
                     let dst_prefix = dst.map(|dst| format!("{dst} = ")).unwrap_or_default();
-                    let call_ty = emit_type(&return_type);
+                    let call_ty = emit_type(&return_type, &cx.types);
                     emitln!(cx, "    {dst_prefix}call {call_ty} {callee_str}({args_str})");
                 }
             }
@@ -348,23 +373,23 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             // %result = getelementptr <PointeeTy>, ptr <BasePtr> {, <IdxTy> <Idx> }*
             // The index type must match the operand's real width (e.g. a u64
             // index emits an i64 operand), not a hardcoded i32.
-            emitln!(cx, "    {dst} = getelementptr {}, ptr {slice}, {} {index}", emit_type(&element_ty), emit_type(&index_ty)),
+            emitln!(cx, "    {dst} = getelementptr {}, ptr {slice}, {} {index}", emit_type(&element_ty, &cx.types), emit_type(&index_ty, &cx.types)),
         InsertValue { dst, elem, ty, val, index } =>
-            emitln!(cx, "    {dst} = insertvalue {{ ptr, i32 }} {elem}, {} {}, {index}", emit_type(&ty), emit_value(val)),
+            emitln!(cx, "    {dst} = insertvalue {{ ptr, i32 }} {elem}, {} {}, {index}", emit_type(&ty, &cx.types), emit_value(val)),
         ExtractValue { dst, val, index } => emitln!(cx, "    {dst} = extractvalue {{ ptr, i32 }} {}, {index}", emit_value(val)),
 
-        Alloca { dst, ty, align } =>  emitln!(cx, "    {dst} = alloca {}, align {}", emit_type(&ty), align.unwrap_or(1)),
-        Store { ptr, val, ty, align } => emitln!(cx, "    store {} {}, ptr {ptr}, align {}", emit_type(&ty), emit_value(val), align.unwrap_or(1)),
-        Load { dst, ptr, ty, align } => emitln!(cx, "    {dst} = load {}, ptr {ptr}, align {}", emit_type(&ty), align.unwrap_or(1)),
+        Alloca { dst, ty, align } =>  emitln!(cx, "    {dst} = alloca {}, align {}", emit_type(&ty, &cx.types), align.unwrap_or(1)),
+        Store { ptr, val, ty, align } => emitln!(cx, "    store {} {}, ptr {ptr}, align {}", emit_type(&ty, &cx.types), emit_value(val), align.unwrap_or(1)),
+        Load { dst, ptr, ty, align } => emitln!(cx, "    {dst} = load {}, ptr {ptr}, align {}", emit_type(&ty, &cx.types), align.unwrap_or(1)),
 
-        AllocaArray { dst, ty, length } => emitln!(cx, "    {dst} = alloca [{} x {}]", length, emit_type(&ty)),
+        AllocaArray { dst, ty, length } => emitln!(cx, "    {dst} = alloca [{} x {}]", length, emit_type(&ty, &cx.types)),
         IndexArray { dst, ty, length, array, index } =>
-            emitln!(cx, "    {dst} = getelementptr [{length} x {}], ptr {array}, i32 0, i32 {index}", emit_type(&ty)),
+            emitln!(cx, "    {dst} = getelementptr [{length} x {}], ptr {array}, i32 0, i32 {index}", emit_type(&ty, &cx.types)),
 
-        AllocaStruct { dst, name, align } =>
-            emitln!(cx, "    {dst} = alloca %{name}, align {}", align.unwrap_or(1)),
-        FieldPtr { dst, struct_name, base, field_index } =>
-            emitln!(cx, "    {dst} = getelementptr %{struct_name}, ptr {base}, i32 0, i32 {field_index}"),
+        AllocaStruct { dst, def, align } =>
+            emitln!(cx, "    {dst} = alloca %{}, align {}", cx.sym(def), align.unwrap_or(1)),
+        FieldPtr { dst, struct_def, base, field_index } =>
+            emitln!(cx, "    {dst} = getelementptr %{}, ptr {base}, i32 0, i32 {field_index}", cx.sym(struct_def)),
         // a zero-offset gep off the global symbol yields its address as a `ptr`
         GlobalPtr { dst, name } =>
             emitln!(cx, "    {dst} = getelementptr i8, ptr @{name}, i64 0"),
@@ -373,7 +398,7 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             // classic LLVM sizeof: index one element past a null base, then
             // reinterpret the resulting address as an integer. The target data
             // layout decides the stride, so struct padding/alignment is exact.
-            let elem = emit_field_type(&ty);
+            let elem = emit_field_type(&ty, &cx.types, &cx.symbols);
             emitln!(cx, "    {dst}.szp = getelementptr {elem}, ptr null, i32 1");
             emitln!(cx, "    {dst} = ptrtoint ptr {dst}.szp to i64");
         }
@@ -460,12 +485,12 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             // emitln!(cx, "    {dst} = {inst} {from_ty_str} {} to {to_ty_str}", emit_value(val));
         }
         Splat { dst, val, ty, size } => {
-            let ty_str = emit_type(&ty);
+            let ty_str = emit_type(&ty, &cx.types);
             let simd_ty = format!("<{size} x {}>", ty_str);
             emitln!(cx, "    {dst} = insertelement {simd_ty} undef, {ty_str} {}, i32 0", emit_value(val));
         }
         Shuffle { dst, value_size, v0, v1, ty, size, mask } => {
-            let ty_str = emit_type(&ty);
+            let ty_str = emit_type(&ty, &cx.types);
             let simd_ty = format!("<{} x {}>", value_size, ty_str);
             let mask = mask.into_iter().map(|i| format!("i32 {}", i)).collect::<Vec<_>>().join(", ");
             emitln!(cx, "    {dst} = shufflevector {simd_ty} {v0}, {simd_ty} {v1}, <{size} x i32> <{mask}>");
@@ -498,12 +523,12 @@ fn emit_terminator<'a>(cx: &mut EmitCtx<'a>, term: Terminator<'a>) {
             }
             None => emitln!(cx, "    ret void"),
         },
-        Return(Some((value, ty))) => emitln!(cx, "    ret {} {}", emit_type(&ty), emit_value(value)),
+        Return(Some((value, ty))) => emitln!(cx, "    ret {} {}", emit_type(&ty, &cx.types), emit_value(value)),
         Jump(label) => emitln!(cx, "    br label %{label}"),
         Branch { cond, then_block, else_block } =>
             emitln!(cx, "    br i1 {cond}, label %{then_block}, label %{else_block}"),
         Switch { value, value_ty, default, cases } => {
-            let ty = emit_type(&value_ty);
+            let ty = emit_type(&value_ty, &cx.types);
             let arms = cases.iter()
                 .map(|(c, b)| format!("{ty} {}, label %{b}", emit_value(Value::Const(c.clone()))))
                 .collect::<Vec<_>>()
@@ -590,31 +615,31 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
     // it into the `ptr` register the MIL body expects - recorded here, emitted
     // once inside the entry block below.
     let mut sig_params: Vec<String> = Vec::new();
-    let mut param_rebuilds: Vec<(Register, &str, Vec<Reg>, Vec<String>)> = Vec::new();
+    let mut param_rebuilds: Vec<(Register, DefId, Vec<Reg>, Vec<String>)> = Vec::new();
     for (reg, ty) in &func.params {
         match ty {
-            Type::Struct { name, .. } | Type::Enum { has_payload: true, name, .. } => match cx.struct_abi(name) {
+            Type::Named { def, .. } if cx.is_aggregate(*def) => match cx.struct_abi(*def) {
                 Abi::Direct(regs) => {
                     let names: Vec<String> = regs.iter().map(|_| cx.abi_tmp()).collect();
                     for (r, n) in regs.iter().zip(&names) {
                         sig_params.push(format!("{} {n}", r.to_llvm()));
                     }
-                    param_rebuilds.push((*reg, name, regs, names));
+                    param_rebuilds.push((*reg, *def, regs, names));
                 }
                 // Memory struct: received as a `byval` pointer - the caller's
                 // copy, which this frame owns. (The MIL body still copies it into
                 // a local on entry; harmless, just a second copy.)
                 Abi::Memory => sig_params.push(format!(
-                    "ptr byval(%{name}) align {} {reg}", cx.struct_align(name))),
+                    "ptr byval(%{}) align {} {reg}", cx.sym(*def), cx.struct_align(*def))),
             },
-            _ => sig_params.push(format!("{} {reg}", emit_type(ty))),
+            _ => sig_params.push(format!("{} {reg}", emit_type(ty, &cx.types))),
         }
     }
 
     // Return type: a Direct struct returns its coerced aggregate (no sret param);
     // a Memory struct keeps the sret out-pointer; anything else is itself.
     let ret_ty_str = match &func.sret {
-        Some((reg, name)) => match cx.struct_abi(name) {
+        Some((reg, name)) => match cx.struct_abi(*name) {
             Abi::Direct(regs) => {
                 // The slot the body writes into is now a local, not a parameter;
                 // record it so each `ret` loads and returns the coerced value.
@@ -623,13 +648,13 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
             }
             Abi::Memory => {
                 cx.sret_direct = None;
-                sig_params.insert(0, format!("ptr sret(%{name}) align {} {reg}", cx.struct_align(name)));
+                sig_params.insert(0, format!("ptr sret(%{}) align {} {reg}", cx.sym(*name), cx.struct_align(*name)));
                 "void".to_string()
             }
         },
         None => {
             cx.sret_direct = None;
-            emit_type(&func.return_type)
+            emit_type(&func.return_type, &cx.types)
         }
     };
 
@@ -642,13 +667,13 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
     let has_preamble = !param_rebuilds.is_empty() || cx.sret_direct.is_some();
     let first_block = func.blocks.first().map(|b| b.id);
     for (reg, name, regs, names) in param_rebuilds {
-        emitln!(cx, "    {reg} = alloca %{name}");
+        emitln!(cx, "    {reg} = alloca %{}", cx.sym(name));
         emit_regs_to_struct(cx, &reg.to_string(), &regs, &names);
     }
     if let Some((reg, _)) = &cx.sret_direct {
         // struct name for the alloca comes from func.sret
         let (_, name) = func.sret.as_ref().unwrap();
-        emitln!(cx, "    {reg} = alloca %{name}");
+        emitln!(cx, "    {reg} = alloca %{}", cx.sym(*name));
     }
     if has_preamble {
         if let Some(id) = first_block {
@@ -677,14 +702,14 @@ fn emit_extern<'a>(cx: &mut EmitCtx<'a>, ext: ExternDecl<'a>) {
     // A Memory-class struct return uses a hidden leading sret pointer and returns
     // void - the same shape MIL lowers the matching call to.
     let ret_str = match &ext.return_type {
-        Type::Struct { name, .. } | Type::Enum { has_payload: true, name, .. } => match cx.struct_abi(name) {
+        Type::Named { def, .. } if cx.is_aggregate(*def) => match cx.struct_abi(*def) {
             Abi::Direct(regs) => coerced_aggregate_ty(&regs),
             Abi::Memory => {
-                params.insert(0, format!("ptr sret(%{name}) align {}", cx.struct_align(name)));
+                params.insert(0, format!("ptr sret(%{}) align {}", cx.sym(*def), cx.struct_align(*def)));
                 "void".to_string()
             }
         },
-        _ => emit_type(&ext.return_type),
+        _ => emit_type(&ext.return_type, &cx.types),
     };
     emitln!(cx, "declare {ret_str} @{}({}){attrs_str}", ext.name, params.join(", "));
 }
@@ -694,11 +719,11 @@ fn emit_extern<'a>(cx: &mut EmitCtx<'a>, ext: ExternDecl<'a>) {
 /// Memory struct is one `byval` pointer; anything else is one type as usual.
 fn abi_param_types<'a>(cx: &EmitCtx<'a>, ty: &Type<'a>) -> Vec<String> {
     match ty {
-        Type::Struct { name, .. } | Type::Enum { has_payload: true, name, .. } => match cx.struct_abi(name) {
+        Type::Named { def, .. } if cx.is_aggregate(*def) => match cx.struct_abi(*def) {
             Abi::Direct(regs) => regs.iter().map(|r| r.to_llvm().to_string()).collect(),
-            Abi::Memory => vec![format!("ptr byval(%{name}) align {}", cx.struct_align(name))],
+            Abi::Memory => vec![format!("ptr byval(%{}) align {}", cx.sym(*def), cx.struct_align(*def))],
         },
-        _ => vec![emit_type(ty)],
+        _ => vec![emit_type(ty, &cx.types)],
     }
 }
 
@@ -718,14 +743,14 @@ fn emit_string_blob(bytes: &[u8]) -> String {
 
 /// Render a global's constant initializer as an LLVM constant expression (the
 /// text after the type in `@g = constant <ty> <init>`).
-fn emit_const_init(init: &ConstInit) -> String {
+fn emit_const_init<'a>(init: &ConstInit<'a>, types: &TypeTable<'a>, symbols: &HashMap<DefId, &'a str>) -> String {
     match init {
         ConstInit::Scalar(c) => emit_value(Value::Const(c.clone())),
         // `{ <fty> <finit>, ... }` - the surrounding type (`%Name`) is emitted by
         // the caller, and each field carries its own inline type.
         ConstInit::Struct(fields) => {
             let body = fields.iter()
-                .map(|(ty, init)| format!("{} {}", emit_field_type(ty), emit_const_init(init)))
+                .map(|(ty, init)| format!("{} {}", emit_field_type(ty, types, symbols), emit_const_init(init, types, symbols)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{{ {body} }}")
@@ -734,7 +759,7 @@ fn emit_const_init(init: &ConstInit) -> String {
         // emitted by the caller (top-level global or enclosing struct field).
         ConstInit::Array(elem_ty, elems) => {
             let body = elems.iter()
-                .map(|init| format!("{} {}", emit_field_type(elem_ty), emit_const_init(init)))
+                .map(|init| format!("{} {}", emit_field_type(elem_ty, types, symbols), emit_const_init(init, types, symbols)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("[{body}]")
@@ -756,12 +781,12 @@ fn emit_module<'a>(cx: &mut EmitCtx<'a>, module: Module<'a>) {
 
     // typecheck rejected unknown field types so there can be no forward reference
     // to a not yet declared struct
-    for (name, fields) in &module.structs {
-        let body = fields.iter()
-            .map(|(_, ty)| emit_field_type(ty))
+    for def in &module.structs {
+        let body = module.types[def].fields.iter()
+            .map(|(_, ty)| emit_field_type(ty, &module.types, &module.symbols))
             .collect::<Vec<_>>()
             .join(", ");
-        emitln!(cx, "%{name} = type {{ {body} }}");
+        emitln!(cx, "%{} = type {{ {body} }}", module.symbols[def]);
     }
     if !module.structs.is_empty() {
         emitln!(cx, "");
@@ -772,7 +797,8 @@ fn emit_module<'a>(cx: &mut EmitCtx<'a>, module: Module<'a>) {
     for g in &module.globals {
         let linkage = if g.export { "dso_local dllexport constant" } else { "internal constant" };
         emitln!(cx, "@{} = {linkage} {} {}",
-            g.name, emit_field_type(&g.ty), emit_const_init(&g.init));
+            g.name, emit_field_type(&g.ty, &module.types, &module.symbols),
+            emit_const_init(&g.init, &module.types, &module.symbols));
     }
     if !module.globals.is_empty() {
         emitln!(cx, "");
@@ -804,14 +830,16 @@ pub fn emit<'a>(module: Module<'a>) -> String {
     let mut header = format!("; ModuleID = 'compiled_module'\n");
     header.push_str(PREPEND.trim_start());
 
-    // Struct layouts, for SysV ABI classification during emission.
-    let structs: StructTable = module.structs.iter().cloned().collect();
+    // Layouts + symbols, for ABI classification and `%Name` references.
+    let types = module.types.clone();
+    let symbols = module.symbols.clone();
     let unions: UnionTable = module.enum_unions.clone();
 
     let mut cx = EmitCtx {
         buf: header,
         current_fast_math_flags: FastMathFlags::None,
-        structs,
+        types,
+        symbols,
         unions,
         abi_ctr: 0,
         sret_direct: None,

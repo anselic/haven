@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
+use haven_common::defs::DefId;
+use haven_common::layout::TypeTable;
 use crate::typecheck::EnumDef;
 use super::ir::*;
 
@@ -16,11 +18,10 @@ pub(crate) fn int_const(repr: &Type, val: i64) -> Const {
     }
 }
 
-/// If `path` is an `Enum::Variant` reference, the discriminant as a typed const.
-pub(crate) fn enum_const<'a>(enums: &HashMap<&'a str, EnumDef<'a>>, path: &Path<'a>) -> Option<Const> {
-    let (ename, variant) = path.as_variant()?;
-    let def = enums.get(ename)?;
-    Some(int_const(&def.repr, *def.variants.get(variant)?))
+/// If `r` is an `Enum::Variant` reference, the discriminant as a typed const.
+pub(crate) fn enum_const<'a>(enums: &HashMap<DefId, EnumDef<'a>>, r: &NameRef<'a>) -> Option<Const> {
+    let def = enums.get(&r.def)?;
+    Some(int_const(&def.repr, *def.variants.get(r.variant())?))
 }
 
 /// The discriminant const for a match PATTERN's variant, looked up against
@@ -31,43 +32,26 @@ pub(crate) fn enum_const<'a>(enums: &HashMap<&'a str, EnumDef<'a>>, path: &Path<
 /// it rewrites construction call/struct-literal sites; only the variant part
 /// (after `::`) of `path` is trustworthy here. See `check_variant_pattern`'s
 /// matching base-name relaxation on the typecheck side of this same problem.
-pub(crate) fn pattern_variant_const<'a>(enums: &HashMap<&'a str, EnumDef<'a>>, ename: &'a str, path: &Path<'a>) -> Const {
-    let variant = path.as_variant().expect("enum pattern validated in typecheck").1;
-    let def = &enums[ename];
-    int_const(&def.repr, def.variants[variant])
+pub(crate) fn pattern_variant_const<'a>(enums: &HashMap<DefId, EnumDef<'a>>, ename: DefId, r: &NameRef<'a>) -> Const {
+    let def = &enums[&ename];
+    int_const(&def.repr, def.variants[r.variant()])
 }
 
-/// Rewrites a declared type's `Struct(name)` into `Type::Enum` for any declared
-/// enum, recursing through compound types. Struct field types arrive already
-/// resolved (via typecheck's `cx.structs`), but declared param/return/local
-/// types are the raw parser types, so lowering resolves them here.
-pub(crate) fn resolve_enum_ty<'a>(enums: &HashMap<&'a str, EnumDef<'a>>, ty: &Type<'a>) -> Type<'a> {
+/// The aggregate backing a value passed/stored by pointer: a real struct, or a
+/// data-carrying enum (whose `{ $tag, $payload }` aggregate is registered as a
+/// struct under the same identity). Every "this is an aggregate, route it by
+/// pointer" site funnels through here so a data enum is never mistaken for a
+/// scalar. A field-less enum returns `None` - it is a bare scalar.
+///
+/// This used to be answerable from the type alone, when `Type::Enum` carried a
+/// `has_payload` copy. It is now a table lookup, which is the point: the fact
+/// belongs to the definition, not to every mention of it.
+pub fn aggregate_def<'a>(ty: &Type<'a>, enums: &HashMap<DefId, EnumDef<'a>>) -> Option<DefId> {
     match ty {
-        // by the time MIL runs, mono has already flattened every generic enum
-        // instance to a concrete (args-empty) name, so `args` is always empty here.
-        Type::Struct { name, args } if args.is_empty() && enums.contains_key(name) =>
-            Type::Enum { name, repr: Box::new(enums[name].repr.clone()), has_payload: enums[name].has_payload, args: Vec::new() },
-        Type::Pointer(i) => Type::Pointer(Box::new(resolve_enum_ty(enums, i))),
-        Type::Array(i, n) => Type::Array(Box::new(resolve_enum_ty(enums, i)), n.clone()),
-        Type::Slice(i)    => Type::Slice(Box::new(resolve_enum_ty(enums, i))),
-        Type::Simd(i, n)  => Type::Simd(Box::new(resolve_enum_ty(enums, i)), n.clone()),
-        Type::Function { params, return_type } => Type::Function {
-            params: params.iter().map(|p| resolve_enum_ty(enums, p)).collect(),
-            return_type: Box::new(resolve_enum_ty(enums, return_type)),
+        Type::Named { def, .. } => match enums.get(def) {
+            Some(e) if !e.has_payload => None,
+            _ => Some(*def),
         },
-        other => other.clone(),
-    }
-}
-
-/// The synthetic struct backing an aggregate value passed/stored by pointer: a
-/// real struct, or a data-carrying enum (whose `{ tag, payload }` aggregate is
-/// registered as a struct of the same name). Every "this is an aggregate, route
-/// it by pointer" site funnels through here so a data enum is never mistaken for
-/// a scalar. A field-less enum returns `None` - it is a bare scalar.
-pub fn aggregate_struct_name<'a>(ty: &Type<'a>) -> Option<&'a str> {
-    match ty {
-        Type::Struct { name, .. } => Some(name),
-        Type::Enum { name, has_payload: true, .. } => Some(name),
         _ => None,
     }
 }
@@ -92,10 +76,14 @@ pub struct LowerCtx<'a> {
     /// Module-level globals in scope: final emitted name -> type. Referenced as
     /// bare vars, distinct from `env` (locals/params), which shadow these.
     pub globals: HashMap<&'a str, Type<'a>>,
-    pub structs: HashMap<&'a str, Vec<(&'a str, Type<'a>)>>, // from typecheck
+    pub types: TypeTable<'a>, // from typecheck
+    /// Emitted symbol per definition, for the aggregates this module declares.
+    pub symbols: HashMap<DefId, &'a str>,
+    /// `(enum, variant) -> payload struct`, from typecheck.
+    pub payloads: HashMap<(DefId, &'a str), DefId>,
     /// Declared enums (from typecheck): resolves an `Enum::Variant` reference to
     /// its discriminant constant during lowering.
-    pub enums: HashMap<&'a str, EnumDef<'a>>,
+    pub enums: HashMap<DefId, EnumDef<'a>>,
     pub node_types: HashMap<usize, Type<'a>>, // from typecheck
     /// Name resolution from typecheck: `Var` node id -> its param/local binding.
     /// Absent for globals/functions, which resolve via `globals` / direct calls.

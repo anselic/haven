@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use haven_common::ast::*;
 use crate::typecheck::EnumDef;
 use super::ir::*;
-use super::ctx::{LowerCtx, LoopTargets, int_const, pattern_variant_const, resolve_enum_ty, aggregate_struct_name, coerce, enum_const};
+use haven_common::defs::DefId;
+use super::ctx::{LowerCtx, LoopTargets, int_const, pattern_variant_const, aggregate_def, coerce, enum_const};
 use super::expr::{lower_expr, lower_lvalue, copy_struct};
 
 fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
@@ -18,8 +19,6 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
         }
 
         StmtNode::Declare { ty, value, .. } => {
-            // resolve enum names so an enum local takes the scalar path below.
-            let ty = &resolve_enum_ty(&cx.enums, ty);
             // this local's binding identity is the Declare stmt's node id, matching
             // what name resolution recorded for every use of it.
             let binding = Binding::Local(stmt.id);
@@ -27,7 +26,7 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             // (collect_locals pre-allocated it into env); point the literal at that
             // slot so it fills it in place instead of alloca'ing at the literal
             // site - which, inside a loop, would grow the stack every iteration.
-            if matches!(ty, Type::Array(_, _) | Type::Struct { .. })
+            if (matches!(ty, Type::Array(_, _)) || aggregate_def(ty, &cx.enums).is_some())
                 && matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_))
             {
                 let (slot, _) = cx.env[&binding]; // pre-allocated in the entry block
@@ -48,8 +47,8 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
                     cx.env.insert(binding, (arr_reg, ty.clone()));
                 }
                 // a struct or data-enum aggregate: same value-semantics rules.
-                _ if aggregate_struct_name(ty).is_some() => {
-                    let struct_name = aggregate_struct_name(ty).unwrap();
+                _ if aggregate_def(ty, &cx.enums).is_some() => {
+                    let struct_name = aggregate_def(ty, &cx.enums).unwrap();
                     let src_reg = match val {
                         Value::Reg(r) => r,
                         _ => unreachable!(),
@@ -62,7 +61,7 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
                         cx.env.insert(binding, (src_reg, ty.clone()));
                     } else {
                         let dst_reg = cx.fresh_reg();
-                        cx.emit(Inst::AllocaStruct { dst: dst_reg, name: struct_name, align: None });
+                        cx.emit(Inst::AllocaStruct { dst: dst_reg, def: struct_name, align: None });
                         copy_struct(cx, struct_name, src_reg, dst_reg);
                         cx.env.insert(binding, (dst_reg, ty.clone()));
                     }
@@ -185,19 +184,20 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             // qualifier, since mono never rewrites match-pattern text (see
             // `pattern_variant_const`). Named distinctly from the `ename` bound
             // below by destructuring `agg` (same value, different scope/purpose).
-            let switch_ename: Option<&'a str> = match &scrut_ty { Type::Enum { name, .. } => Some(*name), _ => None };
-            let (switch_val, value_ty, agg): (Value, Type<'a>, Option<(&'a str, Register)>) =
-                match &scrut_ty {
-                    Type::Enum { repr, has_payload: true, name, .. } => {
+            let switch_ename: Option<DefId> = scrut_ty.def().filter(|d| cx.enums.contains_key(d));
+            let (switch_val, value_ty, agg): (Value, Type<'a>, Option<(DefId, Register)>) =
+                match switch_ename.map(|d| (d, &cx.enums[&d])) {
+                    Some((def, e)) if e.has_payload => {
+                        let repr = e.repr.clone();
                         let ptr = match scrut_val { Value::Reg(r) => r, _ => unreachable!() };
                         let tag_ptr = cx.fresh_reg();
-                        cx.emit(Inst::FieldPtr { dst: tag_ptr, struct_name: name, base: ptr, field_index: 0 });
+                        cx.emit(Inst::FieldPtr { dst: tag_ptr, struct_def: def, base: ptr, field_index: 0 });
                         let tag = cx.fresh_reg();
-                        cx.emit(Inst::Load { dst: tag, ptr: tag_ptr, ty: (**repr).clone(), align: None });
-                        (Value::Reg(tag), (**repr).clone(), Some((*name, ptr)))
+                        cx.emit(Inst::Load { dst: tag, ptr: tag_ptr, ty: repr.clone(), align: None });
+                        (Value::Reg(tag), repr, Some((def, ptr)))
                     }
-                    Type::Enum { repr, .. } => (scrut_val, (**repr).clone(), None),
-                    t => (scrut_val, t.clone(), None),
+                    Some((_, e)) => { let repr = e.repr.clone(); (scrut_val, repr, None) }
+                    None => (scrut_val, scrut_ty.clone(), None),
                 };
 
             let merge_block = cx.fresh_block();
@@ -237,15 +237,14 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
                 // (a FieldPtr per bound field, no fresh storage), keyed by each
                 // binding's node id so uses in the body resolve to it.
                 if let (PatternNode::Variant { path, fields }, Some((ename, ptr))) = (&pat.value, agg) {
-                    let variant = path.as_variant().unwrap().1;
-                    let pstruct = crate::typecheck::enum_payload_struct_name(ename, variant);
+                    let pstruct = cx.payloads[&(ename, path.variant())];
                     let payload_base = cx.fresh_reg();
-                    cx.emit(Inst::FieldPtr { dst: payload_base, struct_name: ename, base: ptr, field_index: 1 });
+                    cx.emit(Inst::FieldPtr { dst: payload_base, struct_def: ename, base: ptr, field_index: 1 });
                     for (i, fpat) in fields.iter().enumerate() {
                         if let PatternNode::Bind(_) = &fpat.value {
-                            let fty = cx.structs[pstruct][i].1.clone();
+                            let fty = cx.types[&pstruct].fields[i].1.clone();
                             let fp = cx.fresh_reg();
-                            cx.emit(Inst::FieldPtr { dst: fp, struct_name: pstruct, base: payload_base, field_index: i });
+                            cx.emit(Inst::FieldPtr { dst: fp, struct_def: pstruct, base: payload_base, field_index: i });
                             cx.env.insert(Binding::Local(fpat.id), (fp, fty));
                         }
                     }
@@ -254,16 +253,16 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
                 // the payload struct's index for that name (order in the pattern is
                 // irrelevant). A `_` field is skipped, a `Bind` becomes a view.
                 if let (PatternNode::StructVariant { path, fields }, Some((ename, ptr))) = (&pat.value, agg) {
-                    let variant = path.as_variant().unwrap().1;
-                    let pstruct = crate::typecheck::enum_payload_struct_name(ename, variant);
+                    let pstruct = cx.payloads[&(ename, path.variant())];
                     let payload_base = cx.fresh_reg();
-                    cx.emit(Inst::FieldPtr { dst: payload_base, struct_name: ename, base: ptr, field_index: 1 });
+                    cx.emit(Inst::FieldPtr { dst: payload_base, struct_def: ename, base: ptr, field_index: 1 });
                     for (fname, fpat) in fields {
                         if let PatternNode::Bind(_) = &fpat.value {
-                            let idx = cx.structs[pstruct].iter().position(|(n, _)| n == fname).unwrap();
-                            let fty = cx.structs[pstruct][idx].1.clone();
+                            let pf = &cx.types[&pstruct].fields;
+                            let idx = pf.iter().position(|(n, _)| n == fname).unwrap();
+                            let fty = pf[idx].1.clone();
                             let fp = cx.fresh_reg();
-                            cx.emit(Inst::FieldPtr { dst: fp, struct_name: pstruct, base: payload_base, field_index: idx });
+                            cx.emit(Inst::FieldPtr { dst: fp, struct_def: pstruct, base: payload_base, field_index: idx });
                             cx.env.insert(Binding::Local(fpat.id), (fp, fty));
                         }
                     }
@@ -294,7 +293,7 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             let val = lower_expr(cx, expr);
             let value_ty = cx.node_types[&expr.id].clone();
             let ret_ty = cx.current_return_type.clone();
-            let struct_ret = aggregate_struct_name(&ret_ty);
+            let struct_ret = aggregate_def(&ret_ty, &cx.enums);
             if let Some(name) = struct_ret {
                 // copy the aggregate into the caller-provided sret slot, ret void
                 let src = match val {
@@ -315,12 +314,10 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
 /// Recursively collect all local variable declarations in the function body,
 /// including nested ones in blocks and branches.
 /// This is for emitting all Alloca instructions upfront in the entry block
-fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<&'a str, EnumDef<'a>>, out: &mut Vec<(usize, &'a str, Type<'a>)>) {
+fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<DefId, EnumDef<'a>>, out: &mut Vec<(usize, &'a str, Type<'a>)>) {
     match &stmt.value {
         StmtNode::Declare { name, ty, value } => {
-            // resolve enum names so an enum local is pre-allocated as its scalar
-            // repr (not skipped as a struct), matching the scalar Declare path.
-            let ty = resolve_enum_ty(enums, ty);
+            let ty = ty.clone();
             // key by the Declare stmt's node id (its binding identity)
             match ty {
                 // A struct/array/data-enum *literal* used to alloca at its own
@@ -335,7 +332,7 @@ fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<&'a str, EnumDef<'a>>, ou
                         out.push((stmt.id, name, ty));
                     }
                 }
-                _ if aggregate_struct_name(&ty).is_some() => {
+                _ if aggregate_def(&ty, enums).is_some() => {
                     if matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_)) {
                         out.push((stmt.id, name, ty));
                     }
@@ -394,7 +391,7 @@ fn lower_const_init<'a>(
         // struct literal: pair each field's declared type with its constant.
         // typecheck guarantees the fields match the definition in order.
         ExprNode::Struct { name, fields, .. } => {
-            let defs = cx.structs[name.as_single().expect("struct literal name validated in typecheck")].clone();
+            let defs = cx.types[&name.def].fields.clone();
             let mut inits = Vec::with_capacity(fields.len());
             for ((_, fty), (_, fexpr)) in defs.iter().zip(fields.iter()) {
                 inits.push((fty.clone(), lower_const_init(cx, fexpr)));
@@ -425,18 +422,16 @@ fn lower_const_init<'a>(
 }
 
 fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
--> (Vec<(Register, Type<'a>)>, Option<(Register, &'a str)>) {
+-> (Vec<(Register, Type<'a>)>, Option<(Register, DefId)>) {
     match &func.value {
         TopLevelNode::Function { attributes, params, return_type, body, .. } => {
             let entry = cx.fresh_block();
             cx.current_block = entry;
-            // resolve enum names in the declared return type (raw parser type).
-            let return_type = &resolve_enum_ty(&cx.enums, return_type);
             cx.current_return_type = return_type.clone();
 
             // struct / data-enum returns are lowered with an sret out-pointer;
             // allocate its register up front so `return` can copy into it.
-            let sret = if let Some(name) = aggregate_struct_name(return_type) {
+            let sret = if let Some(name) = aggregate_def(return_type, &cx.enums) {
                 let r = cx.fresh_reg();
                 cx.sret_param = Some(r);
                 Some((r, name))
@@ -447,9 +442,7 @@ fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
 
             let mut param_regs = Vec::new();
             for (name, ty) in params {
-                // resolve enum names in the declared param type (raw parser type)
-                // so an enum param takes the scalar path, not the by-value struct one.
-                let ty = &resolve_enum_ty(&cx.enums, ty);
+                let ty = &ty.clone();
                 if attributes.iter().any(|a| a.value.name == "export")
                 && matches!(ty, Type::Slice(_)) {
                     // split the fat pointer into 2 parameters for the data pointer and length
@@ -489,7 +482,7 @@ fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
                     // push BOTH as incoming params
                     param_regs.push((ptr_reg, Type::Pointer(Box::new(inner_ty.clone()))));
                     param_regs.push((len_reg, Type::Int32));
-                } else if let Some(struct_name) = aggregate_struct_name(ty) {
+                } else if let Some(struct_name) = aggregate_def(ty, &cx.enums) {
                     // pass-by-value (struct or data enum): caller still hands us a
                     // `ptr` to its aggregate, but we copy into our own local slot on
                     // entry so mutations don't leak back. For pass-by-reference the
@@ -500,7 +493,7 @@ fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
                     param_regs.push((param_reg, ty.clone()));
 
                     let local_reg = cx.fresh_reg();
-                    cx.emit(Inst::AllocaStruct { dst: local_reg, name: struct_name, align: None });
+                    cx.emit(Inst::AllocaStruct { dst: local_reg, def: struct_name, align: None });
                     copy_struct(cx, struct_name, param_reg, local_reg);
                     cx.env.insert(Binding::Param(name), (local_reg, ty.clone()));
                 } else {
@@ -535,9 +528,9 @@ fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
                     Type::Array(inner, length) => {
                         cx.emit(Inst::AllocaArray { dst: local_reg, ty: (**inner).clone(), length: length.expect_lit() });
                     }
-                    _ if aggregate_struct_name(&ty).is_some() => {
-                        let struct_name = aggregate_struct_name(&ty).unwrap();
-                        cx.emit(Inst::AllocaStruct { dst: local_reg, name: struct_name, align: None });
+                    _ if aggregate_def(&ty, &cx.enums).is_some() => {
+                        let struct_name = aggregate_def(&ty, &cx.enums).unwrap();
+                        cx.emit(Inst::AllocaStruct { dst: local_reg, def: struct_name, align: None });
                     }
                     _ => {
                         cx.emit(Inst::Alloca { dst: local_reg, ty: ty.clone(), align: None });
@@ -579,12 +572,14 @@ fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
 /// generic slot like `T`, which parses as `Type::Struct { name: "T", args: [] }`).
 /// Used to erase a generic extern's type-param params from the declaration.
 fn is_generic_type(type_params: &[&str], ty: &Type<'_>) -> bool {
-    matches!(ty, Type::Struct { name, args } if args.is_empty() && type_params.contains(name))
+    matches!(ty, Type::Param(name) if type_params.contains(name))
 }
 
 pub fn lower<'a>(
     program: &[TopLevel<'a>],
     typecheck_context: &crate::typecheck::Context<'a>,
+    defs: &haven_common::defs::Defs<'a>,
+    arena: &'a bumpalo::Bump,
 ) -> Module<'a> {
     let mut cx = LowerCtx {
         reg_counter: 0,
@@ -594,7 +589,11 @@ pub fn lower<'a>(
         loop_stack: vec![],
         env: HashMap::new(),
         globals: HashMap::new(),
-        structs: typecheck_context.structs.clone(),
+        types: typecheck_context.types.clone(),
+        // the seam: from here on the pipeline works in emitted names, and this
+        // is the only place the two representations meet.
+        symbols: defs.symbols(arena),
+        payloads: typecheck_context.payloads.clone(),
         enums: typecheck_context.enums.clone(),
         node_types: typecheck_context.node_types.clone(),
         resolved: typecheck_context.resolved.clone(),
@@ -632,7 +631,7 @@ pub fn lower<'a>(
                     name,
                     attributes: attributes.clone(),
                     params: param_regs,
-                    return_type: resolve_enum_ty(&cx.enums, return_type),
+                    return_type: return_type.clone(),
                     blocks: cx.blocks.clone(),
                     sret,
                 });
@@ -655,26 +654,21 @@ pub fn lower<'a>(
                 }).collect();
                 let concrete_params: Vec<Type<'a>> = params.iter()
                     .filter(|(_, ty)| !is_generic_type(&type_params, ty))
-                    .map(|(_, ty)| resolve_enum_ty(&cx.enums, ty))
+                    .map(|(_, ty)| ty.clone())
                     .collect();
                 externs.push(ExternDecl {
                     name,
                     attributes: attributes.clone(),
                     params: concrete_params,
-                    return_type: resolve_enum_ty(&cx.enums, return_type),
+                    return_type: return_type.clone(),
                 });
             }
             // generic struct templates carry `Param` fields and are never laid out
             // directly; monomorphization emits concrete instances. skip them here,
             // mirroring how generic functions are skipped above.
             TopLevelNode::Struct { generics, .. } if !generics.is_empty() => {}
-            TopLevelNode::Struct { name, fields, .. } => {
-                // resolve enum-typed fields to their integer repr; a bare enum name
-                // otherwise emits an undefined `%EnumName` in the struct type.
-                let fields = fields.iter()
-                    .map(|(fname, fty)| (*fname, resolve_enum_ty(&cx.enums, fty)))
-                    .collect();
-                structs.push((*name, fields));
+            TopLevelNode::Struct { def, .. } => {
+                structs.push(*def);
             }
             TopLevelNode::Global { name, attributes, ty, value, .. } => {
                 let init = lower_const_init(&mut cx, value);
@@ -691,21 +685,21 @@ pub fn lower<'a>(
             // built in typecheck's forward-decl pass and looked up here so the
             // backend renders them as ordinary `%Name = type { .. }` structs. Keys
             // carry `'a`, so fetch them via `get_key_value`.
-            TopLevelNode::Enum { name, .. } => {
-                if cx.enums[name].has_payload {
-                    let variants: Vec<&'a str> = cx.enums[name].payloads.keys().copied().collect();
-                    let mut pstruct_names = Vec::with_capacity(variants.len());
+            TopLevelNode::Enum { def, .. } => {
+                if cx.enums[def].has_payload {
+                    let variants: Vec<&'a str> = cx.enums[def].payloads.keys().copied().collect();
+                    let mut pdefs = Vec::with_capacity(variants.len());
                     for v in variants {
-                        let sname = crate::typecheck::enum_payload_struct_name(name, v);
-                        if let Some((k, f)) = cx.structs.get_key_value(sname) {
-                            structs.push((*k, f.clone()));
-                            pstruct_names.push(*k);
+                        let pdef = cx.payloads[&(*def, v)];
+                        if cx.types.contains_key(&pdef) {
+                            structs.push(pdef);
+                            pdefs.push(pdef);
                         }
                     }
-                    if let Some((k, f)) = cx.structs.get_key_value(*name) {
-                        structs.push((*k, f.clone()));
+                    if cx.types.contains_key(def) {
+                        structs.push(*def);
                     }
-                    enum_unions.insert(*name, pstruct_names);
+                    enum_unions.insert(*def, pdefs);
                 }
             }
             TopLevelNode::Trait { .. } => unreachable!("traits dropped in monomorphization"),
@@ -713,5 +707,8 @@ pub fn lower<'a>(
         }
     }
 
-    Module { functions, externs, structs, globals, strings: cx.strings, enum_unions }
+    Module {
+        functions, externs, structs, globals, strings: cx.strings, enum_unions,
+        types: cx.types, symbols: cx.symbols,
+    }
 }

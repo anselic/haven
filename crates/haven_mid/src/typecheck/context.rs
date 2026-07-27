@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
-use haven_common::defs::MemberTable;
+use haven_common::defs::{DefId, Defs, MemberTable};
+use haven_common::layout::TypeTable;
 
 /// Field index of the discriminant tag in a data-enum aggregate's synthetic
 /// struct, and of the payload byte-blob. Referenced by name in the struct table
@@ -8,13 +9,7 @@ use haven_common::defs::MemberTable;
 pub const ENUM_TAG_FIELD: &str = "$tag";
 pub const ENUM_PAYLOAD_FIELD: &str = "$payload";
 
-/// The synthetic payload-struct name for a data variant, e.g. `Msg::Note` ->
-/// `Msg$Note`. `$` can't appear in a source identifier, so this never collides
-/// with a user type. Leaked to `'static` (coerces to any `'a`), as elsewhere in
-/// the pipeline.
-pub fn enum_payload_struct_name(enum_name: &str, variant: &str) -> &'static str {
-    Box::leak(format!("{}${}", enum_name, variant).into_boxed_str())
-}
+
 
 /// A generic function's signature, in terms of its own type params. param/return
 /// types hold `Type::Param`. Used to typecheck calls before mono materializes the
@@ -86,15 +81,21 @@ pub struct Context<'a> {
     /// namespace). Consumed by MIL lowering to key variable storage, which makes
     /// shadowing correct - two same-named locals get distinct `Binding::Local`s.
     pub resolved: HashMap<usize, Binding<'a>>,
-    /// Struct definitions from name to ordered list of (field name, field type)
-    pub structs: HashMap<&'a str, Vec<(&'a str, Type<'a>)>>,
+    /// Layout of every named type, by identity: real structs, data-enum
+    /// `{ $tag, $payload }` aggregates, and the synthetic per-variant payload
+    /// structs alike, plus each enum's discriminant repr.
+    ///
+    /// This is the same table `layout`/`abi`/`llvm` take, which is why it holds
+    /// `TypeInfo` rather than a bare field list: the repr and `has_payload` flag
+    /// used to be copied into every `Type::Enum` value, and now live here once.
+    pub types: TypeTable<'a>,
     /// Structs declared with generic parameters (`struct Option<T>`,
     /// `struct Buf<T, const N: u32>`), mapped to their declared params in order
     /// (type and const interleaved). Field types are stored with `Type::Param`s
     /// and `ConstVal::Param`s; a construction/turbofish binds those to concrete
     /// args positionally (the `len()` gives the declared arity). Monomorphization
     /// rewrites a concrete use to a flat instance before codegen.
-    pub generic_structs: std::collections::HashMap<&'a str, Vec<GenericParam<'a>>>,
+    pub generic_structs: std::collections::HashMap<DefId, Vec<GenericParam<'a>>>,
     /// Type-param names in scope for the function being checked, e.g. `["T"]`
     /// inside `proc id<T>(...)`. used to resolve a bare `Type::Struct(name)` into
     /// a `Type::Param(name)`. empty outside generics.
@@ -113,39 +114,48 @@ pub struct Context<'a> {
     /// integer repr type (from `@repr(<int>)`, default `i32`) and its variants
     /// mapped to their discriminant values. Used to resolve a `Struct(name)` type
     /// to `Type::Enum` and an `E::V` variant reference to its constant.
-    pub enums: HashMap<&'a str, EnumDef<'a>>,
+    pub enums: HashMap<DefId, EnumDef<'a>>,
     /// Enums declared with generic parameters (`enum Option<T>`), mapped to their
     /// declared params in order - mirrors `generic_structs`. A variant constructor
     /// or destructuring pattern binds these positionally via turbofish; monomorphization
     /// rewrites a concrete use to a flat instance before codegen.
-    pub generic_enums: std::collections::HashMap<&'a str, Vec<GenericParam<'a>>>,
+    pub generic_enums: std::collections::HashMap<DefId, Vec<GenericParam<'a>>>,
     /// Receiver method calls (`recv.method(...)`), keyed by the `Call` node id.
     /// Populated by `infer` and consumed by MIL lowering. Rebuilt on each typecheck
     /// pass, so it always matches the AST that lowering will see.
     pub method_calls: HashMap<usize, MethodCall<'a>>,
     /// Declared traits, by name. Populated in the forward-declaration pass;
     /// consumed by conformance checking and bounded method-call resolution.
-    pub traits: HashMap<&'a str, TraitDef<'a>>,
+    pub traits: HashMap<DefId, TraitDef<'a>>,
     /// Which `(type, trait)` conformances hold, from `extend T: Trait` blocks
     /// (verified during the forward pass). A `T: Trait` bound at a generic call
     /// site is satisfied iff the concrete argument type is present here.
-    pub impls: std::collections::HashSet<(&'a str, &'a str)>,
+    pub impls: std::collections::HashSet<(DefId, DefId)>,
     /// Trait bounds on the type params of the function currently being checked,
     /// e.g. `{"T": ["Display"]}` inside `proc show<T: Display>(...)`. Lets a
     /// method call on a `T`-typed receiver resolve through the bound trait. Empty
     /// outside a bounded generic.
-    pub generic_bounds: HashMap<&'a str, Vec<&'a str>>,
+    pub generic_bounds: HashMap<&'a str, Vec<DefId>>,
     /// Every method and associated function in the program, keyed by
     /// `(type name, method name)`. Built by the module resolver, which knows each
     /// method's emitted name directly - so neither receiver-call resolution nor
     /// conformance checking has to rebuild `Type$method` and hope it exists.
     pub members: MemberTable<'a>,
-    /// Monomorphized instance name -> the template it specializes
-    /// (`std.option$Option$i32` -> `std.option$Option`). Recorded by `mono`;
-    /// empty on the pre-mono pass, where no instance exists yet. Lets a match
-    /// pattern, which always names the template, be matched against a scrutinee
-    /// whose type names the instance.
-    pub instances: HashMap<&'a str, &'a str>,
+    /// Monomorphized instance -> the template it specializes. Recorded by
+    /// `mono`; empty on the pre-mono pass, where no instance exists yet. Lets a
+    /// match pattern, which always names the template, be matched against a
+    /// scrutinee whose type is the instance.
+    pub instances: HashMap<DefId, DefId>,
+    /// `(enum, variant) -> the synthetic struct holding that variant's payload`.
+    /// Minted at name resolution and by `mono`, so the payload struct is a real
+    /// identity rather than a name this stage rebuilds - which matters because
+    /// this pass runs twice, and the second run must land on the same one.
+    pub payloads: HashMap<(DefId, &'a str), DefId>,
+    /// How each definition reads in a diagnostic: `std/string::String`, or
+    /// `alloc::<Vec2>` for something `mono` minted. A read-only projection of
+    /// `Defs`, rebuilt at the start of each pass, so a message can name a type
+    /// without the whole typechecker having to borrow `Defs`.
+    pub names: HashMap<DefId, String>,
 }
 
 /// A declared enum's definition: the discriminant repr, variant discriminant
@@ -177,7 +187,7 @@ impl<'a> Context<'a> {
             scopes: vec![HashMap::new()], // global scope
             node_types: HashMap::new(),
             resolved: HashMap::new(),
-            structs: HashMap::new(),
+            types: TypeTable::new(),
             generic_structs: std::collections::HashMap::new(),
             generics: Vec::new(),
             const_generics: Vec::new(),
@@ -191,6 +201,54 @@ impl<'a> Context<'a> {
             generic_bounds: HashMap::new(),
             members: MemberTable::new(),
             instances: HashMap::new(),
+            payloads: HashMap::new(),
+            names: HashMap::new(),
+        }
+    }
+
+    /// Load the diagnostic name of every definition. Called once per pass.
+    pub fn load_names(&mut self, defs: &Defs<'a>) {
+        self.names = (0..defs.len() as u32)
+            .map(|i| (DefId(i), defs.show(DefId(i))))
+            .collect();
+    }
+
+    /// How a definition reads in a diagnostic.
+    pub fn name_of(&self, def: DefId) -> String {
+        self.names.get(&def).cloned().unwrap_or_else(|| format!("#{}", def.0))
+    }
+
+    /// How a type reads in a diagnostic.
+    ///
+    /// `Type`'s own `Display` can't do this: a resolved named type is just an
+    /// identity, and turning that back into `std/string::String` needs the
+    /// definition table. Every user-facing message that mentions a type goes
+    /// through here.
+    pub fn show(&self, ty: &Type<'a>) -> String {
+        match ty {
+            Type::Named { def, args } if args.is_empty() => self.name_of(*def),
+            Type::Named { def, args } => {
+                let args = args.iter().map(|a| self.show_arg(a)).collect::<Vec<_>>().join(", ");
+                format!("{}<{}>", self.name_of(*def), args)
+            }
+            Type::Pointer(i) => format!("*{}", self.show(i)),
+            Type::Slice(i) => format!("[{}]", self.show(i)),
+            Type::Array(i, n) => format!("[{}; {}]", self.show(i), n),
+            Type::Simd(i, n) => format!("simd[{}, {}]", self.show(i), n),
+            Type::Function { params, return_type } => {
+                let ps = params.iter().map(|p| self.show(p)).collect::<Vec<_>>().join(", ");
+                format!("proc({}) {}", ps, self.show(return_type))
+            }
+            // primitives, type params, and the backend's symbol-named forms all
+            // print themselves.
+            other => other.to_string(),
+        }
+    }
+
+    fn show_arg(&self, arg: &GenericArg<'a>) -> String {
+        match arg {
+            GenericArg::Type(t) => self.show(t),
+            GenericArg::Const(c) => c.to_string(),
         }
     }
 

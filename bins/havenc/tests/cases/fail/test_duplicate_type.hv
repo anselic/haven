@@ -1,0 +1,15 @@
+// Two declarations of the same type name in one module.
+//
+// This used to be caught by the typechecker, whose struct/enum tables were keyed
+// by name so the second insert collided with the first. Keyed by definition
+// identity they no longer collide - each declaration has its own - so the check
+// moved to name resolution, where the module's symbol table is what the two
+// actually fight over.
+//@ error: Duplicate type definition 'Point'
+
+struct Point { x: i32, y: i32 }
+
+struct Point { a: f32 }
+
+@export
+proc main() i32 { return 0; }

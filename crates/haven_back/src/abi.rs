@@ -20,12 +20,13 @@
 
 use std::collections::HashMap;
 use haven_common::ast::Type;
-use crate::layout::{self, StructTable};
+use haven_common::defs::DefId;
+use crate::layout::{self, TypeTable, TypeInfo, EnumRepr};
 
 /// Data-enum aggregate name -> its variant payload-struct names. Lets
 /// `classify_into` treat an enum's `$payload` byte blob as a real union of the
 /// variant payload structs (see its `Type::Struct` arm) instead of raw bytes.
-pub type UnionTable<'a> = HashMap<&'a str, Vec<&'a str>>;
+pub type UnionTable = HashMap<DefId, Vec<DefId>>;
 
 /// Size of one "eightbyte" register slot.
 const EIGHTBYTE: usize = 8;
@@ -112,17 +113,17 @@ fn merge(a: Class, b: Class) -> Class {
 /// choice is made by `cfg!` - a Windows-hosted compiler uses the Microsoft x64
 /// convention, everything else x86-64 System V. When a real `--target` flag
 /// lands, thread the selector through here instead.
-pub fn classify<'a>(ty: &Type<'a>, structs: &StructTable<'a>, unions: &UnionTable<'a>) -> Abi {
+pub fn classify<'a>(ty: &Type<'a>, types: &TypeTable<'a>, unions: &UnionTable) -> Abi {
     if cfg!(target_os = "windows") {
-        classify_win64(ty, structs, unions)
+        classify_win64(ty, types, unions)
     } else {
-        classify_sysv(ty, structs, unions)
+        classify_sysv(ty, types, unions)
     }
 }
 
 /// Classify how `ty` is passed/returned on x86-64 System V (Linux, macOS, BSDs).
-pub fn classify_sysv<'a>(ty: &Type<'a>, structs: &StructTable<'a>, unions: &UnionTable<'a>) -> Abi {
-    let size = layout::size_of(ty, structs);
+pub fn classify_sysv<'a>(ty: &Type<'a>, types: &TypeTable<'a>, unions: &UnionTable) -> Abi {
+    let size = layout::size_of(ty, types);
 
     // Zero-sized: nothing to pass.
     if size == 0 {
@@ -136,7 +137,7 @@ pub fn classify_sysv<'a>(ty: &Type<'a>, structs: &StructTable<'a>, unions: &Unio
     let n = size.div_ceil(EIGHTBYTE);
     let mut eb = vec![Eightbyte::default(); n];
 
-    classify_into(ty, 0, structs, unions, &mut eb);
+    classify_into(ty, 0, types, unions, &mut eb);
 
     // Post-merge: any MEMORY eightbyte poisons the whole aggregate.
     if eb.iter().any(|e| e.class == Class::Memory) {
@@ -176,16 +177,16 @@ pub fn classify_sysv<'a>(ty: &Type<'a>, structs: &StructTable<'a>, unions: &Unio
 /// register, exactly as under SysV, so we delegate anything that isn't a struct
 /// or array to [`classify_sysv`]. The downstream pack/unpack glue is bytewise, so
 /// coercing an all-float eightbyte to `i64` needs no other changes.
-pub fn classify_win64<'a>(ty: &Type<'a>, structs: &StructTable<'a>, unions: &UnionTable<'a>) -> Abi {
+pub fn classify_win64<'a>(ty: &Type<'a>, types: &TypeTable<'a>, unions: &UnionTable) -> Abi {
     match ty {
-        Type::Struct { .. } | Type::Array(..) | Type::Enum { has_payload: true, .. } =>
-            match layout::size_of(ty, structs) {
+        _ if is_aggregate(ty, types) =>
+            match layout::size_of(ty, types) {
                 0 => Abi::Direct(vec![]),
                 size @ (1 | 2 | 4 | 8) => Abi::Direct(vec![Reg::Int(size)]),
                 _ => Abi::Memory,
             },
         // Scalars/pointers/SIMD/field-less enums are placed identically to SysV.
-        _ => classify_sysv(ty, structs, unions),
+        _ => classify_sysv(ty, types, unions),
     }
 }
 
@@ -220,14 +221,15 @@ impl Eightbyte {
 
 /// Walk `ty`'s leaf fields, folding each leaf's class into the eightbyte(s) it
 /// occupies at absolute byte `offset`.
-fn classify_into<'a>(ty: &Type<'a>, offset: usize, structs: &StructTable<'a>, unions: &UnionTable<'a>, eb: &mut [Eightbyte]) {
+fn classify_into<'a>(ty: &Type<'a>, offset: usize, types: &TypeTable<'a>, unions: &UnionTable, eb: &mut [Eightbyte]) {
     match ty {
-        // Aggregates: recurse into members at their real offsets.
-        Type::Struct { name, .. } => {
-            let fields = structs
-                .get(name)
-                .unwrap_or_else(|| panic!("ABI classify of unknown struct `{name}`"));
-            if let Some(variants) = unions.get(name) {
+        // Aggregates: recurse into members at their real offsets. A struct and
+        // a data-carrying enum are the same shape here - the enum's `{tag,
+        // payload}` aggregate is a field list like any other - so one arm covers
+        // both, where they used to need two.
+        Type::Named { def, .. } if is_aggregate(ty, types) => {
+            let fields = &layout::fields_of(*def, types).to_vec();
+            if let Some(variants) = unions.get(def) {
                 // A data-enum aggregate: field 0 is the tag (an ordinary integer
                 // leaf), field 1 is the `$payload` blob - not literal bytes, but a
                 // union of the variant payload structs. Classify the tag normally,
@@ -237,32 +239,27 @@ fn classify_into<'a>(ty: &Type<'a>, offset: usize, structs: &StructTable<'a>, un
                 // what lets e.g. an all-float variant land in an SSE register
                 // instead of being forced INTEGER by `$payload`'s placeholder type.
                 let (_, tag_ty) = &fields[0];
-                classify_into(tag_ty, offset, structs, unions, eb);
-                let payload_off = offset + layout::field_offset(name, 1, structs);
+                classify_into(tag_ty, offset, types, unions, eb);
+                let payload_off = offset + layout::field_offset(*def, 1, types);
                 for variant in variants {
-                    classify_into(&Type::plain_struct(variant), payload_off, structs, unions, eb);
+                    classify_into(&Type::named(*variant), payload_off, types, unions, eb);
                 }
                 return;
             }
             for (i, (_, fty)) in fields.iter().enumerate() {
-                let foff = offset + layout::field_offset(name, i, structs);
-                classify_into(fty, foff, structs, unions, eb);
+                let foff = offset + layout::field_offset(*def, i, types);
+                classify_into(fty, foff, types, unions, eb);
             }
         }
-        // A data-carrying enum reached as a nested field (e.g. a struct field, or
-        // a variant payload field, of enum type): classify via its synthetic
-        // aggregate struct, same as a `Type::Struct` of that name.
-        Type::Enum { has_payload: true, name, .. } =>
-            classify_into(&Type::plain_struct(name), offset, structs, unions, eb),
         Type::Array(elem, count) => {
-            let stride = layout::size_of(elem, structs);
+            let stride = layout::size_of(elem, types);
             for i in 0..count.expect_lit() {
-                classify_into(elem, offset + i * stride, structs, unions, eb);
+                classify_into(elem, offset + i * stride, types, unions, eb);
             }
         }
         // Leaf: a scalar / pointer / SIMD vector / field-less enum.
         _ => {
-            let size = layout::size_of(ty, structs);
+            let size = layout::size_of(ty, types);
             let class = leaf_class(ty);
             let is_double = leaf_is_double(ty);
             let is_ptr = leaf_is_pointer(ty);
@@ -281,6 +278,23 @@ fn classify_into<'a>(ty: &Type<'a>, offset: usize, structs: &StructTable<'a>, un
     }
 }
 
+/// Whether `ty` is laid out as an aggregate: an array, a struct, or a
+/// data-carrying enum. A field-less enum is a bare scalar and is not.
+///
+/// This used to be a pattern match, back when `Type` said which kind of named
+/// type it was. It is now a table lookup, which is the point: the answer belongs
+/// to the definition, not to every type value that mentions it.
+fn is_aggregate<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> bool {
+    match ty {
+        Type::Array(..) => true,
+        Type::Named { def, .. } => !matches!(
+            types.get(def),
+            Some(TypeInfo { enum_: Some(EnumRepr { has_payload: false, .. }), .. }) | None,
+        ),
+        _ => false,
+    }
+}
+
 /// The SysV class of a leaf (non-aggregate) type.
 fn leaf_class(ty: &Type) -> Class {
     match ty {
@@ -296,11 +310,11 @@ fn leaf_class(ty: &Type) -> Class {
         // sanely. `str` is a single `*const u8`, handled as a pointer leaf below.
         Type::Slice(_) | Type::Str => Class::Integer,
         // a field-less enum is its integer discriminant repr - an INTEGER-class
-        // leaf. A data-carrying enum is handled in `classify_into` directly (like
-        // a struct) and never reaches here.
-        Type::Enum { has_payload: false, .. } => Class::Integer,
+        // leaf. Anything named that *is* an aggregate is handled by
+        // `classify_into` and never reaches here.
+        Type::Named { .. } => Class::Integer,
         Type::Void => Class::NoClass,
-        Type::Struct { .. } | Type::Array(..) | Type::Enum { has_payload: true, .. } => {
+        Type::Array(..) => {
             unreachable!("aggregates are handled by classify_into, not leaf_class")
         }
         Type::Param(n) => panic!("type parameter `{n}` survived to ABI classification"),
@@ -337,12 +351,42 @@ mod tests {
     use super::*;
     use haven_common::ast::ConstVal;
 
-    fn table<'a>(defs: &[(&'a str, Vec<(&'a str, Type<'a>)>)]) -> StructTable<'a> {
-        defs.iter().cloned().collect()
+    /// A stable identity per test name, so a table can still be written out with
+    /// readable names while the code under test keys on identities.
+    fn d(name: &str) -> DefId {
+        let mut h: u32 = 0x811c9dc5;
+        for b in name.as_bytes() {
+            h ^= *b as u32;
+            h = h.wrapping_mul(0x01000193);
+        }
+        DefId(h)
     }
 
-    fn unions<'a>(defs: &[(&'a str, Vec<&'a str>)]) -> UnionTable<'a> {
-        defs.iter().cloned().collect()
+    /// The named type `name` refers to.
+    fn nt<'a>(name: &str) -> Type<'a> {
+        Type::named(d(name))
+    }
+
+    fn table<'a>(defs: &[(&'a str, Vec<(&'a str, Type<'a>)>)]) -> TypeTable<'a> {
+        defs.iter().map(|(n, f)| (d(n), TypeInfo::struct_(f.clone()))).collect()
+    }
+
+    /// Like `table`, but marks `enum_name` as a data-carrying enum - which is
+    /// what makes `is_aggregate` treat its `{ $tag, $payload }` entry as one.
+    fn table_with_enum<'a>(
+        defs: &[(&'a str, Vec<(&'a str, Type<'a>)>)],
+        enum_name: &str,
+        repr: Type<'a>,
+    ) -> TypeTable<'a> {
+        let mut t = table(defs);
+        t.get_mut(&d(enum_name)).unwrap().enum_ = Some(EnumRepr { repr, has_payload: true });
+        t
+    }
+
+    fn unions(defs: &[(&str, Vec<&str>)]) -> UnionTable {
+        defs.iter()
+            .map(|(n, vs)| (d(n), vs.iter().map(|v| d(v)).collect()))
+            .collect()
     }
 
     fn render(abi: Abi) -> Vec<String> {
@@ -353,17 +397,17 @@ mod tests {
     }
 
     /// Classify on SysV and render as the list of LLVM coercion types (or "memory").
-    fn llvm<'a>(ty: &Type<'a>, s: &StructTable<'a>) -> Vec<String> {
+    fn llvm<'a>(ty: &Type<'a>, s: &TypeTable<'a>) -> Vec<String> {
         render(classify_sysv(ty, s, &HashMap::new()))
     }
 
     /// Same, but with an enum-union table in play.
-    fn llvm_u<'a>(ty: &Type<'a>, s: &StructTable<'a>, u: &UnionTable<'a>) -> Vec<String> {
+    fn llvm_u<'a>(ty: &Type<'a>, s: &TypeTable<'a>, u: &UnionTable) -> Vec<String> {
         render(classify_sysv(ty, s, u))
     }
 
     /// Same, but classify under the Microsoft x64 convention.
-    fn llvm_win64<'a>(ty: &Type<'a>, s: &StructTable<'a>) -> Vec<String> {
+    fn llvm_win64<'a>(ty: &Type<'a>, s: &TypeTable<'a>) -> Vec<String> {
         render(classify_win64(ty, s, &HashMap::new()))
     }
 
@@ -384,14 +428,14 @@ mod tests {
             "Color",
             vec![("r", Type::Uint8), ("g", Type::Uint8), ("b", Type::Uint8), ("a", Type::Uint8)],
         )]);
-        assert_eq!(llvm(&Type::plain_struct("Color"), &s), ["i32"]);
+        assert_eq!(llvm(&nt("Color"), &s), ["i32"]);
     }
 
     #[test]
     fn vector2_is_two_packed_floats() {
         // struct Vector2 { x,y: f32 } -> one SSE eightbyte, two floats.
         let s = table(&[("Vector2", vec![("x", Type::Float32), ("y", Type::Float32)])]);
-        assert_eq!(llvm(&Type::plain_struct("Vector2"), &s), ["<2 x float>"]);
+        assert_eq!(llvm(&nt("Vector2"), &s), ["<2 x float>"]);
     }
 
     #[test]
@@ -401,7 +445,7 @@ mod tests {
             "Vector3",
             vec![("x", Type::Float32), ("y", Type::Float32), ("z", Type::Float32)],
         )]);
-        assert_eq!(llvm(&Type::plain_struct("Vector3"), &s), ["<2 x float>", "float"]);
+        assert_eq!(llvm(&nt("Vector3"), &s), ["<2 x float>", "float"]);
     }
 
     #[test]
@@ -414,20 +458,20 @@ mod tests {
                 ("w", Type::Float32), ("h", Type::Float32),
             ],
         )]);
-        assert_eq!(llvm(&Type::plain_struct("Rectangle"), &s), ["<2 x float>", "<2 x float>"]);
+        assert_eq!(llvm(&nt("Rectangle"), &s), ["<2 x float>", "<2 x float>"]);
     }
 
     #[test]
     fn mixed_int_and_float_in_one_eightbyte_is_integer() {
         // struct { i: i32, f: f32 } -> both share eightbyte 0; INTEGER wins -> i64.
         let s = table(&[("Mix", vec![("i", Type::Int32), ("f", Type::Float32)])]);
-        assert_eq!(llvm(&Type::plain_struct("Mix"), &s), ["i64"]);
+        assert_eq!(llvm(&nt("Mix"), &s), ["i64"]);
     }
 
     #[test]
     fn two_ints_coalesce_to_i64() {
         let s = table(&[("Pair", vec![("a", Type::Int32), ("b", Type::Int32)])]);
-        assert_eq!(llvm(&Type::plain_struct("Pair"), &s), ["i64"]);
+        assert_eq!(llvm(&nt("Pair"), &s), ["i64"]);
     }
 
     #[test]
@@ -435,20 +479,20 @@ mod tests {
         // struct { a: i64, b: i8 } -> 16 bytes; eightbyte 1 holds only 1 byte.
         // Coercion must be { i64, i8 }, matching Clang - not { i64, i64 }.
         let s = table(&[("Tail", vec![("a", Type::Int64), ("b", Type::Int8)])]);
-        assert_eq!(llvm(&Type::plain_struct("Tail"), &s), ["i64", "i8"]);
+        assert_eq!(llvm(&nt("Tail"), &s), ["i64", "i8"]);
     }
 
     #[test]
     fn float_then_double_stays_split() {
         // { f: f32, d: f64 } -> f32 in eb0 (float), f64 in eb1 (double).
         let s = table(&[("FD", vec![("f", Type::Float32), ("d", Type::Float64)])]);
-        assert_eq!(llvm(&Type::plain_struct("FD"), &s), ["float", "double"]);
+        assert_eq!(llvm(&nt("FD"), &s), ["float", "double"]);
     }
 
     #[test]
     fn lone_pointer_field_stays_ptr() {
         let s = table(&[("Ref", vec![("p", Type::Pointer(Box::new(Type::Float32)))])]);
-        assert_eq!(llvm(&Type::plain_struct("Ref"), &s), ["ptr"]);
+        assert_eq!(llvm(&nt("Ref"), &s), ["ptr"]);
     }
 
     #[test]
@@ -458,7 +502,7 @@ mod tests {
             "IntPtr",
             vec![("i", Type::Int32), ("p", Type::Pointer(Box::new(Type::Int8)))],
         )]);
-        assert_eq!(llvm(&Type::plain_struct("IntPtr"), &s), ["i32", "ptr"]);
+        assert_eq!(llvm(&nt("IntPtr"), &s), ["i32", "ptr"]);
 
         // { p: ptr, q: ptr } -> two pointer eightbytes.
         let s2 = table(&[(
@@ -468,7 +512,7 @@ mod tests {
                 ("q", Type::Pointer(Box::new(Type::Int8))),
             ],
         )]);
-        assert_eq!(llvm(&Type::plain_struct("TwoPtr"), &s2), ["ptr", "ptr"]);
+        assert_eq!(llvm(&nt("TwoPtr"), &s2), ["ptr", "ptr"]);
     }
 
     #[test]
@@ -480,30 +524,30 @@ mod tests {
             "BoolPtr",
             vec![("b", Type::Bool), ("p", Type::Pointer(Box::new(Type::Int8)))],
         )]);
-        assert_eq!(llvm(&Type::plain_struct("BoolPtr"), &s), ["i8", "ptr"]);
+        assert_eq!(llvm(&nt("BoolPtr"), &s), ["i8", "ptr"]);
     }
 
     #[test]
     fn enum_payload_classifies_as_union_not_raw_bytes() {
         // enum Msg { Note(f64) }: tag i32 (4/4), payload padded to offset 8 (f64
         // needs align 8), aggregate is 16 bytes / align 8.
-        let s = table(&[
+        let s = table_with_enum(&[
             ("Msg$Note", vec![("0", Type::Float64)]),
             ("Msg", vec![
                 ("$tag", Type::Int32),
                 ("$payload", Type::Array(Box::new(Type::Int64), ConstVal::Lit(1))),
             ]),
-        ]);
+        ], "Msg", Type::Int32);
         let u = unions(&[("Msg", vec!["Msg$Note"])]);
 
         // Without the union table, `$payload`'s placeholder `i64` element
         // classifies as INTEGER - wrong for a variant that actually holds a double.
-        assert_eq!(llvm(&Type::plain_struct("Msg"), &s), ["i32", "i64"]);
+        assert_eq!(llvm(&nt("Msg"), &s), ["i32", "i64"]);
 
         // With it, the payload eightbyte is classified from the real variant
         // field and lands in an SSE register, matching what C would do for the
         // equivalent `struct { int tag; union { double v; } payload; }`.
-        assert_eq!(llvm_u(&Type::plain_struct("Msg"), &s, &u), ["i32", "double"]);
+        assert_eq!(llvm_u(&nt("Msg"), &s, &u), ["i32", "double"]);
     }
 
     #[test]
@@ -516,7 +560,7 @@ mod tests {
                 ("c", Type::Float64), ("d", Type::Float64),
             ],
         )]);
-        assert!(classify(&Type::plain_struct("Big"), &s, &HashMap::new()).is_memory());
+        assert!(classify(&nt("Big"), &s, &HashMap::new()).is_memory());
     }
 
     #[test]
@@ -525,9 +569,9 @@ mod tests {
         // eb0 = the two floats -> <2 x float>; eb1 = the i32 -> i32.
         let s = table(&[
             ("Inner", vec![("x", Type::Float32), ("y", Type::Float32)]),
-            ("Outer", vec![("a", Type::plain_struct("Inner")), ("b", Type::Int32)]),
+            ("Outer", vec![("a", nt("Inner")), ("b", Type::Int32)]),
         ]);
-        assert_eq!(llvm(&Type::plain_struct("Outer"), &s), ["<2 x float>", "i32"]);
+        assert_eq!(llvm(&nt("Outer"), &s), ["<2 x float>", "i32"]);
     }
 
     #[test]
@@ -537,7 +581,7 @@ mod tests {
             "Arr",
             vec![("xs", Type::Array(Box::new(Type::Float32), ConstVal::Lit(3)))],
         )]);
-        assert_eq!(llvm(&Type::plain_struct("Arr"), &s), ["<2 x float>", "float"]);
+        assert_eq!(llvm(&nt("Arr"), &s), ["<2 x float>", "float"]);
     }
 
     // --- Microsoft x64 (Windows) ------------------------------------------
@@ -562,7 +606,7 @@ mod tests {
             "Color",
             vec![("r", Type::Uint8), ("g", Type::Uint8), ("b", Type::Uint8), ("a", Type::Uint8)],
         )]);
-        assert_eq!(llvm_win64(&Type::plain_struct("Color"), &s), ["i32"]);
+        assert_eq!(llvm_win64(&nt("Color"), &s), ["i32"]);
     }
 
     #[test]
@@ -570,15 +614,15 @@ mod tests {
         // The regression: an 8-byte all-float struct goes in a *GP* register on
         // Win64 (i64), not an SSE `<2 x float>` as under SysV.
         let s = table(&[("Vector2", vec![("x", Type::Float32), ("y", Type::Float32)])]);
-        assert_eq!(llvm_win64(&Type::plain_struct("Vector2"), &s), ["i64"]);
-        assert_eq!(llvm(&Type::plain_struct("Vector2"), &s), ["<2 x float>"]); // SysV, for contrast
+        assert_eq!(llvm_win64(&nt("Vector2"), &s), ["i64"]);
+        assert_eq!(llvm(&nt("Vector2"), &s), ["<2 x float>"]); // SysV, for contrast
     }
 
     #[test]
     fn win64_pointer_wrapper_is_one_integer_register() {
         // An 8-byte struct wrapping a pointer also passes as a single i64.
         let s = table(&[("Ref", vec![("p", Type::Pointer(Box::new(Type::Float32)))])]);
-        assert_eq!(llvm_win64(&Type::plain_struct("Ref"), &s), ["i64"]);
+        assert_eq!(llvm_win64(&nt("Ref"), &s), ["i64"]);
     }
 
     #[test]
@@ -589,7 +633,7 @@ mod tests {
             "Rgb",
             vec![("r", Type::Uint8), ("g", Type::Uint8), ("b", Type::Uint8)],
         )]);
-        assert!(classify_win64(&Type::plain_struct("Rgb"), &s, &HashMap::new()).is_memory());
+        assert!(classify_win64(&nt("Rgb"), &s, &HashMap::new()).is_memory());
     }
 
     #[test]
@@ -603,9 +647,9 @@ mod tests {
                 ("w", Type::Float32), ("h", Type::Float32),
             ]),
         ]);
-        assert!(classify_win64(&Type::plain_struct("Vector3"), &s, &HashMap::new()).is_memory());
-        assert!(classify_win64(&Type::plain_struct("Rectangle"), &s, &HashMap::new()).is_memory());
+        assert!(classify_win64(&nt("Vector3"), &s, &HashMap::new()).is_memory());
+        assert!(classify_win64(&nt("Rectangle"), &s, &HashMap::new()).is_memory());
         // SysV keeps them in registers.
-        assert_eq!(llvm(&Type::plain_struct("Vector3"), &s), ["<2 x float>", "float"]);
+        assert_eq!(llvm(&nt("Vector3"), &s), ["<2 x float>", "float"]);
     }
 }

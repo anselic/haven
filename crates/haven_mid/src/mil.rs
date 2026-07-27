@@ -12,5 +12,5 @@ mod lower;
 
 // Public surface: `use haven_mid::mil::*;` in the backend pulls these in.
 pub use ir::*;
-pub use ctx::{LowerCtx, LoopTargets, aggregate_struct_name};
+pub use ctx::{LowerCtx, LoopTargets, aggregate_def};
 pub use lower::lower;

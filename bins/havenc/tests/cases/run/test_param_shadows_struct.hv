@@ -1,0 +1,29 @@
+// A module-scope `struct T` alongside a generic `proc f<T>(...)`.
+//
+// Monomorphization used to carry a FIXME here: a type parameter and a real type
+// both reached it as `Type::Struct { name }`, so a bound `T` and a declared
+// `struct T` were indistinguishable. A parameter is now `Type::Param` and a real
+// type is an identity, so the confusion cannot be expressed at all.
+//
+// This is a guard, not a reproduction: the parameter shadows the struct in
+// exactly the scope where the two could have been mixed up, so the old code had
+// no reachable way to get it wrong either. What it pins down is that the two
+// kinds of name coexist - `mk` keeps returning the real `T` while `twice` is
+// instantiated at an unrelated one.
+//@ exit: 42
+
+struct T { v: i32 }
+
+proc mk(v: i32) T { return T { v: v }; }
+
+proc id<X>(x: X) X { return x; }
+
+// `T` here is the type PARAMETER, shadowing the struct within this signature.
+proc twice<T>(x: T) T { return id::<T>(id::<T>(x)); }
+
+@export
+proc main() i32 {
+    let s: T = mk(40);
+    let n: i32 = twice::<i32>(2);
+    return s.v + n;
+}
