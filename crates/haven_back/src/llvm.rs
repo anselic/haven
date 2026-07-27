@@ -17,6 +17,7 @@ fn emit_type(ty: &Type) -> String {
     use Type::*;
 
     match ty {
+        Path { path, .. } => Type::unresolved(path),
         Void => "void".to_string(),
         Bool => "i1".to_string(),
         Int8 => "i8".to_string(),

@@ -1,0 +1,18 @@
+// Helper for `run/test_generic_enum_xmod.hv`. Not collected by the harness.
+//
+// A generic, data-carrying enum owned by a module other than the entry. Its
+// emitted name is slug-prefixed (`helpers.slot$Slot`), so its instances come out
+// as `helpers.slot$Slot$i32` - a name with three `$` in it, two of which mean
+// entirely different things. Matching on one used to depend on picking those
+// apart correctly; `mono` now records the instance -> template link directly.
+pub enum Slot<T> { Empty, Full(T) }
+
+// matched HERE, inside the owning module, and at whatever type argument the
+// caller picks - so mono substitutes the payload type and rewrites this
+// pattern's qualifier against the instance.
+pub proc slot_or<T>(s: Slot<T>, default: T) T {
+    match (s) {
+        Slot::Full(v) -> { return v; }
+        Slot::Empty -> { return default; }
+    }
+}

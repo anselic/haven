@@ -29,6 +29,7 @@ fn check_export_type<'a>(
             Err(format!("fixed-size array type '[{}; N]' is not allowed in @export functions, use a raw pointer '*{}' and an explicit length parameter instead", inner, inner)),
         Type::Slice(inner) =>
             Err(format!("slice type '{}' is not allowed in @export functions, use a raw pointer '*{}' and an explicit length parameter instead", ty, inner)),
+        Type::Path { path, .. } => Type::unresolved(path),
         // `str` is a raw `*const u8` (a C string) - a single machine pointer,
         // so it is ABI-stable and maps directly to C's `const char*`.
         Type::Str => Ok(()),
@@ -120,7 +121,7 @@ fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), 
                 | ExprNode::Uint8(_) | ExprNode::Uint32(_) | ExprNode::Uint64(_)
                 | ExprNode::Float32(_) | ExprNode::Float64(_)) => Ok(()),
         // an `Enum::Variant` is a compile-time integer constant.
-        ExprNode::Var(name) if enum_variant(cx, name).is_some() => Ok(()),
+        ExprNode::Path(path) if enum_variant(cx, path).is_some() => Ok(()),
         // a bare top-level function name: its address is a link-time constant.
         // a *global* of function type is excluded - reading its value isn't const.
         ExprNode::Var(name)
@@ -392,6 +393,9 @@ pub fn typecheck_program<'a>(
     // reconstructing names. cheap to clone: one entry per declared method, and
     // both typecheck passes need it.
     cx.members = defs.members().clone();
+    // instance -> template, for matching a template-named pattern against an
+    // instance-typed scrutinee. Empty until mono has run.
+    cx.instances = defs.instances().iter().map(|(&m, i)| (m, i.template)).collect();
 
     // --- forward declaration pass
 

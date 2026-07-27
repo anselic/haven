@@ -16,9 +16,9 @@ pub(crate) fn int_const(repr: &Type, val: i64) -> Const {
     }
 }
 
-/// If `name` is an `Enum::Variant` reference, the discriminant as a typed const.
-pub(crate) fn enum_const<'a>(enums: &HashMap<&'a str, EnumDef<'a>>, name: &str) -> Option<Const> {
-    let (ename, variant) = name.split_once("::")?;
+/// If `path` is an `Enum::Variant` reference, the discriminant as a typed const.
+pub(crate) fn enum_const<'a>(enums: &HashMap<&'a str, EnumDef<'a>>, path: &Path<'a>) -> Option<Const> {
+    let (ename, variant) = path.as_variant()?;
     let def = enums.get(ename)?;
     Some(int_const(&def.repr, *def.variants.get(variant)?))
 }
@@ -31,8 +31,8 @@ pub(crate) fn enum_const<'a>(enums: &HashMap<&'a str, EnumDef<'a>>, name: &str) 
 /// it rewrites construction call/struct-literal sites; only the variant part
 /// (after `::`) of `path` is trustworthy here. See `check_variant_pattern`'s
 /// matching base-name relaxation on the typecheck side of this same problem.
-pub(crate) fn pattern_variant_const<'a>(enums: &HashMap<&'a str, EnumDef<'a>>, ename: &'a str, path: &str) -> Const {
-    let variant = path.split_once("::").expect("enum pattern validated in typecheck").1;
+pub(crate) fn pattern_variant_const<'a>(enums: &HashMap<&'a str, EnumDef<'a>>, ename: &'a str, path: &Path<'a>) -> Const {
+    let variant = path.as_variant().expect("enum pattern validated in typecheck").1;
     let def = &enums[ename];
     int_const(&def.repr, def.variants[variant])
 }

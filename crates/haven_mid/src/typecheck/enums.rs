@@ -79,22 +79,22 @@ pub(crate) fn enum_repr<'a>(attributes: &[Attribute<'a>]) -> Result<(Type<'a>, b
     Ok((Type::Int32, false))
 }
 
-/// If `name` is an `Enum::Variant` reference to a declared enum, return the
+/// If `path` is an `Enum::Variant` reference to a declared enum, return the
 /// enum's name, the variant's discriminant value, and the discriminant repr.
 /// The enum name comes from the table key so it carries the `'a` lifetime.
-pub(crate) fn enum_variant<'a>(cx: &Context<'a>, name: &str) -> Option<(&'a str, i64, Type<'a>)> {
-    let (ename, variant) = name.split_once("::")?;
+pub(crate) fn enum_variant<'a>(cx: &Context<'a>, path: &Path<'a>) -> Option<(&'a str, i64, Type<'a>)> {
+    let (ename, variant) = path.as_variant()?;
     let (&ekey, def) = cx.enums.get_key_value(ename)?;
     let val = *def.variants.get(variant)?;
     Some((ekey, val, def.repr.clone()))
 }
 
-/// Validate that `path` (a joined `E::V`) names a variant of enum `en`; returns
-/// the variant name. Shared by the field-less `Path` and the destructuring
-/// `Variant` match-arm patterns.
-pub(crate) fn check_variant_pattern<'a>(cx: &Context<'a>, en: &'a str, path: &'a str, span: &Span)
+/// Validate that `path` (an `E::V`) names a variant of enum `en`; returns the
+/// variant name. Shared by the field-less `Path` and the destructuring `Variant`
+/// match-arm patterns.
+pub(crate) fn check_variant_pattern<'a>(cx: &Context<'a>, en: &'a str, path: &Path<'a>, span: &Span)
 -> Result<&'a str, Error> {
-    let (pat_enum, variant) = path.split_once("::")
+    let (pat_enum, variant) = path.as_variant()
         .ok_or_else(|| Error { msg: format!("invalid enum pattern `{}`", path), span: span.clone() })?;
     // `en` may be a monomorphized instance (`std.option$Option$i32`) while the
     // pattern names the generic template (`std.option$Option::Some`): mono rewrites
@@ -102,13 +102,11 @@ pub(crate) fn check_variant_pattern<'a>(cx: &Context<'a>, en: &'a str, path: &'a
     // touches match-pattern text (it has no type info to know which instantiation
     // a bare pattern refers to; see mono.rs).
     //
-    // So the pattern's enum matches if it *is* `en`, or if `en` is one of its
-    // instances - i.e. `en` is `pat_enum` followed by a `$`-separated argument
-    // list. Requiring the `$` boundary is what keeps enum `Foo` from matching an
-    // instance of a different enum `FooBar`.
-    let is_instance = en.len() > pat_enum.len()
-        && en.starts_with(pat_enum)
-        && en.as_bytes()[pat_enum.len()] == b'$';
+    // So the pattern's enum matches if it *is* `en`, or if `en` is an instance
+    // that mono recorded as specializing it. This used to be inferred from the
+    // shape of the name; going through the recorded template means the pipeline
+    // no longer relies on any invariant about what a `$` in a symbol separates.
+    let is_instance = cx.instances.get(en).is_some_and(|t| *t == pat_enum);
     if pat_enum != en && !is_instance {
         return Err(Error { msg: format!("pattern `{}` is not a variant of enum '{}'", path, en), span: span.clone() });
     }
@@ -118,11 +116,11 @@ pub(crate) fn check_variant_pattern<'a>(cx: &Context<'a>, en: &'a str, path: &'a
     Ok(variant)
 }
 
-/// If `name` is `E::V` naming a variant of a declared enum, returns the enum's
+/// If `path` is `E::V` naming a variant of a declared enum, returns the enum's
 /// name and the variant's payload field types (empty for a unit variant). Used
 /// to recognize a constructor call `E::V(...)` in `infer`/`lower_expr`.
-pub(crate) fn enum_variant_ctor<'a>(cx: &Context<'a>, name: &str) -> Option<(&'a str, Vec<Type<'a>>)> {
-    let (ename, variant) = name.split_once("::")?;
+pub(crate) fn enum_variant_ctor<'a>(cx: &Context<'a>, path: &Path<'a>) -> Option<(&'a str, Vec<Type<'a>>)> {
+    let (ename, variant) = path.as_variant()?;
     let (&ekey, def) = cx.enums.get_key_value(ename)?;
     if !def.variants.contains_key(variant) { return None; }
     let tys = def.payloads.get(variant)
@@ -131,11 +129,11 @@ pub(crate) fn enum_variant_ctor<'a>(cx: &Context<'a>, name: &str) -> Option<(&'a
     Some((ekey, tys))
 }
 
-/// If `name` is `E::V` naming a variant of a declared enum, returns the (enum,
+/// If `path` is `E::V` naming a variant of a declared enum, returns the (enum,
 /// variant) names carrying the `'a` lifetime from the table keys. Used to route
 /// a struct-literal `E::V { ... }` and a `StructVariant` pattern to the variant.
-pub(crate) fn split_enum_variant<'a>(cx: &Context<'a>, name: &str) -> Option<(&'a str, &'a str)> {
-    let (ename, variant) = name.split_once("::")?;
+pub(crate) fn split_enum_variant<'a>(cx: &Context<'a>, path: &Path<'a>) -> Option<(&'a str, &'a str)> {
+    let (ename, variant) = path.as_variant()?;
     let (&ekey, def) = cx.enums.get_key_value(ename)?;
     let (&vkey, _) = def.variants.get_key_value(variant)?;
     Some((ekey, vkey))

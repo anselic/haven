@@ -362,48 +362,55 @@ fn infer<'a>(
         ExprNode::Float64(_) => Type::Float64,
         ExprNode::Str(_)     => Type::Str,
 
-        ExprNode::Var(name) => {
-            // an `Enum::Variant` reference. A unit variant is a value: a field-less
-            // enum's scalar discriminant, or (for a data enum) an aggregate with no
-            // payload. A tuple/struct variant used bare is a missing constructor
-            // call - `Msg::Note` needs `Msg::Note(...)`.
-            if let Some((ename, _val, repr)) = enum_variant(cx, name) {
-                let variant = name.split_once("::").unwrap().1;
-                if cx.enums[ename].payloads.get(variant).is_some_and(|p| !p.is_empty()) {
-                    return Err(Error {
-                        msg: format!("variant '{}' carries a payload; construct it with `{}(...)`", name, name),
-                        span,
-                    });
-                }
-                // a generic enum's variant can never be used bare - a bare `Var`
-                // has no syntax to attach a turbofish, so even a unit variant needs
-                // the call form: `Option::None::<i32>()`.
-                if cx.generic_enums.contains_key(ename) {
-                    return Err(Error {
-                        msg: format!(
-                            "enum '{}' is generic; construct '{}' with explicit type arguments, e.g. `{}::<...>()`",
-                            ename, name, name,
-                        ),
-                        span,
-                    });
-                }
-                Type::Enum { name: ename, repr: Box::new(repr), has_payload: cx.enums[ename].has_payload, args: Vec::new() }
-            } else {
-                let Some((binding, ty)) = cx.lookup(name) else {
-                    let msg = format!("Undefined variable '{}'", name);
-                    return Err(Error {
-                        msg,
-                        span,
-                    });
-                };
-                let binding = *binding;
-                let ty = ty.clone();
-                // record which param/local this use resolves to (globals -> None)
-                if let Some(b) = binding {
-                    cx.resolved.insert(metadata.id, b);
-                }
-                ty
+        // an `Enum::Variant` reference - the only qualified path name resolution
+        // leaves standing. A unit variant is a value: a field-less enum's scalar
+        // discriminant, or (for a data enum) an aggregate with no payload. A
+        // tuple/struct variant used bare is a missing constructor call -
+        // `Msg::Note` needs `Msg::Note(...)`.
+        ExprNode::Path(path) => {
+            let Some((ename, _val, repr)) = enum_variant(cx, path) else {
+                return Err(Error {
+                    msg: format!("Undefined variable '{}'", path),
+                    span,
+                });
+            };
+            let variant = path.as_variant().unwrap().1;
+            if cx.enums[ename].payloads.get(variant).is_some_and(|p| !p.is_empty()) {
+                return Err(Error {
+                    msg: format!("variant '{}' carries a payload; construct it with `{}(...)`", path, path),
+                    span,
+                });
             }
+            // a generic enum's variant can never be used bare - a bare path has no
+            // syntax to attach a turbofish, so even a unit variant needs the call
+            // form: `Option::None::<i32>()`.
+            if cx.generic_enums.contains_key(ename) {
+                return Err(Error {
+                    msg: format!(
+                        "enum '{}' is generic; construct '{}' with explicit type arguments, e.g. `{}::<...>()`",
+                        ename, path, path,
+                    ),
+                    span,
+                });
+            }
+            Type::Enum { name: ename, repr: Box::new(repr), has_payload: cx.enums[ename].has_payload, args: Vec::new() }
+        },
+
+        ExprNode::Var(name) => {
+            let Some((binding, ty)) = cx.lookup(name) else {
+                let msg = format!("Undefined variable '{}'", name);
+                return Err(Error {
+                    msg,
+                    span,
+                });
+            };
+            let binding = *binding;
+            let ty = ty.clone();
+            // record which param/local this use resolves to (globals -> None)
+            if let Some(b) = binding {
+                cx.resolved.insert(metadata.id, b);
+            }
+            ty
         },
 
         ExprNode::Slice(inner) if inner.len() == 0 => {
@@ -634,6 +641,15 @@ fn infer<'a>(
                 return Ok(ty);
             }
 
+            // anything still qualified here named a variant of no known enum -
+            // resolution only leaves `Enum::Variant` paths standing.
+            let Some(name) = name.as_single() else {
+                return Err(Error {
+                    msg: format!("Unknown enum variant '{}'", name),
+                    span,
+                });
+            };
+
             let def = match cx.structs.get(name) {
                 Some(d) => d.clone(),
                 None => return Err(Error {
@@ -852,7 +868,7 @@ fn infer<'a>(
             // a data-enum constructor `E::V(args...)` looks like a call but names
             // no function; check arity + each arg against the payload field types
             // and yield the aggregate enum type. Guarded before ordinary dispatch.
-            if let ExprNode::Var(cname) = &func.value {
+            if let ExprNode::Path(cname) = &func.value {
                 if let Some((ename, payload_tys)) = enum_variant_ctor(cx, cname) {
                     // a generic enum's tuple/unit variant needs turbofish (no
                     // context inference yet, matching plain generic-struct
@@ -1122,7 +1138,7 @@ pub(crate) fn check_stmt<'a>(
                         let Some(en) = enum_name else {
                             return Err(Error { msg: format!("enum-variant pattern `{}` in a match on integer type", p), span: pat.span.clone() });
                         };
-                        let variant = check_variant_pattern(cx, en, *p, &pat.span)?;
+                        let variant = check_variant_pattern(cx, en, p, &pat.span)?;
                         // a bare `E::V` on a data variant would leave the payload
                         // unbound - require the destructuring form `E::V(..)`.
                         let arity = cx.enums[en].payloads.get(variant).map_or(0, |p| p.len());
@@ -1140,7 +1156,7 @@ pub(crate) fn check_stmt<'a>(
                         let Some(en) = enum_name else {
                             return Err(Error { msg: format!("enum-variant pattern `{}` in a match on integer type", path), span: pat.span.clone() });
                         };
-                        let variant = check_variant_pattern(cx, en, *path, &pat.span)?;
+                        let variant = check_variant_pattern(cx, en, path, &pat.span)?;
                         let payload = cx.enums[en].payloads.get(variant).cloned().unwrap_or_default();
                         if fields.len() != payload.len() {
                             return Err(Error {
@@ -1172,7 +1188,7 @@ pub(crate) fn check_stmt<'a>(
                         let Some(en) = enum_name else {
                             return Err(Error { msg: format!("enum-variant pattern `{}` in a match on integer type", path), span: pat.span.clone() });
                         };
-                        let variant = check_variant_pattern(cx, en, *path, &pat.span)?;
+                        let variant = check_variant_pattern(cx, en, path, &pat.span)?;
                         let payload = cx.enums[en].payloads.get(variant).cloned().unwrap_or_default();
                         if payload.is_empty() {
                             return Err(Error {

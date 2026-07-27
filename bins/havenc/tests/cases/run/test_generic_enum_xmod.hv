@@ -1,0 +1,38 @@
+// A generic enum defined in an imported module, constructed AND matched on from
+// the entry module, at two different type arguments.
+//
+// The pattern names the template (`helpers.slot$Slot::Full`) while the
+// scrutinee's type names the instance (`helpers.slot$Slot$i32`) - mono rewrites
+// construction sites but never pattern text, since it has no type information
+// with which to tell which instantiation a bare pattern refers to. The two are
+// reconciled through the instance -> template link mono records in `Defs`.
+//@ exit: 37
+
+import helpers/slot { Slot, slot_or }
+
+// matched from a module that does not own the enum.
+proc unwrap_slot(s: Slot<i32>, default: i32) i32 {
+    match (s) {
+        Slot::Full(v) -> { return v; }
+        Slot::Empty -> { return default; }
+    }
+}
+
+@export
+proc main() i32 {
+    let full: Slot<i32> = Slot::Full::<i32>(30);
+    let empty: Slot<i32> = Slot::Empty::<i32>();
+
+    // matched in the entry module...
+    let a: i32 = unwrap_slot(full, 0);   // 30
+    // ...and in the owning module, through its own generic proc.
+    let b: i32 = slot_or::<i32>(empty, 7); // 7
+
+    // a second instance of the same template at a different type argument: it
+    // must stay a distinct enum, not collapse onto `Slot$i32`.
+    let flag: Slot<bool> = Slot::Full::<bool>(true);
+    let c: bool = slot_or::<bool>(flag, false);
+
+    if (c) { return a + b; }
+    return 0;
+}

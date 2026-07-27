@@ -61,6 +61,7 @@ pub fn size_of<'a>(ty: &Type<'a>, structs: &StructTable<'a>) -> usize {
 
         Struct { name, .. } => aggregate_layout(struct_fields(name, structs).iter().map(|(_, t)| t), structs).0,
 
+        Path { path, .. } => Type::unresolved(path),
         Param(name) => panic!("type parameter `{name}` survived to layout"),
     }
 }
@@ -94,6 +95,7 @@ pub fn align_of<'a>(ty: &Type<'a>, structs: &StructTable<'a>) -> usize {
 
         Struct { name, .. } => aggregate_layout(struct_fields(name, structs).iter().map(|(_, t)| t), structs).1,
 
+        Path { path, .. } => Type::unresolved(path),
         Param(name) => panic!("type parameter `{name}` survived to layout"),
     }
 }

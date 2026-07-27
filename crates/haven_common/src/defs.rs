@@ -99,6 +99,26 @@ pub struct Member<'a> {
 /// which is a type change here and at the three lookup sites, nothing more.
 pub type MemberTable<'a> = HashMap<(&'a str, &'a str), Member<'a>>;
 
+/// What a monomorphized instance came from.
+///
+/// Recorded by `mono` as it mints each instance, so nothing downstream has to
+/// recover the relationship by taking the string apart. Two things needed it:
+/// match patterns name the *template* (`std.option$Option::Some`) while the
+/// scrutinee's type names the *instance* (`std.option$Option$i32`), because mono
+/// has no type information with which to rewrite a bare pattern; and diagnostics
+/// want to say `alloc::<Vec2>` rather than `std.alloc$alloc$Vec2`.
+#[derive(Clone, Debug)]
+pub struct Instance<'a> {
+    /// Emitted name of the generic template this specializes.
+    pub template: &'a str,
+    /// How the instance reads back to a human: `alloc::<Vec2>`. Diagnostics only;
+    /// never fed back into the compiler.
+    pub display: String,
+}
+
+/// Every monomorphized instance in the program, keyed by its emitted name.
+pub type Instances<'a> = HashMap<&'a str, Instance<'a>>;
+
 pub struct ModInfo {
     pub file: FileId,
     /// Canonical key: an absolute path, `std/...`, or `<prelude>`.
@@ -115,6 +135,7 @@ pub struct Defs<'a> {
     /// slugs already handed out, so two modules never share one.
     slugs: HashMap<String, ModId>,
     members: MemberTable<'a>,
+    instances: Instances<'a>,
 }
 
 impl<'a> Defs<'a> {
@@ -151,6 +172,20 @@ impl<'a> Defs<'a> {
     }
 
     pub fn members(&self) -> &MemberTable<'a> { &self.members }
+
+    /// Record that `mangled` is `template` specialized to some arguments.
+    /// Called by `mono` for every function, struct and enum instance it mints.
+    pub fn add_instance(&mut self, mangled: &'a str, template: &'a str, display: String) {
+        self.instances.insert(mangled, Instance { template, display });
+    }
+
+    pub fn instances(&self) -> &Instances<'a> { &self.instances }
+
+    /// The friendliest spelling of an emitted name: an instance's turbofish form
+    /// if it is one, otherwise the name unchanged.
+    pub fn show<'s>(&'s self, name: &'s str) -> &'s str {
+        self.instances.get(name).map(|i| i.display.as_str()).unwrap_or(name)
+    }
 
     pub fn get(&self, id: DefId) -> &Def<'a> { &self.defs[id.0 as usize] }
     pub fn module(&self, id: ModId) -> &ModInfo { &self.mods[id.0 as usize] }

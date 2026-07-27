@@ -258,20 +258,23 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 let dst = cx.fresh_reg();
                 cx.emit(Inst::GlobalPtr { dst, name });
                 Value::Reg(dst)
-            } else if let Some(c) = enum_const(&cx.enums, name) {
-                // a unit variant of a *data* enum is an aggregate (alloca + tag
-                // store), even though its `Var` shape matches a field-less enum's
-                // scalar discriminant. Field-less enums stay a bare const.
-                let agg_enum = match cx.node_types.get(&expr.id) {
-                    Some(Type::Enum { has_payload: true, name: ename, .. }) => Some(*ename),
-                    _ => None,
-                };
-                match agg_enum {
-                    Some(ename) => construct_data_variant(cx, ename, name, c, &[]),
-                    None => Value::Const(c),
-                }
             } else {
                 panic!("unknown variable '{name}' in MIL lowering");
+            }
+        }
+
+        // a unit enum variant used as a value. For a *data* enum it is still an
+        // aggregate (alloca + tag store); a field-less enum stays a bare const.
+        ExprNode::Path(path) => {
+            let c = enum_const(&cx.enums, path)
+                .unwrap_or_else(|| panic!("unknown variant '{path}' in MIL lowering"));
+            let agg_enum = match cx.node_types.get(&expr.id) {
+                Some(Type::Enum { has_payload: true, name: ename, .. }) => Some(*ename),
+                _ => None,
+            };
+            match agg_enum {
+                Some(ename) => construct_data_variant(cx, ename, path, c, &[]),
+                None => Value::Const(c),
             }
         }
 
@@ -289,6 +292,9 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 let args: Vec<Expr<'a>> = fields.iter().map(|(_, e)| e.clone()).collect();
                 return construct_data_variant(cx, ename, name, tag, &args);
             }
+
+            // an ordinary struct literal: resolution left it a single segment.
+            let name = name.as_single().expect("struct literal name validated in typecheck");
 
             // reuse a hoisted entry-block slot if the caller provided one;
             // otherwise this literal owns a fresh slot. take() so nested field
@@ -614,13 +620,13 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             // a data-enum constructor `Msg::Note(a, b)` is not a real call: build
             // the aggregate in place. (A field-less enum "call" is impossible -
             // typecheck yields a scalar-typed variant, never `has_payload: true`.)
-            if let ExprNode::Var(name) = &func.value {
-                if let Some(c) = enum_const(&cx.enums, name) {
+            if let ExprNode::Path(path) = &func.value {
+                if let Some(c) = enum_const(&cx.enums, path) {
                     if let Some(Type::Enum { has_payload: true, name: ename, .. }) =
                         cx.node_types.get(&expr.id).cloned().as_ref()
                     {
                         let ename = *ename;
-                        return construct_data_variant(cx, ename, name, c, args);
+                        return construct_data_variant(cx, ename, path, c, args);
                     }
                 }
             }
@@ -818,13 +824,13 @@ pub(crate) fn copy_struct<'a>(cx: &mut LowerCtx<'a>, struct_name: &'a str, src: 
 /// Construct a data-enum aggregate in place: alloca `%Enum` (or reuse a hoisted
 /// slot), store the variant's discriminant into the tag (field 0), then store
 /// each payload argument into the variant's payload struct at field 1. `tag` is
-/// the variant's discriminant const; `variant_path` is the joined `Enum::Variant`.
+/// the variant's discriminant const; `variant_path` is the `Enum::Variant` path.
 /// Returns a pointer to the aggregate. Mirrors `ExprNode::Struct` lowering, so a
 /// unit variant (`args` empty) is just alloca + tag store.
 fn construct_data_variant<'a>(
     cx: &mut LowerCtx<'a>,
     enum_name: &'a str,
-    variant_path: &'a str,
+    variant_path: &Path<'a>,
     tag: Const,
     args: &[Expr<'a>],
 ) -> Value {
@@ -843,7 +849,7 @@ fn construct_data_variant<'a>(
     cx.emit(Inst::Store { ptr: tag_ptr, val: Value::Const(tag), ty: repr, align: None });
 
     if !args.is_empty() {
-        let variant = variant_path.split_once("::").unwrap().1;
+        let variant = variant_path.as_variant().unwrap().1;
         let pstruct = crate::typecheck::enum_payload_struct_name(enum_name, variant);
         let payload_base = cx.fresh_reg();
         cx.emit(Inst::FieldPtr { dst: payload_base, struct_name: enum_name, base, field_index: 1 });

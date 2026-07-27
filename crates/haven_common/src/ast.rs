@@ -257,6 +257,68 @@ impl<'a> Display for ConstVal<'a> {
     }
 }
 
+/// A `::`-separated name exactly as written: `String`, `geo::Point`,
+/// `Status::Ready`, `dsp::osc::Osc`.
+///
+/// The parser used to join these into one `&str` (via `Box::leak`) and every
+/// consumer split them apart again — `split_once("::")`, which silently dropped
+/// everything past the second segment. Keeping the segments means the *shape* of
+/// a name survives parsing, so resolution can decide what each segment denotes
+/// (module qualifier, type, value, enum variant) instead of guessing from a
+/// string.
+///
+/// Pre-resolution only. Name resolution replaces every `Path` with what it
+/// refers to; nothing downstream of `haven_front::module` should see one.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Path<'a> {
+    /// At least one segment. `["geo", "Point"]` for `geo::Point`.
+    pub segments: Vec<&'a str>,
+}
+
+impl<'a> Path<'a> {
+    pub fn single(name: &'a str) -> Self {
+        Path { segments: vec![name] }
+    }
+
+    /// The last segment — the name being referred to, ignoring any qualifiers.
+    pub fn last(&self) -> &'a str {
+        self.segments[self.segments.len() - 1]
+    }
+
+    /// The only segment, if this path is unqualified.
+    pub fn as_single(&self) -> Option<&'a str> {
+        match self.segments.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        }
+    }
+
+    /// The `(enum, variant)` of a two-segment path. After resolution every
+    /// remaining qualified path is an enum variant, so this is the accessor the
+    /// mid end uses — it replaces `split_once("::")`, which quietly treated
+    /// `a::b::c` as `("a", "b::c")`.
+    pub fn as_variant(&self) -> Option<(&'a str, &'a str)> {
+        match self.segments.as_slice() {
+            [e, v] => Some((*e, *v)),
+            _ => None,
+        }
+    }
+
+    /// This path with its head segment replaced — how resolution records that a
+    /// qualified name's type or module part has been resolved.
+    pub fn with_head(&self, head: &'a str) -> Self {
+        let mut segments = self.segments.clone();
+        segments[0] = head;
+        Path { segments }
+    }
+}
+
+impl<'a> Display for Path<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.segments.join("::"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type<'a> {
     Void, Bool,
@@ -275,6 +337,16 @@ pub enum Type<'a> {
     Simd(Box<Self>, ConstVal<'a>),
     /// Static string slice (like `&'static str` in Rust)
     Str,
+    /// PRE-RESOLUTION ONLY: a named type as the parser saw it, before anything
+    /// knows whether it denotes a struct, an enum or a type parameter — or even
+    /// whether it exists. Name resolution rewrites every one of these into
+    /// `Struct`, `Enum` or `Param`, and errors if it can't; no stage after
+    /// `haven_front::module` ever constructs or matches one.
+    ///
+    /// This is what used to be spelled `Struct { name }` in parser output, where
+    /// "struct" was a lie roughly a third of the time and both typecheck and
+    /// monomorphization had to re-disambiguate it independently.
+    Path { path: Path<'a>, args: Vec<GenericArg<'a>> },
     /// A named struct type, with any generic arguments applied, e.g. `Vec2`
     /// (`args` empty), `Option<i32>` (one type arg) or `Buf<i32, 8>` (a type arg
     /// and a const arg - hence `GenericArg`, not `Type`). `args` is always empty
@@ -307,6 +379,18 @@ impl<'a> Type<'a> {
     /// only shape any stage after monomorphization ever produces.
     pub fn plain_struct(name: &'a str) -> Self {
         Type::Struct { name, args: Vec::new() }
+    }
+
+    /// A named type as written, before resolution.
+    pub fn path(path: Path<'a>) -> Self {
+        Type::Path { path, args: Vec::new() }
+    }
+
+    /// Reject a [`Type::Path`] that reached a stage past name resolution. Every
+    /// such site is a compiler bug, not a user error - resolution either rewrites
+    /// a path or reports an unknown-type error, so nothing valid gets this far.
+    pub fn unresolved(path: &Path<'a>) -> ! {
+        panic!("unresolved type path `{path}` survived name resolution")
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -345,6 +429,11 @@ impl<'a> Display for Type<'a> {
             Slice(inner) => write!(f, "[{}]", inner),
             Simd(inner, size) => write!(f, "simd[{}, {}]", inner, size),
             Str => write!(f, "str"),
+            Path { path, args } if args.is_empty() => write!(f, "{}", path),
+            Path { path, args } => {
+                let args_str = args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
+                write!(f, "{}<{}>", path, args_str)
+            },
             Struct { name, args } if args.is_empty() => write!(f, "{}", name),
             Struct { name, args } => {
                 let args_str = args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
@@ -370,11 +459,26 @@ pub enum ExprNode<'a> {
     /// escape sequences are resolved later, during MIL lowering, e.g.
     /// `\n` ([\, n]) becomes a single byte 0x0A
     Str(&'a str),
+    /// An unqualified value reference: a local, a parameter, or (after
+    /// resolution) a global or function under its resolved name.
     Var(&'a str),
+    /// A qualified name, kept in segments rather than joined into one string.
+    ///
+    /// Before resolution this is any written path — `math::sinf`, `Point::new`,
+    /// `Status::Ready` — and the parser makes no attempt to say which is which.
+    /// Resolution rewrites it: a module-qualified value or associated function
+    /// collapses to a `Var` under its resolved name, while an enum variant stays
+    /// a two-segment `Path` whose first segment is now the enum's *resolved*
+    /// name. So downstream, `Path` means exactly one thing — `Enum::Variant` —
+    /// and reads it by index instead of by `split_once("::")`.
+    Path(Path<'a>),
     Slice(Vec<Expr<'a>>),
 
     Struct {
-        name: &'a str,
+        /// The type being constructed: a one-segment path for a struct literal,
+        /// or `[enum, variant]` for a struct-style variant literal. Resolution
+        /// rewrites the head segment to the resolved type name.
+        name: Path<'a>,
         /// Turbofish generic arguments for a generic struct, e.g. the `i32` in
         /// `Option::<i32> { ... }` or the `i32, 8` in `Buf::<i32, 8> { ... }`.
         /// Empty for a non-generic struct literal.
@@ -422,6 +526,7 @@ impl<'a> Display for ExprNode<'a> {
             ExprNode::Float64(val) => write!(f, "{}f64", val),
             ExprNode::Str(s) => write!(f, "{:?}", s),
             ExprNode::Var(name) => write!(f, "{}", name),
+            ExprNode::Path(path) => write!(f, "{}", path),
 
             ExprNode::Slice(elements) => {
                 let elements_str = elements.iter()
@@ -568,17 +673,19 @@ pub enum PatternNode<'a> {
     Wildcard,
     /// an integer-literal pattern, e.g. `5` or `-1`.
     Int(i64),
-    /// a field-less enum-variant pattern, e.g. `Status::Continue` (stored joined).
-    Path(&'a str),
+    /// a field-less enum-variant pattern, e.g. `Status::Continue`. Always the two
+    /// segments `[enum, variant]`; resolution rewrites the enum segment to its
+    /// resolved name.
+    Path(Path<'a>),
     /// a data-carrying enum-variant pattern that destructures the payload, e.g.
-    /// `Msg::Note(pitch, vel)`. `path` is the joined `Enum::Variant`; `fields` is
-    /// one sub-pattern per payload field (`Bind` to name it, `Wildcard` to ignore).
-    Variant { path: &'a str, fields: Vec<Pattern<'a>> },
+    /// `Msg::Note(pitch, vel)`. `path` is `[enum, variant]`; `fields` is one
+    /// sub-pattern per payload field (`Bind` to name it, `Wildcard` to ignore).
+    Variant { path: Path<'a>, fields: Vec<Pattern<'a>> },
     /// a struct-style variant pattern that destructures a named payload by field,
     /// e.g. `Msg::Cc { id, val }` or `Msg::Cc { id: x, val: _ }`. Each entry is
     /// `(field_name, sub_pattern)`; binding is by field name, so order is free.
     /// The shorthand `{ id }` desugars to `(id, Bind(id))` at parse time.
-    StructVariant { path: &'a str, fields: Vec<(&'a str, Pattern<'a>)> },
+    StructVariant { path: Path<'a>, fields: Vec<(&'a str, Pattern<'a>)> },
     /// a binding introduced by a `Variant` field, e.g. the `pitch` in
     /// `Msg::Note(pitch, vel)`. Metadata-wrapped so each binding has a unique node
     /// id (its binding identity, mirroring how a `Declare` keys its local).

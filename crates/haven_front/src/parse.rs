@@ -6,15 +6,42 @@ use chumsky::{
 };
 use haven_common::ast::*;
 
-/// Leak a String to get a `&'static str` (coerces to the source lifetime). used
-/// for the few synthetic identifiers the parser has to mint, e.g. the joined
-/// `qualifier::symbol` of a qualified ref. compiler is single-shot so leaking a
-/// bounded number of names is fine.
-// TODO: the rest of the pipeline now threads am arena for exactly this kind of
-// synthetic name (see module.rs / mono.rs). this leak predates that and should
-// probably use the arena too instead of leaking for the whole process.
-fn leak(s: String) -> &'static str {
-    Box::leak(s.into_boxed_str())
+/// Field names for a tuple variant's payload: `Msg::Note(i32, i32)` gets fields
+/// `"0"` and `"1"`, so a tuple variant and a struct-style variant share one
+/// representation downstream. Indexing a fixed table keeps these `&'static str`
+/// without leaking a fresh allocation per field, which is what the parser used
+/// to do. A variant with more payload fields than this falls back to a leak.
+const TUPLE_FIELD_NAMES: [&str; 16] = [
+    "0", "1", "2", "3", "4", "5", "6", "7",
+    "8", "9", "10", "11", "12", "13", "14", "15",
+];
+
+fn tuple_field_name(i: usize) -> &'static str {
+    TUPLE_FIELD_NAMES.get(i).copied()
+        .unwrap_or_else(|| Box::leak(i.to_string().into_boxed_str()))
+}
+
+/// A `::`-separated name: one or more identifier segments, kept apart.
+///
+/// Written as a macro rather than a function because each use site has its own
+/// `var` parser with its own inference-bound types, and spelling out a chumsky
+/// parser's return type is far more noise than repeating four lines.
+///
+/// `repeated()` rewinds a partial match, so a trailing turbofish `::<...>` — not
+/// an identifier — leaves the `::` for the caller's own alternative, exactly as
+/// the previous `or_not()` form did.
+macro_rules! path_of {
+    ($var:expr) => {
+        $var.map(|s| *s)
+            .then(just(Token::ColonColon).ignore_then($var.map(|s| *s))
+                .repeated().collect::<Vec<_>>())
+            .map(|(head, rest): (&'src str, Vec<&'src str>)| {
+                let mut segments = Vec::with_capacity(rest.len() + 1);
+                segments.push(head);
+                segments.extend(rest);
+                Path { segments }
+            })
+    };
 }
 
 /// The payload tail of an `Enum::Variant` match pattern: positional `(a, b)` or
@@ -281,19 +308,12 @@ fn parse_expr<'tks, 'src: 'tks>()
             // Struct init, with an optional qualifier and an optional turbofish
             // for generic structs: `S { f: v }`, `geo::Point { f: v }`,
             // `Option::<i32> { f: v }`, or `mod::Option::<i32> { f: v }`. A first
-            // `::Name` is the module qualifier (folded into `"qual::Name"`); a
-            // `::<...>` is the generic turbofish, disambiguating `<`/`>` from
-            // comparison operators as the call turbofish does. The qualifier
-            // alternative rejects `::<` (not an ident) and backtracks, so the
-            // turbofish still sees it.
-            var.map(|s| *s)
-                .then(just(Token::ColonColon).ignore_then(var.map(|s| *s)).or_not())
-                .map(|(a, b)| -> &str {
-                    match b {
-                        Some(sym) => leak(format!("{}::{}", a, sym)),
-                        None => a,
-                    }
-                })
+            // `::Name` is a path segment (module qualifier, or the enum of a
+            // struct-style variant literal); a `::<...>` is the generic turbofish,
+            // disambiguating `<`/`>` from comparison operators as the call
+            // turbofish does. The segment alternative rejects `::<` (not an ident)
+            // and backtracks, so the turbofish still sees it.
+            path_of!(var)
                 .then(
                     just(Token::ColonColon)
                         .ignore_then(
@@ -335,18 +355,12 @@ fn parse_expr<'tks, 'src: 'tks>()
                     fields,
                 }),
 
-            // a variable, or a module-qualified ref `qualifier::symbol`
-            // (e.g. `math::sinf`). the qualified form is one `Var` holding the
-            // joined `"qualifier::symbol"` string; the module resolver splits and
-            // rewrites it before any later stage. the `::symbol` is optional and
-            // only taken when followed by an ident, so a turbofish `::<...>` is
-            // left for the call postfix.
-            // TODO: only one `::` segment - `a::b::c` leaves `::c` dangling.
-            var.then(just(Token::ColonColon).ignore_then(var).or_not())
-                .map(|(a, b)| match b {
-                    Some(sym) => ExprNode::Var(leak(format!("{}::{}", a, sym))),
-                    None => ExprNode::Var(*a),
-                }),
+            // a variable, or a qualified ref `qualifier::symbol` (`math::sinf`,
+            // `Point::new`, `Status::Ready`). The parser doesn't try to tell those
+            // apart - it just records the segments and lets the module resolver
+            // decide. A `::symbol` is only taken when followed by an ident, so a
+            // turbofish `::<...>` is left for the call postfix.
+            path_of!(var).map(ExprNode::Path),
             expr.clone()
                 .separated_by(just(Token::Comma))
                 .allow_leading()
@@ -551,16 +565,9 @@ fn parse_type<'tks, 'src: 'tks>()
             //   simd:          `simd<f32, 4>`  (element type + lane count)
             //   generic struct: `Option<i32>`, `Pair<K, V>`
             // `<` is unambiguous here - type position has no comparison operators.
-            // a leading `qualifier::` is folded into the joined `"qual::Name"`
-            // name, split + resolved by the module resolver.
-            var.map(|s| *s)
-                .then(just(Token::ColonColon).ignore_then(var.map(|s| *s)).or_not())
-                .map(|(a, b)| -> &str {
-                    match b {
-                        Some(sym) => leak(format!("{}::{}", a, sym)),
-                        None => a,
-                    }
-                })
+            // a leading `qualifier::` stays a separate segment, resolved by the
+            // module resolver.
+            path_of!(var)
             .then(
                 choice((
                     select! { Token::Int32(x) => GenArg::Size(x) },
@@ -574,59 +581,59 @@ fn parse_type<'tks, 'src: 'tks>()
                     just(Token::BinaryOp(BinaryOp::Lt)),
                     just(Token::BinaryOp(BinaryOp::Gt)))
                 .or_not())
-            .try_map(|(name, args), span| {
-                let Some(args) = args else {
-                    return Ok(match name {
-                        "void" => Type::Void,
-                        "bool" => Type::Bool,
-                        "i8"   => Type::Int8,
-                        "i32"  => Type::Int32,
-                        "i64"  => Type::Int64,
-                        "u8"   => Type::Uint8,
-                        "u32"  => Type::Uint32,
-                        "u64"  => Type::Uint64,
-                        "f32"  => Type::Float32,
-                        "f64"  => Type::Float64,
-                        "str"  => Type::Str,
-                        other  => Type::Struct { name: other, args: Vec::new() },
-                    });
+            .try_map(|(path, args), span| {
+                // the built-in names are keywords, so they only ever appear
+                // unqualified - `geo::i32` names a type called `i32` in `geo`.
+                let scalar = match path.as_single() {
+                    Some("void") => Some(Type::Void),
+                    Some("bool") => Some(Type::Bool),
+                    Some("i8")   => Some(Type::Int8),
+                    Some("i32")  => Some(Type::Int32),
+                    Some("i64")  => Some(Type::Int64),
+                    Some("u8")   => Some(Type::Uint8),
+                    Some("u32")  => Some(Type::Uint32),
+                    Some("u64")  => Some(Type::Uint64),
+                    Some("f32")  => Some(Type::Float32),
+                    Some("f64")  => Some(Type::Float64),
+                    Some("str")  => Some(Type::Str),
+                    _ => None,
                 };
-                match name {
-                    // `simd<element, lanes>`: exactly a type then a size.
-                    "simd" => {
-                        if args.len() != 2 {
-                            return Err(Rich::custom(span, format!("simd<...> takes 2 arguments (element type, lane count), got {}", args.len())));
-                        }
-                        let mut it = args.into_iter();
-                        let elem = match it.next().unwrap() {
-                            GenArg::Ty(t) => t,
-                            GenArg::Size(_) => return Err(Rich::custom(span, "simd<...> element (first argument) must be a type")),
-                        };
-                        // the lane count is a literal, or a bare ident naming a
-                        // const generic param (parsed as a no-arg struct type).
-                        let size = match it.next().unwrap() {
-                            GenArg::Size(x) if x > 0 && x <= 64 => ConstVal::Lit(x as usize),
-                            GenArg::Size(x) => return Err(Rich::custom(span, format!("invalid SIMD size parameter: {x} (must be between 1 and 64)"))),
-                            GenArg::Ty(Type::Struct { name, args }) if args.is_empty() => ConstVal::Param(name),
-                            GenArg::Ty(_) => return Err(Rich::custom(span, "simd<...> lane count (second argument) must be an integer or a const parameter")),
-                        };
-                        Ok(Type::Simd(Box::new(elem), size))
+                let Some(args) = args else {
+                    return Ok(scalar.unwrap_or(Type::Path { path, args: Vec::new() }));
+                };
+                // `simd<element, lanes>`: exactly a type then a size.
+                if path.as_single() == Some("simd") {
+                    if args.len() != 2 {
+                        return Err(Rich::custom(span, format!("simd<...> takes 2 arguments (element type, lane count), got {}", args.len())));
                     }
-                    // any other head is a generic struct. arguments are types or
-                    // const values (`Buf<i32, 8>`); a bare ident stays a type and is
-                    // reclassified downstream if the struct declares it `const`.
-                    other => {
-                        let mut gargs = Vec::with_capacity(args.len());
-                        for a in args {
-                            gargs.push(match a {
-                                GenArg::Ty(t) => GenericArg::Type(t),
-                                GenArg::Size(x) if x >= 0 => GenericArg::Const(ConstVal::Lit(x as usize)),
-                                GenArg::Size(x) => return Err(Rich::custom(span, format!("const argument '{x}' in generic type '{other}<...>' must be non-negative"))),
-                            });
-                        }
-                        Ok(Type::Struct { name: other, args: gargs })
-                    }
+                    let mut it = args.into_iter();
+                    let elem = match it.next().unwrap() {
+                        GenArg::Ty(t) => t,
+                        GenArg::Size(_) => return Err(Rich::custom(span, "simd<...> element (first argument) must be a type")),
+                    };
+                    // the lane count is a literal, or a bare ident naming a
+                    // const generic param (parsed as an unqualified named type).
+                    let size = match it.next().unwrap() {
+                        GenArg::Size(x) if x > 0 && x <= 64 => ConstVal::Lit(x as usize),
+                        GenArg::Size(x) => return Err(Rich::custom(span, format!("invalid SIMD size parameter: {x} (must be between 1 and 64)"))),
+                        GenArg::Ty(Type::Path { ref path, ref args }) if args.is_empty() && path.as_single().is_some() =>
+                            ConstVal::Param(path.as_single().unwrap()),
+                        GenArg::Ty(_) => return Err(Rich::custom(span, "simd<...> lane count (second argument) must be an integer or a const parameter")),
+                    };
+                    return Ok(Type::Simd(Box::new(elem), size));
                 }
+                // any other head is a generic named type. arguments are types or
+                // const values (`Buf<i32, 8>`); a bare ident stays a type and is
+                // reclassified downstream if the type declares it `const`.
+                let mut gargs = Vec::with_capacity(args.len());
+                for a in args {
+                    gargs.push(match a {
+                        GenArg::Ty(t) => GenericArg::Type(t),
+                        GenArg::Size(x) if x >= 0 => GenericArg::Const(ConstVal::Lit(x as usize)),
+                        GenArg::Size(x) => return Err(Rich::custom(span, format!("const argument '{x}' in generic type '{path}<...>' must be non-negative"))),
+                    });
+                }
+                Ok(Type::Path { path, args: gargs })
             })
         ))
         .boxed()
@@ -757,18 +764,16 @@ fn parse_stmt<'tks, 'src: 'tks>()
             .delimited_by(just(Token::LBrace), just(Token::RBrace));
         // after `Enum::Variant`, a `(...)` tail destructures positionally, a `{...}`
         // tail destructures by field name, and neither is a field-less `Path`.
-        let path_pat = var.then_ignore(just(Token::ColonColon)).then(var)
+        let path_pat = path_of!(var)
+            .filter(|p: &Path| p.segments.len() >= 2)
             .then(choice((
                 variant_tail.map(PatTail::Tuple),
                 struct_variant_tail.map(PatTail::Struct),
             )).or_not())
-            .map(|((a, b), tail)| {
-                let path = leak(format!("{}::{}", a, b));
-                match tail {
-                    Some(PatTail::Tuple(fields))  => PatternNode::Variant { path, fields },
-                    Some(PatTail::Struct(fields)) => PatternNode::StructVariant { path, fields },
-                    None => PatternNode::Path(path),
-                }
+            .map(|(path, tail)| match tail {
+                Some(PatTail::Tuple(fields))  => PatternNode::Variant { path, fields },
+                Some(PatTail::Struct(fields)) => PatternNode::StructVariant { path, fields },
+                None => PatternNode::Path(path),
             });
         let wild_pat = var.try_map(|s, span| if *s == "_" {
             Ok(PatternNode::Wildcard)
@@ -1142,7 +1147,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .collect::<Vec<_>>()
         .delimited_by(just(Token::LParen), just(Token::RParen))
         .map(|tys| tys.into_iter().enumerate()
-            .map(|(i, ty)| (leak(i.to_string()), ty))
+            .map(|(i, ty)| (tuple_field_name(i), ty))
             .collect::<Vec<(&str, Type)>>());
     // a struct-style variant payload `{ field: T, ... }`: field names are kept as
     // written (unlike the tuple form's synthesized "0", "1", ...). Reuses the same

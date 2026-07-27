@@ -15,6 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use bumpalo::Bump;
 
 use haven_common::ast::*;
+use haven_common::defs::Defs;
 
 /// one requested instantiation: `base` specialized to `args`, emitted as
 /// `mangled`. `span` is the call site that first asked for it (for errors).
@@ -101,10 +102,10 @@ struct Mono<'p, 'a> {
     /// enum instance requested deep inside `subst_ty` (which has no span of its
     /// own) still gets a source location for the depth-limit error.
     cur_span: Span,
-    /// mangled instance name -> its human-readable spelling (`m2_alloc$alloc$Vec2`
-    /// -> `alloc::<Vec2>`). handed back to the caller so post-mono passes can
-    /// report friendly names instead of mangled ones.
-    display: HashMap<&'a str, String>,
+    /// definition arena, extended as we go: every instance minted below is
+    /// registered here with the template it came from, so post-mono passes can
+    /// map an instance back to its template without taking its name apart.
+    defs: &'p mut Defs<'a>,
 }
 
 /// A bound const generic parameter: its concrete value plus declared type, so a
@@ -196,6 +197,7 @@ fn mangle_ty(ty: &Type) -> String {
         Type::Float32 => "f32".into(),
         Type::Float64 => "f64".into(),
         Type::Str => "str".into(),
+        Type::Path { path, .. } => Type::unresolved(path),
         Type::Enum { name, .. } => (*name).into(),
         Type::Pointer(inner) => format!(".ptr{}", mangle_ty(inner)),
         Type::Array(inner, n) => format!(".arr{}.{}", n.expect_lit(), mangle_ty(inner)),
@@ -245,10 +247,10 @@ fn mangle_name(base: &str, args: &[ConcreteArg]) -> String {
 }
 
 /// Human-readable spelling of an instance, for diagnostics only. Strips the
-/// internal module prefix off `base` (`m2_alloc$alloc` -> `alloc`, since the
-/// prefix is an enqueue-order artifact, not something the user wrote) and
-/// re-attaches the turbofish: `alloc`, `[Vec2]` -> `alloc::<Vec2>`. Best-effort;
-/// never fed back into the compiler.
+/// module slug off `base` (`std.alloc$alloc` -> `alloc`, since the slug is a
+/// linkage detail, not something the user wrote) and re-attaches the turbofish:
+/// `alloc`, `[Vec2]` -> `alloc::<Vec2>`. Best-effort; never fed back into the
+/// compiler.
 fn display_name(base: &str, args: &[ConcreteArg]) -> String {
     let leaf = base.rsplit('$').next().unwrap_or(base);
     let targs = args.iter().map(|a| match a {
@@ -268,7 +270,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         }
         let mangled: &'a str = self.arena.alloc_str(&mangle_name(base, &args));
         self.seen.insert(key, mangled);
-        self.display.insert(mangled, display_name(base, &args));
+        self.defs.add_instance(mangled, base, display_name(base, &args));
         self.queue.push_back(Instantiation { base, args, mangled, span });
         mangled
     }
@@ -283,7 +285,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         }
         let mangled: &'a str = self.arena.alloc_str(&mangle_name(base, &args));
         self.struct_seen.insert(key, mangled);
-        self.display.insert(mangled, display_name(base, &args));
+        self.defs.add_instance(mangled, base, display_name(base, &args));
         self.struct_queue.push_back(StructInstantiation {
             base, args, mangled, span: self.cur_span.clone(),
         });
@@ -301,7 +303,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         }
         let mangled: &'a str = self.arena.alloc_str(&mangle_name(base, &args));
         self.enum_seen.insert(key, mangled);
-        self.display.insert(mangled, display_name(base, &args));
+        self.defs.add_instance(mangled, base, display_name(base, &args));
         self.enum_queue.push_back(EnumInstantiation {
             base, args, mangled, span: self.cur_span.clone(),
         });
@@ -404,32 +406,37 @@ impl<'p, 'a> Mono<'p, 'a> {
                             type_args: Vec::new(),
                             args: new_args,
                         }
-                    } else if let Some((ename, vname)) = name.split_once("::")
+                    } else {
+                        // an intrinsic or an ordinary call: keep the (substituted)
+                        // turbofish.
+                        let new_func = self.rebuild_expr(func, b);
+                        ExprNode::Call { func: Box::new(new_func), type_args: subst_targs, args: new_args }
+                    }
+                } else if let ExprNode::Path(path) = &func.value {
+                    if let Some((ename, _)) = path.as_variant()
                         .filter(|(en, _)| self.enum_templates.contains_key(en))
                     {
                         // a generic-enum tuple/unit variant constructor with
                         // turbofish (`Option::Some::<i32>(5)`, `Option::None::<i32>()`):
-                        // mangle to the concrete instance and rewrite the qualified
-                        // callee name to it (`Option$i32::Some`), dropping the
-                        // turbofish. Unlike a plain function call, the base name to
-                        // request against is `ename`, not the whole qualified `name`.
+                        // mangle to the concrete instance and rewrite the path's enum
+                        // segment to it (`Option$i32::Some`), dropping the turbofish.
+                        // Unlike a plain function call, the name to request against is
+                        // the enum segment, not the whole path.
                         let concrete: Vec<ConcreteArg<'a>> = subst_targs.iter().map(|ga| match ga {
                             GenericArg::Type(t) => ConcreteArg::Type(t.clone()),
                             GenericArg::Const(cv) => ConcreteArg::Const(cv.expect_lit()),
                         }).collect();
                         let mangled = self.request_enum(ename, concrete);
-                        let new_name: &'a str = self.arena.alloc_str(&format!("{}::{}", mangled, vname));
-                        let new_func = Metadata::new(ExprNode::Var(new_name), func.span.clone());
+                        let new_func = Metadata::new(
+                            ExprNode::Path(path.with_head(mangled)), func.span.clone());
                         ExprNode::Call {
                             func: Box::new(new_func),
                             type_args: Vec::new(),
                             args: new_args,
                         }
                     } else {
-                        // intrinsic, non-generic enum-variant constructor, or
-                        // ordinary call: keep the (substituted) turbofish - for a
-                        // non-generic constructor it's always empty (Phase 1/2
-                        // behavior, unchanged).
+                        // a non-generic enum-variant constructor: its turbofish is
+                        // always empty (Phase 1/2 behavior, unchanged).
                         let new_func = self.rebuild_expr(func, b);
                         ExprNode::Call { func: Box::new(new_func), type_args: subst_targs, args: new_args }
                     }
@@ -444,33 +451,31 @@ impl<'p, 'a> Mono<'p, 'a> {
                 let new_fields: Vec<(&'a str, Expr<'a>)> =
                     fields.iter().map(|(f, e)| (*f, self.rebuild_expr(e, b))).collect();
                 if type_args.is_empty() {
-                    ExprNode::Struct { name, type_args: Vec::new(), fields: new_fields }
-                } else if let Some((ename, vname)) = name.split_once("::")
+                    ExprNode::Struct { name: name.clone(), type_args: Vec::new(), fields: new_fields }
+                } else if let Some((ename, _)) = name.as_variant()
                     .filter(|(en, _)| self.enum_templates.contains_key(en))
                 {
                     // a generic-enum struct-style variant literal with turbofish
                     // (`Result::Ok::<i32, str> { val: x }`): mangle to the concrete
-                    // instance and rewrite the qualified literal name to it
-                    // (`Result$i32$str::Ok`), dropping the turbofish. The base name
-                    // to request against is `ename` (the enum), not the whole
-                    // qualified `name`.
+                    // instance and rewrite the literal's enum segment to it
+                    // (`Result$i32$str::Ok`), dropping the turbofish. The name to
+                    // request against is the enum segment, not the whole path.
                     let cargs: Vec<ConcreteArg<'a>> = type_args.iter().map(|ga| match ga {
                         GenericArg::Type(t) => ConcreteArg::Type(self.subst_ty(t, b)),
                         GenericArg::Const(cv) => ConcreteArg::Const(subst_cv(cv, b).expect_lit()),
                     }).collect();
                     let mangled = self.request_enum(ename, cargs);
-                    let new_name: &'a str = self.arena.alloc_str(&format!("{}::{}", mangled, vname));
-                    ExprNode::Struct { name: new_name, type_args: Vec::new(), fields: new_fields }
+                    ExprNode::Struct { name: name.with_head(mangled), type_args: Vec::new(), fields: new_fields }
                 } else {
                     // a generic struct literal -> its concrete instance. mangle
                     // exactly like the generic *type* `Option<i32>`: substitute the
                     // args, request the instance, swap in the flat name and drop the
                     // turbofish (mil looks the fields up by this name).
-                    let concrete = Type::Struct { name, args: type_args.clone() };
+                    let concrete = Type::Struct { name: name.last(), args: type_args.clone() };
                     let Type::Struct { name: mangled, .. } = self.subst_ty(&concrete, b) else {
                         unreachable!("subst_ty of a Struct is always a Struct")
                     };
-                    ExprNode::Struct { name: mangled, type_args: Vec::new(), fields: new_fields }
+                    ExprNode::Struct { name: Path::single(mangled), type_args: Vec::new(), fields: new_fields }
                 }
             }
             ExprNode::Access { base, field } =>
@@ -503,6 +508,10 @@ impl<'p, 'a> Mono<'p, 'a> {
                 Some(cb) => const_literal(cb),
                 None => ExprNode::Var(name),
             },
+            // a unit enum variant. A generic enum's is only reachable through the
+            // call form (`Option::None::<i32>()`), handled in the `Call` arm above,
+            // so nothing here needs substituting.
+            ExprNode::Path(path) => ExprNode::Path(path.clone()),
         };
         Metadata::new(node, expr.span.clone())
     }
@@ -643,11 +652,12 @@ impl<'p, 'a> Mono<'p, 'a> {
 /// concrete instances, drop the templates. non-generic functions, externs and
 /// structs stay (with call sites rewritten).
 ///
-/// Also returns a `mangled instance name -> friendly spelling` map so post-mono
-/// passes (e.g. the alloc check) can report `alloc::<Vec2>` instead of the raw
-/// `m2_alloc$alloc$Vec2`.
-pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
-    -> Result<(Vec<TopLevel<'a>>, HashMap<&'a str, String>), Error>
+/// `defs` is extended in place: each instance minted here is registered against
+/// the template it specializes, which is how the post-mono typecheck matches a
+/// template-named match pattern to an instance-typed scrutinee, and how the
+/// alloc check reports `alloc::<Vec2>` instead of `std.alloc$alloc$Vec2`.
+pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'a Bump)
+    -> Result<Vec<TopLevel<'a>>, Error>
 {
     let templates: HashMap<&'a str, &TopLevel<'a>> = program.iter()
         .filter_map(|tl| match &tl.value {
@@ -679,7 +689,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
         struct_queue: VecDeque::new(), struct_seen: HashMap::new(),
         enum_queue: VecDeque::new(), enum_seen: HashMap::new(),
         cur_span: Span::unknown(),
-        display: HashMap::new(),
+        defs,
     };
     let empty = Bindings::empty();
 
@@ -940,5 +950,5 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
         }
     }
 
-    Ok((output, m.display))
+    Ok(output)
 }

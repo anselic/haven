@@ -284,6 +284,7 @@ fn classify_into<'a>(ty: &Type<'a>, offset: usize, structs: &StructTable<'a>, un
 /// The SysV class of a leaf (non-aggregate) type.
 fn leaf_class(ty: &Type) -> Class {
     match ty {
+        Type::Path { path, .. } => Type::unresolved(path),
         Type::Float32 | Type::Float64 => Class::Sse,
         Type::Simd(inner, _) if inner.is_numeric() && !inner.is_integer() => Class::Sse,
         Type::Simd(_, _) => Class::Integer, // integer-lane vectors go in GP-class regs

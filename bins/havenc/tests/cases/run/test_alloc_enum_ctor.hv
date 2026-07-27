@@ -1,0 +1,22 @@
+// Constructing a data-carrying enum variant inside an `@alloc(false)` function.
+//
+// A variant constructor looks like a call but isn't one - it only stores into
+// stack storage. The alloc check tried to skip it by testing the callee name for
+// `::`, but the test was inverted relative to its own comment: the guard sent
+// `Msg::Note(7)` to the "computed callee, target unknown" arm, which forces the
+// enclosing function dirty. So this program was rejected with
+// `calls '<indirect call>', which may allocate`. A variant is now its own node
+// shape rather than a name with punctuation in it, so it is skipped explicitly.
+//@ exit: 7
+
+enum Msg { Ping, Note(i32) }
+
+@alloc(false)
+@export
+proc main() i32 {
+    let m: Msg = Msg::Note(7);
+    match (m) {
+        Msg::Ping -> { return 0; }
+        Msg::Note(v) -> { return v; }
+    }
+}

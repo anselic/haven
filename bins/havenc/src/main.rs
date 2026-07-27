@@ -39,7 +39,7 @@ fn main() {
     // `defs` owns every top-level definition's identity: it produced the symbol
     // names now in `ast`, and it carries the member table both typecheck passes
     // use to resolve method calls.
-    let (ast, files, defs, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
+    let (ast, files, mut defs, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };
@@ -81,7 +81,11 @@ fn main() {
             // TODO: this re-checks the *whole* program (prelude, std, every
             // concrete fn) from scratch and throws away the first `cx`, when
             // only the new instances actually need checking
-            let (mono_ast, mono_display) = mono::monomorphize(&ast, &arena).unwrap_or_else(|e| {
+            // mono extends `defs` with one entry per instance it mints, which is
+            // what lets the second typecheck pass below match a match-arm pattern
+            // (which names the template) against a scrutinee whose type names the
+            // instance.
+            let mono_ast = mono::monomorphize(&ast, &mut defs, &arena).unwrap_or_else(|e| {
                 diag::report_error("Monomorphization error", &e, &files);
                 std::process::exit(1);
             });
@@ -98,7 +102,7 @@ fn main() {
                 std::process::exit(1);
             }
 
-            safecheck::alloc_check_program(&mono_ast, &mono_display).unwrap_or_else(|errs| {
+            safecheck::alloc_check_program(&mono_ast, &defs).unwrap_or_else(|errs| {
                 for err in &errs {
                     diag::report_error("Check error", err, &files);
                 }

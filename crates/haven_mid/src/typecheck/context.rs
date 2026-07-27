@@ -140,6 +140,12 @@ pub struct Context<'a> {
     /// method's emitted name directly - so neither receiver-call resolution nor
     /// conformance checking has to rebuild `Type$method` and hope it exists.
     pub members: MemberTable<'a>,
+    /// Monomorphized instance name -> the template it specializes
+    /// (`std.option$Option$i32` -> `std.option$Option`). Recorded by `mono`;
+    /// empty on the pre-mono pass, where no instance exists yet. Lets a match
+    /// pattern, which always names the template, be matched against a scrutinee
+    /// whose type names the instance.
+    pub instances: HashMap<&'a str, &'a str>,
 }
 
 /// A declared enum's definition: the discriminant repr, variant discriminant
@@ -184,6 +190,7 @@ impl<'a> Context<'a> {
             impls: std::collections::HashSet::new(),
             generic_bounds: HashMap::new(),
             members: MemberTable::new(),
+            instances: HashMap::new(),
         }
     }
 

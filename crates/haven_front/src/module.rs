@@ -70,7 +70,9 @@
 //! * visibility is item-level only; struct *fields* are always public.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+// `Path` is `ast::Path` here - a `::`-separated name. The filesystem one is
+// aliased, since this module talks about names far more often than files.
+use std::path::{Path as FilePath, PathBuf};
 
 use bumpalo::Bump;
 
@@ -164,7 +166,7 @@ fn linkage_of<'a>(m: &Module<'_>, name: &'a str, attrs: &[Attribute], is_extern:
 /// Resolve an import to its canonical key. no file read for `std`; for the
 /// relative case canonicalizes the path (so the file has to exist). `dir` is the
 /// importing module's directory.
-fn resolve_key(imp: &Import, dir: Option<&Path>) -> Result<String, String> {
+fn resolve_key(imp: &Import, dir: Option<&FilePath>) -> Result<String, String> {
     if imp.path.first() == Some(&"std") {
         let key = imp.path.join("/");
         if std_source(&key).is_none() {
@@ -185,7 +187,7 @@ fn resolve_key(imp: &Import, dir: Option<&Path>) -> Result<String, String> {
 
 /// Load an import's source + the dir its own relative imports resolve against.
 /// assumes `resolve_key` already succeeded for this import.
-fn load_import<'a>(imp: &Import, key: &str, dir: Option<&Path>, arena: &'a Bump) -> Result<(&'a str, Option<PathBuf>), String> {
+fn load_import<'a>(imp: &Import, key: &str, dir: Option<&FilePath>, arena: &'a Bump) -> Result<(&'a str, Option<PathBuf>), String> {
     if imp.path.first() == Some(&"std") {
         Ok((std_source(key).expect("std source vanished after resolve_key"), None))
     } else {
@@ -271,7 +273,10 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
         for m in methods {
             let mnode = &m.value;
             let mut params: Vec<(&'a str, Type<'a>)> = Vec::with_capacity(mnode.params.len() + 1);
-            let self_ty = Type::Struct { name: target, args: Vec::new() };
+            // an unresolved path, exactly as if the author had written the target
+            // type's name - `extend` runs before name resolution, so a `Struct`
+            // here would be skipped by the rewriter and keep the source spelling.
+            let self_ty = Type::path(Path::single(target));
             match mnode.receiver {
                 Receiver::Associated => {}
                 Receiver::Value => params.push(("self", self_ty)),
@@ -358,8 +363,6 @@ struct Scopes<'a> {
 /// place.
 struct Rewriter<'x, 'a> {
     scopes: &'x Scopes<'a>,
-    /// needed to mint rewritten `Enum::Variant` paths, whose enum half changes.
-    arena: &'a Bump,
     /// every method in the program, keyed by `(final type name, method name)`.
     /// what makes `Point::new()` resolve for an imported `Point`.
     members: &'x MemberTable<'a>,
@@ -393,18 +396,16 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     }
 
     /// Rewrite the enum half of an `Enum::Variant` path to the enum's final name,
-    /// returning `true` if `qual` named a type at all.
+    /// returning `true` if the head segment named a type at all.
     ///
     /// Enum names are mangled like struct names, so every reference to a variant
     /// has to be re-spelled - in call position (`E::V(x)`), value position (a unit
     /// variant), struct-literal position (`E::V { .. }`) and match patterns. Miss
     /// any one of them and the enum's name has to stay globally unique, which is
     /// exactly the constraint this lifts.
-    fn variant_path(&mut self, name: &mut &'a str, qual: &str, sym: &str) -> bool {
-        let Some(&ty) = self.scopes.types.get(qual) else { return false };
-        if ty != qual {
-            *name = self.arena.alloc_str(&format!("{}::{}", ty, sym));
-        }
+    fn variant_path(&mut self, path: &mut Path<'a>) -> bool {
+        let Some(&ty) = self.scopes.types.get(path.segments[0]) else { return false };
+        *path = path.with_head(ty);
         true
     }
 
@@ -429,24 +430,13 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     fn pattern(&mut self, pat: &mut PatternNode<'a>, out: &mut Vec<&'a str>) {
         match pat {
             PatternNode::Bind(name) => out.push(name),
-            PatternNode::Path(path) => {
-                if let Some((qual, sym)) = path.split_once("::") {
-                    let (qual, sym) = (qual.to_string(), sym.to_string());
-                    self.variant_path(path, &qual, &sym);
-                }
-            }
+            PatternNode::Path(path) => { self.variant_path(path); }
             PatternNode::Variant { path, fields } => {
-                if let Some((qual, sym)) = path.split_once("::") {
-                    let (qual, sym) = (qual.to_string(), sym.to_string());
-                    self.variant_path(path, &qual, &sym);
-                }
+                self.variant_path(path);
                 for f in fields { self.pattern(&mut f.value, out); }
             }
             PatternNode::StructVariant { path, fields } => {
-                if let Some((qual, sym)) = path.split_once("::") {
-                    let (qual, sym) = (qual.to_string(), sym.to_string());
-                    self.variant_path(path, &qual, &sym);
-                }
+                self.variant_path(path);
                 for (_, f) in fields { self.pattern(&mut f.value, out); }
             }
             PatternNode::Wildcard | PatternNode::Int(_) => {}
@@ -463,31 +453,15 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// prelude bug).
     fn ty(&mut self, ty: &mut Type<'a>, gparams: &HashSet<&str>) {
         match ty {
-            Type::Struct { name, args } => {
-                let nm: &str = *name;
-                // `Self` in a trait method signature stands for the implementing
-                // type; typecheck substitutes it per impl, so it never resolves
-                // through a module scope.
-                if !gparams.contains(nm) && nm != "Self" {
-                    if let Some((qual, sym)) = nm.split_once("::") {
-                        match self.scopes.quals.get(qual).map(|m| m.get(sym)) {
-                            Some(Some(&f)) => *name = f,
-                            Some(None) => self.error_here(format!(
-                                "type '{}' is not imported from module qualifier '{}'", sym, qual)),
-                            None => self.error_here(format!(
-                                "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual)),
-                        }
-                    } else if let Some(&f) = self.scopes.types.get(nm) {
-                        *name = f;
-                    } else {
-                        self.error_here(format!("unknown type '{}'", nm));
-                    }
-                }
-                // a generic struct's type arguments are themselves types to
-                // rewrite; const arguments carry no names to resolve.
-                for a in args {
+            Type::Path { path, args } => {
+                // a generic type's arguments are themselves types to rewrite;
+                // const arguments carry no names to resolve.
+                for a in args.iter_mut() {
                     if let GenericArg::Type(t) = a { self.ty(t, gparams); }
                 }
+                let name = self.type_head(path, gparams);
+                let args = std::mem::take(args);
+                *ty = Type::Struct { name, args };
             }
             Type::Pointer(inner)
             | Type::Array(inner, _)
@@ -501,59 +475,122 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         }
     }
 
+    /// The final emitted name a written type path refers to. Reports an error and
+    /// falls back to the last segment if it resolves to nothing - letting it
+    /// through used to leave the source spelling in place, which then failed much
+    /// later as a mismatch against some *other* module's mangled name (see the
+    /// `Display`/`String` prelude bug).
+    fn type_head(&mut self, path: &Path<'a>, gparams: &HashSet<&str>) -> &'a str {
+        if let Some(one) = path.as_single() {
+            // a generic parameter of the enclosing item is a type param, not a
+            // named type; `Self` in a trait method signature stands for the
+            // implementing type and typecheck substitutes it per impl. Neither
+            // resolves through a module scope.
+            if gparams.contains(one) || one == "Self" { return one; }
+            return match self.scopes.types.get(one) {
+                Some(&f) => f,
+                None => {
+                    self.error_here(format!("unknown type '{}'", one));
+                    one
+                }
+            };
+        }
+        let Some((qual, sym)) = path.as_variant() else {
+            self.error_here(format!(
+                "'{}' has too many `::` segments; only `qualifier::Type` is supported", path));
+            return path.last();
+        };
+        match self.scopes.quals.get(qual).map(|m| m.get(sym)) {
+            Some(Some(&f)) => f,
+            Some(None) => {
+                self.error_here(format!(
+                    "type '{}' is not imported from module qualifier '{}'", sym, qual));
+                sym
+            }
+            None => {
+                self.error_here(format!(
+                    "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual));
+                sym
+            }
+        }
+    }
+
     /// Resolve a name in call position to its final emitted name. A bare name
     /// that resolves to nothing is an error, with three deliberate exceptions,
     /// each an explicit branch below rather than a fallthrough: a local shadowing
     /// a top-level callable, a compiler intrinsic (in no module's symbol table),
     /// and a type-qualified `T::sym` that isn't a known method (left for
     /// typecheck's enum-constructor path).
-    fn call_name(&mut self, name: &mut &'a str, span: &Span) {
-        let full: &str = *name;
-        if let Some((qual, sym)) = full.split_once("::") {
-            // `Type::sym` where `Type` is a known type: either an associated-function
-            // call `Point::new(...)` or a data-enum constructor `Enum::Variant(...)`.
-            // Both are type-qualified, not module-qualified.
-            //
-            // The member lookup is keyed on the type's *final* name, so this works
-            // for an imported type too. The old form reconstructed `Type$sym` and
-            // looked it up in the call scope, which could only ever hit for a type
-            // declared in this same module: no import form can name `Point$new`
-            // (`$` is unlexable), so `import geo { Point }` + `Point::new()` was
-            // silently left unresolved.
-            if let Some(&ty) = self.scopes.types.get(qual) {
-                match self.members.get(&(ty, sym)) {
-                    Some(m) => *name = m.name,
-                    // otherwise a data-enum constructor `Enum::Variant(...)`: only
-                    // the enum half is rewritten, and typecheck's constructor path
-                    // handles the rest.
-                    None => { self.variant_path(name, qual, sym); }
-                }
-                return;
+    /// Resolve a written path used as a value or as a callee.
+    ///
+    /// `Some(name)` means it denotes a single symbol and the caller should replace
+    /// the node with `ExprNode::Var(name)`. `None` means it stays an
+    /// `ExprNode::Path` - the one shape that survives resolution is an enum
+    /// variant, whose head segment has been rewritten to the enum's final name in
+    /// place.
+    fn value_path(&mut self, path: &mut Path<'a>, span: &Span, in_call: bool) -> Option<&'a str> {
+        if let Some(one) = path.as_single() {
+            if self.is_local(one) {
+                // a param, `let`, or match-arm binding shadows any top-level
+                // symbol of the same name. In call position that makes this an
+                // indirect call through a value, not a reference to the symbol.
+                return Some(one);
             }
+            if let Some(&f) = self.scopes.calls.get(one) { return Some(f); }
+            if in_call && Intrinsic::lookup(one).is_some() {
+                // a compiler intrinsic (`sizeof`, `null`, `__simd_*`): not declared
+                // in any module, resolved by the typechecker. leave it untouched.
+                return Some(one);
+            }
+            self.error(span, if in_call {
+                // same wording as the typechecker's own unknown-call diagnostic:
+                // this just catches it a stage earlier, before mangling can
+                // obscure it.
+                format!("unknown function '{}', is it defined and imported into this module?", one)
+            } else {
+                format!("unknown value '{}'", one)
+            });
+            return Some(one);
         }
-        if let Some((qual, sym)) = full.split_once("::") {
-            match self.scopes.quals.get(qual) {
-                Some(map) => match map.get(sym) {
-                    Some(&f) => *name = f,
-                    None => self.error(span, format!(
-                        "'{}' is not imported from module qualifier '{}'", sym, qual)),
-                },
-                None => self.error(span, format!(
-                    "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual)),
-            }
-        } else if self.is_local(full) {
-            // shadowed by a param/local: this is an indirect call through a value,
-            // not a reference to the top-level symbol. leave it untouched.
-        } else if let Some(&f) = self.scopes.calls.get(full) {
-            *name = f;
-        } else if Intrinsic::lookup(full).is_some() {
-            // a compiler intrinsic (`sizeof`, `null`, `__simd_*`): not declared in
-            // any module, resolved by the typechecker. leave it untouched.
-        } else {
-            // same wording as the typechecker's own unknown-call diagnostic: this
-            // just catches it a stage earlier, before mangling can obscure it.
+
+        let Some((qual, sym)) = path.as_variant() else {
             self.error(span, format!(
-                "unknown function '{}', is it defined and imported into this module?", full));
+                "'{}' has too many `::` segments; only `qualifier::name` is supported", path));
+            return Some(path.last());
+        };
+
+        // `Type::sym` where `Type` is a known type: an associated-function call
+        // `Point::new(...)`, or a data-enum variant `Enum::Variant`. Both are
+        // type-qualified, not module-qualified.
+        //
+        // The member lookup is keyed on the type's *final* name, so this works for
+        // an imported type too. The old form reconstructed `Type$sym` and looked it
+        // up in the call scope, which could only ever hit for a type declared in
+        // this same module: no import form can name `Point$new` (`$` is unlexable),
+        // so `import geo { Point }` + `Point::new()` was silently left unresolved.
+        if let Some(&ty) = self.scopes.types.get(qual) {
+            if let Some(m) = self.members.get(&(ty, sym)) { return Some(m.name); }
+            // otherwise an enum variant: rewrite the enum half and leave the rest
+            // to typecheck's constructor/variant paths.
+            *path = path.with_head(ty);
+            return None;
+        }
+
+        // a module-qualified value, `math::square`.
+        match self.scopes.quals.get(qual) {
+            Some(map) => match map.get(sym) {
+                Some(&f) => Some(f),
+                None => {
+                    self.error(span, format!(
+                        "'{}' is not imported from module qualifier '{}'", sym, qual));
+                    Some(sym)
+                }
+            },
+            None => {
+                self.error(span, format!(
+                    "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual));
+                Some(sym)
+            }
         }
     }
 
@@ -561,8 +598,11 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         self.span = e.span.clone();
         match &mut e.value {
             ExprNode::Call { func, type_args, args } => {
-                if let ExprNode::Var(name) = &mut func.value {
-                    self.call_name(name, &func.span);
+                if let ExprNode::Path(path) = &mut func.value {
+                    let span = func.span.clone();
+                    if let Some(name) = self.value_path(path, &span, true) {
+                        func.value = ExprNode::Var(name);
+                    }
                 } else {
                     self.expr(func, gparams);
                 }
@@ -572,14 +612,18 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 for a in args { self.expr(a, gparams); }
             }
             ExprNode::Struct { name, type_args, fields } => {
-                let nm: &str = *name;
-                if let Some((qual, sym)) = nm.split_once("::") {
-                    if self.variant_path(name, qual, sym) {
+                if let Some(one) = name.as_single() {
+                    match self.scopes.types.get(one) {
+                        Some(&f) => *name = Path::single(f),
+                        None => self.error_here(format!("unknown struct '{}'", one)),
+                    }
+                } else if let Some((qual, sym)) = name.as_variant() {
+                    if self.variant_path(name) {
                         // a struct-style enum variant literal, `Msg::Cc { id, val }`:
                         // type-qualified, not module-qualified. the enum half is
                         // rewritten above; typecheck routes the rest to the variant.
                     } else if let Some(&f) = self.scopes.quals.get(qual).and_then(|m| m.get(sym)) {
-                        *name = f;
+                        *name = Path::single(f);
                     } else if self.scopes.quals.contains_key(qual) {
                         self.error_here(format!(
                             "type '{}' is not imported from module qualifier '{}'", sym, qual));
@@ -587,10 +631,9 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                         self.error_here(format!(
                             "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual));
                     }
-                } else if let Some(&f) = self.scopes.types.get(nm) {
-                    *name = f;
                 } else {
-                    self.error_here(format!("unknown struct '{}'", nm));
+                    self.error_here(format!(
+                        "'{}' has too many `::` segments; only `qualifier::Type` is supported", name));
                 }
                 for a in type_args {
                     if let GenericArg::Type(t) = a { self.ty(t, gparams); }
@@ -608,35 +651,15 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.expr(right, gparams);
             }
             ExprNode::Slice(elems) => for el in elems { self.expr(el, gparams); },
-            // a bare name used as a value (fn-as-value): rewrite it to the mangled
-            // top-level name, unless a param/local shadows it (then it's a local
-            // read, leave it). taking a *generic* fn by value has no type args to
-            // monomorphize with; that's handled (or rejected) downstream, not here.
-            ExprNode::Var(name) => {
-                let full: &str = *name;
-                if self.is_local(full) {
-                    // a param, `let`, or match-arm binding shadows any top-level
-                    // symbol of the same name.
-                } else if let Some(&f) = self.scopes.calls.get(full) {
-                    *name = f;
-                } else if let Some((qual, sym)) = full.split_once("::") {
-                    if self.variant_path(name, qual, sym) {
-                        // `Enum::Variant` read as a value (a unit variant), or an
-                        // associated fn taken by value: the enum half is rewritten
-                        // above, the rest resolved in typecheck.
-                    } else if let Some(&f) = self.scopes.quals.get(qual).and_then(|m| m.get(sym)) {
-                        // a module-qualified value, `math::square`. previously not
-                        // rewritten at all, which failed later as an unknown name.
-                        *name = f;
-                    } else if self.scopes.quals.contains_key(qual) {
-                        self.error_here(format!(
-                            "'{}' is not imported from module qualifier '{}'", sym, qual));
-                    } else {
-                        self.error_here(format!(
-                            "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual));
-                    }
-                } else {
-                    self.error_here(format!("unknown value '{}'", full));
+            // a name used as a value: rewrite it to the mangled top-level name,
+            // unless a param/local shadows it (then it's a local read, leave it),
+            // or it names an enum variant (which stays a `Path`). taking a
+            // *generic* fn by value has no type args to monomorphize with; that's
+            // handled (or rejected) downstream, not here.
+            ExprNode::Path(path) => {
+                let span = e.span.clone();
+                if let Some(name) = self.value_path(path, &span, false) {
+                    e.value = ExprNode::Var(name);
                 }
             }
             // remaining leaves (literals): nothing to rewrite
@@ -855,7 +878,7 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump) -> Sym
     st
 }
 
-pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a Bump)
+pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena: &'a Bump)
     -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>), ()>
 {
     // a module we've decided to load but haven't parsed yet.
@@ -1103,7 +1126,6 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         let scopes = &all_scopes[id];
         let mut rw = Rewriter {
             scopes,
-            arena,
             members: defs.members(),
             errs: &mut errs,
             locals: Vec::new(),

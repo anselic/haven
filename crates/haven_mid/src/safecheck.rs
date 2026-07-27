@@ -1,4 +1,5 @@
 use haven_common::ast::*;
+use haven_common::defs::Defs;
 use crate::intrinsics::Intrinsic;
 use std::collections::{HashMap, HashSet};
 
@@ -40,18 +41,18 @@ fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], e: &Expr<'a>) 
                 .flat_map(|a| dirty_calls_expr(clean, locals, a))
                 .collect();
 
-            // then the callee itself (intrinsics are always clean). a name with
-            // `::` is a data-enum constructor (`Enum::Variant(...)`) - module
-            // qualifiers are already resolved away by this post-mono stage - which
-            // only stores into stack storage, so it is always clean, never a callee.
+            // then the callee itself (intrinsics are always clean).
             match &func.value {
-                ExprNode::Var(name) if !locals.contains(name) && !name.contains("::") => {
+                ExprNode::Var(name) if !locals.contains(name) => {
                     if Intrinsic::lookup(name).is_none()
                         && !clean.get(name).copied().unwrap_or(false)
                     {
                         dirty.push((*name, func.span.clone()));
                     }
                 }
+                // a data-enum constructor `Enum::Variant(...)`: not a real call,
+                // just stores into stack storage. Always clean.
+                ExprNode::Path(_) => {}
                 // local fn-pointer or any computed callee: target unknown, dirty
                 _ => dirty.push((INDIRECT_CALLEE, func.span.clone())),
             }
@@ -123,13 +124,14 @@ fn collect_calls_expr<'a>(calls: &mut HashSet<&'a str>, locals: &[&'a str], e: &
     match &e.value {
         ExprNode::Call { func, args, .. } => {
             match &func.value {
-                // skip data-enum constructors (`Enum::Variant(...)`): they call
-                // nothing (see `dirty_calls_expr`), so they're not graph edges.
-                ExprNode::Var(name) if !locals.contains(name) && !name.contains("::") => {
+                ExprNode::Var(name) if !locals.contains(name) => {
                     if Intrinsic::lookup(name).is_none() {
                         calls.insert(*name);
                     }
                 }
+                // skip data-enum constructors (`Enum::Variant(...)`): they call
+                // nothing (see `dirty_calls_expr`), so they're not graph edges.
+                ExprNode::Path(_) => {}
                 // indirect call (local fn pointer or computed callee): record the
                 // sentinel so the enclosing function is forced dirty
                 _ => { calls.insert(INDIRECT_CALLEE); }
@@ -234,13 +236,13 @@ fn compute_clean<'a>(program: &[TopLevel<'a>]) -> CleanMap<'a> {
 
 pub fn alloc_check_program<'a>(
     program: &[TopLevel<'a>],
-    display: &HashMap<&'a str, String>,
+    defs: &Defs<'a>,
 ) -> Result<(), Vec<Error>> {
     let clean = compute_clean(program);
 
     // mono rewrites generic calls to their mangled instance name; prefer the
-    // friendly spelling it recorded (`alloc::<Vec2>`) over `m2_alloc$alloc$Vec2`
-    let show = |n: &'a str| display.get(n).map(String::as_str).unwrap_or(n);
+    // friendly spelling it recorded (`alloc::<Vec2>`) over `std.alloc$alloc$Vec2`
+    let show = |n: &'a str| defs.show(n);
 
     // report each `@alloc(false)` function that came out dirty, pointing at the
     // offending immediate calls in its body. dirtiness always propagates through

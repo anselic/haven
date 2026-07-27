@@ -237,7 +237,7 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
                 // (a FieldPtr per bound field, no fresh storage), keyed by each
                 // binding's node id so uses in the body resolve to it.
                 if let (PatternNode::Variant { path, fields }, Some((ename, ptr))) = (&pat.value, agg) {
-                    let variant = path.split_once("::").unwrap().1;
+                    let variant = path.as_variant().unwrap().1;
                     let pstruct = crate::typecheck::enum_payload_struct_name(ename, variant);
                     let payload_base = cx.fresh_reg();
                     cx.emit(Inst::FieldPtr { dst: payload_base, struct_name: ename, base: ptr, field_index: 1 });
@@ -254,7 +254,7 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
                 // the payload struct's index for that name (order in the pattern is
                 // irrelevant). A `_` field is skipped, a `Bind` becomes a view.
                 if let (PatternNode::StructVariant { path, fields }, Some((ename, ptr))) = (&pat.value, agg) {
-                    let variant = path.split_once("::").unwrap().1;
+                    let variant = path.as_variant().unwrap().1;
                     let pstruct = crate::typecheck::enum_payload_struct_name(ename, variant);
                     let payload_base = cx.fresh_reg();
                     cx.emit(Inst::FieldPtr { dst: payload_base, struct_name: ename, base: ptr, field_index: 1 });
@@ -394,7 +394,7 @@ fn lower_const_init<'a>(
         // struct literal: pair each field's declared type with its constant.
         // typecheck guarantees the fields match the definition in order.
         ExprNode::Struct { name, fields, .. } => {
-            let defs = cx.structs[name].clone();
+            let defs = cx.structs[name.as_single().expect("struct literal name validated in typecheck")].clone();
             let mut inits = Vec::with_capacity(fields.len());
             for ((_, fty), (_, fexpr)) in defs.iter().zip(fields.iter()) {
                 inits.push((fty.clone(), lower_const_init(cx, fexpr)));
@@ -414,8 +414,9 @@ fn lower_const_init<'a>(
             ConstInit::Array(elem_ty, inits)
         }
         // an `Enum::Variant` in a const initializer is its discriminant constant.
-        ExprNode::Var(name) if enum_const(&cx.enums, name).is_some() =>
-            ConstInit::Scalar(enum_const(&cx.enums, name).unwrap()),
+        ExprNode::Path(path) => ConstInit::Scalar(
+            enum_const(&cx.enums, path)
+                .unwrap_or_else(|| unreachable!("non-constant global initializer reached lowering: {}", path))),
         // a bare name in a const initializer is a function (typecheck ensured it);
         // its address @name is the constant.
         ExprNode::Var(name) => ConstInit::FnAddr(name),
