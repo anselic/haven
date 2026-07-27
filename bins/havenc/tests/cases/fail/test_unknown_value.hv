@@ -1,0 +1,9 @@
+// A bare name read as a value that resolves to neither a local, a param, a
+// match binding, nor a top-level symbol is an error at name resolution.
+//@ error: unknown value 'missing'
+
+@export
+proc main() i32 {
+    let x: i32 = missing;
+    return x;
+}

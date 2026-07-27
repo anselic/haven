@@ -920,8 +920,8 @@ pub struct Import<'a> {
     /// path segments as written, e.g. `["std", "math"]` or `["utils", "foo"]`
     pub path: Vec<&'a str>,
     /// `None` = whole-module import (`import std/math`): every public symbol
-    /// visible unqualified. `Some(list)` = selective (`import std/math { sinf }`):
-    /// only those symbols, and only qualified under the last path segment
-    /// (`math::sinf`)
+    /// visible *only* qualified under the last path segment (`math::sinf`).
+    /// `Some(list)` = selective (`import std/math { sinf }`): only those symbols,
+    /// and visible *unqualified* (`sinf`).
     pub symbols: Option<Vec<&'a str>>,
 }

@@ -1,0 +1,27 @@
+// A trait method signature naming a type the declaring module doesn't have in
+// scope is an error where it is written, not three confusing errors later.
+//
+// `aux/badtrait.hv` declares `proc show(*self) Buf` without importing `Buf`.
+// This module *does* define a `Buf`, which is exactly the trap: the two are
+// different types, and before this was caught at resolution the mismatch only
+// appeared as "implements 'Show::show' with a signature that does not match the
+// trait" plus an `Expected m2_x$Buf, got Buf` at the call site.
+//@ error: unknown type 'Buf'
+
+import aux/badtrait { Show }
+
+struct Buf {
+    n: i32,
+
+    proc make() Buf { return Buf { n: 1 }; }
+}
+
+extend Buf: Show {
+    proc show(*self) Buf { return Buf { n: self.n }; }
+}
+
+@export
+proc main() i32 {
+    let b: Buf = Buf::make();
+    return b.show().n;
+}

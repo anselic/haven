@@ -1,0 +1,25 @@
+// `pub trait` parses, and the trait can be imported by name from another module
+// and used both as a bound and as an `extend` target.
+//@ exit: 12
+
+import aux/greet { Greet }
+
+struct Hi {
+    n: i32,
+
+    proc make(n: i32) Hi { return Hi { n: n }; }
+}
+
+extend Hi: Greet {
+    proc greet(*self) i32 { return self.n * 3; }
+}
+
+proc call_it<T: Greet>(g: *T) i32 {
+    return g.greet();
+}
+
+@export
+proc main() i32 {
+    let h: Hi = Hi::make(4);
+    return call_it::<Hi>(&h);
+}

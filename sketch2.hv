@@ -1,0 +1,68 @@
+import std/string { String, string_from_str, string_as_str }
+import std/vec { Vec }
+
+struct Data { foo: i32 }
+
+struct Point {
+    x: i32,
+    y: i32,
+    data: Data,
+
+    proc new(x: i32, y: i32) Point {
+        return Point { x: x, y: y, data: Data { foo: 42 } };
+    }
+
+    proc sum(*self) i32 {
+        return self.x + self.y;
+    }
+
+    proc copy(self) Point {
+        return Point { x: self.x, y: self.y, data: self.data };
+    }
+
+    proc succ(*self) {
+        self.x = self.x + 1;
+        self.y = self.y + 1;
+    }
+}
+
+struct Rect {
+    x: i32,
+    y: i32,
+
+    proc new(x: i32, y: i32) Rect {
+        return Rect { x: x, y: y };
+    }
+}
+
+trait Display {
+    proc display(*self) String;
+}
+
+extend Point: Display {
+    proc display(*self) String {
+        return string_from_str("Point");
+    }
+}
+
+extend Rect: Display {
+    proc display(*self) String {
+        return string_from_str("Rect");
+    }
+}
+
+proc display_item<T: Display>(item: *T) {
+    let s: String = item.display();
+    println(string_as_str(&s));
+}
+
+@export
+proc main() i32 {
+    let p: Point = Point::new(3, 4);
+    let r: Rect = Rect::new(1, 2);
+
+    display_item::<Point>(&p);
+    display_item::<Rect>(&r);
+
+    return 0;
+}

@@ -37,12 +37,29 @@
 //! items regardless of `pub`. `pub` is orthogonal to the `@export` attribute,
 //! which controls LLVM linkage / name mangling, not cross-module visibility.
 //!
+//! ## unresolved names
+//!
+//! a name that resolves to nothing is an error *here*, not a silent passthrough.
+//! letting one through used to leave the source spelling in the AST, where it
+//! then failed far downstream as a mismatch against some other module's mangled
+//! name - e.g. a `String` in a prelude trait signature, unresolved because the
+//! prelude imports no `String`, reported three stages later as an impl whose
+//! signature "does not match the trait".
+//!
+//! four things legitimately don't resolve through a module scope, and each is an
+//! explicit branch rather than a fallthrough: compiler intrinsics (`sizeof`,
+//! `__simd_*` - in no symbol table), `Self` in a trait method signature
+//! (substituted per impl by typecheck), `Enum::Variant` paths (enum names are
+//! never mangled, so they already read correctly), and generic parameters of the
+//! enclosing item - including *const* params, which the parser can't tell from
+//! type arguments inside a turbofish.
+//!
 //! ## known v1 limitations
 //!
-//! * only call targets, struct literals and struct *types* get rewritten. a
-//!   top-level function used as a first-class value (not called directly) isn't
-//!   rewritten across modules - same limitation the monomorphizer has.
 //! * visibility is item-level only; struct *fields* are always public.
+//! * an enum or trait name is reserved program-wide, even when private: those
+//!   names are deliberately left unmangled, so `pub` on them gates only whether
+//!   another module can `import` the name.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -52,6 +69,7 @@ use bumpalo::Bump;
 use haven_common::ast::*;
 use crate::parse;
 use haven_common::diag::{self, Sources};
+use haven_common::intrinsics::Intrinsic;
 
 /// The whole `crt/std` tree, embedded into the binary at build time. Nested
 /// modules just work: `std/dsp/osc` -> `crt/std/dsp/osc.hv`, no per-file wiring.
@@ -327,17 +345,28 @@ struct Scopes<'a> {
 struct Rewriter<'x, 'a> {
     scopes: &'x Scopes<'a>,
     errs: &'x mut Vec<Error>,
-    /// names bound by params/`let` in the function being walked, innermost last.
-    /// used as a stack: a block records `locals.len()` on entry and truncates
-    /// back to it on exit. a name in here shadows a top-level callable of the
-    /// same name, so bare/call references to it are left unrewritten (it's a
-    /// local value, not the top-level symbol).
+    /// names bound by params/`let`/match-arm patterns in the function being
+    /// walked, innermost last. used as a stack: a block records `locals.len()` on
+    /// entry and truncates back to it on exit. a name in here shadows a top-level
+    /// callable of the same name, so bare/call references to it are left
+    /// unrewritten (it's a local value, not the top-level symbol).
     locals: Vec<&'a str>,
+    /// span of the innermost item/statement/expression being walked. `Type` and
+    /// bare names carry no span of their own, so unresolved-name errors point at
+    /// whatever encloses them - which is as precise as the AST allows.
+    span: Span,
 }
 
 impl<'x, 'a> Rewriter<'x, 'a> {
     fn error(&mut self, span: &Span, msg: String) {
         self.errs.push(Error::new(span.clone(), msg));
+    }
+
+    /// Record an error against the innermost span being walked. For names that
+    /// have no span of their own (types, and the leaves inside them).
+    fn error_here(&mut self, msg: String) {
+        let span = self.span.clone();
+        self.errs.push(Error::new(span, msg));
     }
 
     fn is_local(&self, name: &str) -> bool {
@@ -347,19 +376,31 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// Rewrite struct type names in `ty`, skipping names bound as generic params
     /// of the enclosing function (those are type params, not structs). a
     /// `geo::Point` written for a whole-module import is resolved through the
-    /// qualifier map; a bare name through the unqualified type scope. names that
-    /// resolve to neither fall through and later read as an unknown struct.
+    /// qualifier map; a bare name through the unqualified type scope. a name that
+    /// resolves to neither is an error here - letting it through used to leave the
+    /// source spelling in place, which then failed much later as a mismatch
+    /// against some *other* module's mangled name (see the `Display`/`String`
+    /// prelude bug).
     fn ty(&mut self, ty: &mut Type<'a>, gparams: &HashSet<&str>) {
         match ty {
             Type::Struct { name, args } => {
                 let nm: &str = *name;
-                if !gparams.contains(nm) {
+                // `Self` in a trait method signature stands for the implementing
+                // type; typecheck substitutes it per impl, so it never resolves
+                // through a module scope.
+                if !gparams.contains(nm) && nm != "Self" {
                     if let Some((qual, sym)) = nm.split_once("::") {
-                        if let Some(&f) = self.scopes.quals.get(qual).and_then(|m| m.get(sym)) {
-                            *name = f;
+                        match self.scopes.quals.get(qual).map(|m| m.get(sym)) {
+                            Some(Some(&f)) => *name = f,
+                            Some(None) => self.error_here(format!(
+                                "type '{}' is not imported from module qualifier '{}'", sym, qual)),
+                            None => self.error_here(format!(
+                                "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual)),
                         }
                     } else if let Some(&f) = self.scopes.types.get(nm) {
                         *name = f;
+                    } else {
+                        self.error_here(format!("unknown type '{}'", nm));
                     }
                 }
                 // a generic struct's type arguments are themselves types to
@@ -380,9 +421,12 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         }
     }
 
-    /// Resolve a name in call position to its final emitted name. bare names not
-    /// in scope are left alone (locals, params, globally-resolved externs,
-    /// intrinsics, or errors caught later).
+    /// Resolve a name in call position to its final emitted name. A bare name
+    /// that resolves to nothing is an error, with three deliberate exceptions,
+    /// each an explicit branch below rather than a fallthrough: a local shadowing
+    /// a top-level callable, a compiler intrinsic (in no module's symbol table),
+    /// and a type-qualified `T::sym` that isn't a known method (left for
+    /// typecheck's enum-constructor path).
     fn call_name(&mut self, name: &mut &'a str, span: &Span) {
         let full: &str = *name;
         if let Some((qual, sym)) = full.split_once("::") {
@@ -414,10 +458,19 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // not a reference to the top-level symbol. leave it untouched.
         } else if let Some(&f) = self.scopes.calls.get(full) {
             *name = f;
+        } else if Intrinsic::lookup(full).is_some() {
+            // a compiler intrinsic (`sizeof`, `null`, `__simd_*`): not declared in
+            // any module, resolved by the typechecker. leave it untouched.
+        } else {
+            // same wording as the typechecker's own unknown-call diagnostic: this
+            // just catches it a stage earlier, before mangling can obscure it.
+            self.error(span, format!(
+                "unknown function '{}', is it defined and imported into this module?", full));
         }
     }
 
     fn expr(&mut self, e: &mut Expr<'a>, gparams: &HashSet<&str>) {
+        self.span = e.span.clone();
         match &mut e.value {
             ExprNode::Call { func, type_args, args } => {
                 if let ExprNode::Var(name) = &mut func.value {
@@ -433,11 +486,24 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             ExprNode::Struct { name, type_args, fields } => {
                 let nm: &str = *name;
                 if let Some((qual, sym)) = nm.split_once("::") {
-                    if let Some(&f) = self.scopes.quals.get(qual).and_then(|m| m.get(sym)) {
+                    if self.scopes.types.contains_key(qual) {
+                        // a struct-style enum variant literal, `Msg::Cc { id, val }`:
+                        // type-qualified, not module-qualified. enum names aren't
+                        // mangled, so it already reads correctly - leave it for
+                        // typecheck's variant path.
+                    } else if let Some(&f) = self.scopes.quals.get(qual).and_then(|m| m.get(sym)) {
                         *name = f;
+                    } else if self.scopes.quals.contains_key(qual) {
+                        self.error_here(format!(
+                            "type '{}' is not imported from module qualifier '{}'", sym, qual));
+                    } else {
+                        self.error_here(format!(
+                            "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual));
                     }
                 } else if let Some(&f) = self.scopes.types.get(nm) {
                     *name = f;
+                } else {
+                    self.error_here(format!("unknown struct '{}'", nm));
                 }
                 for a in type_args {
                     if let GenericArg::Type(t) = a { self.ty(t, gparams); }
@@ -460,8 +526,29 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // read, leave it). taking a *generic* fn by value has no type args to
             // monomorphize with; that's handled (or rejected) downstream, not here.
             ExprNode::Var(name) => {
-                if !self.is_local(name) {
-                    if let Some(&f) = self.scopes.calls.get(*name) { *name = f; }
+                let full: &str = *name;
+                if self.is_local(full) {
+                    // a param, `let`, or match-arm binding shadows any top-level
+                    // symbol of the same name.
+                } else if let Some(&f) = self.scopes.calls.get(full) {
+                    *name = f;
+                } else if let Some((qual, sym)) = full.split_once("::") {
+                    if self.scopes.types.contains_key(qual) {
+                        // `Enum::Variant` read as a value (a unit variant), or an
+                        // associated fn taken by value: resolved in typecheck.
+                    } else if let Some(&f) = self.scopes.quals.get(qual).and_then(|m| m.get(sym)) {
+                        // a module-qualified value, `math::square`. previously not
+                        // rewritten at all, which failed later as an unknown name.
+                        *name = f;
+                    } else if self.scopes.quals.contains_key(qual) {
+                        self.error_here(format!(
+                            "'{}' is not imported from module qualifier '{}'", sym, qual));
+                    } else {
+                        self.error_here(format!(
+                            "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual));
+                    }
+                } else {
+                    self.error_here(format!("unknown value '{}'", full));
                 }
             }
             // remaining leaves (literals): nothing to rewrite
@@ -470,6 +557,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     }
 
     fn stmt(&mut self, s: &mut Stmt<'a>, gparams: &HashSet<&str>) {
+        self.span = s.span.clone();
         match &mut s.value {
             StmtNode::Expr(e) => self.expr(e, gparams),
             StmtNode::Block(ss) => {
@@ -495,11 +583,20 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.expr(condition, gparams);
                 self.stmt(body, gparams);
             }
-            // patterns (`_` / int / `Enum::Variant`) need no rewriting; walk the
-            // scrutinee and each arm body.
+            // pattern *paths* (`_` / int / `Enum::Variant`) need no rewriting - enum
+            // names are never mangled, so they already read correctly. But a
+            // destructuring pattern's field bindings are locals for the duration of
+            // that arm, and have to be in scope while its body is walked, or a read
+            // of `pitch` in `Msg::Note(pitch, vel) => ...` looks like an unresolved
+            // top-level name.
             StmtNode::Match { scrutinee, arms } => {
                 self.expr(scrutinee, gparams);
-                for (_pat, body) in arms { self.stmt(body, gparams); }
+                for (pat, body) in arms {
+                    let mark = self.locals.len();
+                    bind_pattern(&pat.value, &mut self.locals);
+                    self.stmt(body, gparams);
+                    self.locals.truncate(mark);
+                }
             }
             StmtNode::Return(e) => self.expr(e, gparams),
             StmtNode::Continue | StmtNode::Break => {}
@@ -507,13 +604,20 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     }
 
     fn toplevel(&mut self, tl: &mut TopLevel<'a>) {
+        // baseline span for anything in this item that has none of its own (field
+        // types, a trait method's signature); `stmt`/`expr` narrow it as they go.
+        self.span = tl.span.clone();
         match &mut tl.value {
             TopLevelNode::Function { name, generics, params, return_type, body, .. } => {
-                let gparams: HashSet<&str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type { name, .. } => Some(*name),
-                    GenericParam::Const(..) => None,
-                }).collect();
-                *name = self.scopes.calls.get(*name).copied().unwrap_or(*name);
+                let gparams = generic_names(generics);
+                *name = self.scopes.calls.get(*name).copied()
+                    .expect("a module's own callable is always in its own scope");
+                // a `const N: u64` generic param is read as an ordinary value in the
+                // body (`i + N`), so it binds like a param. only *type* params go in
+                // `gparams`, which is about type positions.
+                for g in generics.iter() {
+                    if let GenericParam::Const(cname, _) = g { self.locals.push(cname); }
+                }
                 // params are locals for the whole body; body-level `let`s stack on
                 // top. truncate back to 0 so the next function starts clean.
                 for (pname, ty) in params {
@@ -525,27 +629,24 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.locals.clear();
             }
             TopLevelNode::Extern { name, generics, params, return_type, .. } => {
-                let gparams: HashSet<&str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type { name, .. } => Some(*name),
-                    GenericParam::Const(..) => None,
-                }).collect();
-                *name = self.scopes.calls.get(*name).copied().unwrap_or(*name);
+                let gparams = generic_names(generics);
+                *name = self.scopes.calls.get(*name).copied()
+                    .expect("a module's own callable is always in its own scope");
                 for (_, ty) in params { self.ty(ty, &gparams); }
                 self.ty(return_type, &gparams);
             }
             TopLevelNode::Struct { name, generics, fields, .. } => {
                 // the struct's own type params shadow struct names when rewriting
                 // field types (a field `T` is a param, not a module type).
-                let gparams: HashSet<&str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type { name, .. } => Some(*name),
-                    GenericParam::Const(..) => None,
-                }).collect();
-                *name = self.scopes.types.get(*name).copied().unwrap_or(*name);
+                let gparams = generic_names(generics);
+                *name = self.scopes.types.get(*name).copied()
+                    .expect("a module's own struct is always in its own scope");
                 for (_, ty) in fields { self.ty(ty, &gparams); }
             }
             TopLevelNode::Global { name, ty, value, .. } => {
                 let empty = HashSet::new();
-                *name = self.scopes.calls.get(*name).copied().unwrap_or(*name);
+                *name = self.scopes.calls.get(*name).copied()
+                    .expect("a module's own callable is always in its own scope");
                 self.ty(ty, &empty);
                 self.expr(value, &empty);
             }
@@ -556,10 +657,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // fields are above. The enum's own type params shadow module type
             // names (a payload `T` is a param, not a module type).
             TopLevelNode::Enum { generics, variants, .. } => {
-                let gparams: HashSet<&str> = generics.iter().filter_map(|g| match g {
-                    GenericParam::Type { name, .. } => Some(*name),
-                    GenericParam::Const(..) => None,
-                }).collect();
+                let gparams = generic_names(generics);
                 for (_, _, payload) in variants.iter_mut() {
                     for (_, ty) in payload.iter_mut() { self.ty(ty, &gparams); }
                 }
@@ -577,6 +675,36 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             }
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before name resolution"),
         }
+    }
+}
+
+/// Names introduced by an item's generic parameter list, of either kind. Used as
+/// a skip-set when rewriting type positions: these are parameters of the item
+/// being walked, not types imported from some module.
+///
+/// Const params belong here even though they aren't types: the parser can't tell
+/// a const argument from a type argument in a turbofish, so `simd_load::<f32, N>`
+/// arrives as `GenericArg::Type(Struct("N"))` and is only disambiguated later, in
+/// typecheck. Treating `N` as an unknown type here would reject valid code.
+fn generic_names<'a>(generics: &[GenericParam<'a>]) -> HashSet<&'a str> {
+    generics.iter().map(|g| match g {
+        GenericParam::Type { name, .. } => *name,
+        GenericParam::Const(name, _) => *name,
+    }).collect()
+}
+
+/// Collect the names a match pattern binds, appending them to `out`. Only
+/// destructuring patterns bind anything: a `Variant`'s positional fields and a
+/// `StructVariant`'s named ones, each of which is a `Bind` (naming it) or a
+/// `Wildcard` (ignoring it).
+fn bind_pattern<'a>(pat: &PatternNode<'a>, out: &mut Vec<&'a str>) {
+    match pat {
+        PatternNode::Bind(name) => out.push(name),
+        PatternNode::Variant { fields, .. } =>
+            for f in fields { bind_pattern(&f.value, out); },
+        PatternNode::StructVariant { fields, .. } =>
+            for (_, f) in fields { bind_pattern(&f.value, out); },
+        PatternNode::Wildcard | PatternNode::Int(_) | PatternNode::Path(_) => {}
     }
 }
 
@@ -845,7 +973,12 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
     let mut impls: Vec<ImplDecl<'a>> = Vec::new();
     for (id, m) in modules.iter_mut().enumerate() {
         let scopes = &all_scopes[id];
-        let mut rw = Rewriter { scopes, errs: &mut errs, locals: Vec::new() };
+        let mut rw = Rewriter {
+            scopes,
+            errs: &mut errs,
+            locals: Vec::new(),
+            span: Span { file: m.key.clone(), start: 0, end: 0 },
+        };
         for tl in &mut m.items {
             rw.toplevel(tl);
         }

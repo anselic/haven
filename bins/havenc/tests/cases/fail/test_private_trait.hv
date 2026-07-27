@@ -1,0 +1,22 @@
+// A trait without `pub` cannot be imported by another module. Before `trait`
+// took a visibility marker at all, `is_pub` was hardcoded to `true` and this
+// import silently succeeded.
+//@ error: is private; add `pub` to export it
+
+import aux/secret { Secret }
+
+struct S {
+    n: i32,
+
+    proc make() S { return S { n: 1 }; }
+}
+
+extend S: Secret {
+    proc secret(*self) i32 { return self.n; }
+}
+
+@export
+proc main() i32 {
+    let s: S = S::make();
+    return s.secret();
+}

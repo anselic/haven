@@ -1,0 +1,14 @@
+// A type name that resolves to nothing is an error at name resolution. It used
+// to pass through silently and read as an unknown struct much later, after
+// mangling had already obscured which module was being talked about.
+//@ error: unknown type 'Nope'
+
+struct Point {
+    x: i32,
+}
+
+@export
+proc main() i32 {
+    let p: Nope = Nope { x: 1 };
+    return 0;
+}

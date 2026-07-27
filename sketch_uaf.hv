@@ -1,0 +1,44 @@
+// sketch, doesn't work — demonstrates a use-after-free that the language
+// currently does NOT catch, and that a `Copy`/move rule would.
+
+import std/vec { Vec, vec_new, vec_push, vec_get, vec_free }
+
+// Vec<T> is { data: *T, len: u64, cap: u64 } and owns the heap buffer `data`.
+// It is NOT safe to bit-copy: a shallow copy aliases the same `data` pointer.
+
+@export
+proc main() i32 {
+    let a: Vec<i32> = vec_new::<i32>();
+    vec_push::<i32>(&a, 10);
+    vec_push::<i32>(&a, 20);
+
+    // BUG 1 — aliasing via by-value copy.
+    // `a` is passed/assigned by value, which is a bitwise memcpy. Nothing is
+    // moved or invalidated, so now `a.data` and `b.data` point at the SAME
+    // heap allocation. Two owners, one buffer.
+    let b: Vec<i32> = a;
+
+    // Frees the shared buffer. `a.data` is now dangling too, but the compiler
+    // still considers `a` a live, valid Vec.
+    vec_free::<i32>(&b);
+
+    // BUG 2 — use-after-free.
+    // `a` looks valid (len == 2, data != null), but `data` points at freed
+    // memory. This read is undefined behavior.
+    let x: i32 = vec_get::<i32>(&a, 0u64);
+
+    // BUG 3 — double free.
+    // Frees the same allocation a second time.
+    vec_free::<i32>(&a);
+
+    return x;
+}
+
+// Why nothing complains today:
+//   - by-value pass/assign is a memcpy, with no notion of ownership transfer
+//   - `Vec` carries no marker saying "I own a resource / I'm not Copy"
+//   - so `let b = a;` silently aliases instead of moving-and-invalidating `a`
+//
+// Under the tier-2 rule (by-value requires `Copy`, and `Vec` is not `Copy`
+// because it has a destructor), `let b: Vec<i32> = a;` would be rejected at
+// compile time — you'd be forced to pass `*Vec<i32>` and keep a single owner.

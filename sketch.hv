@@ -1,0 +1,78 @@
+// sketch, doesn't work
+
+import std/string { String }
+
+trait Display {
+    proc display(*self) String;
+}
+
+struct Point {
+    x: i32,
+    y: i32,
+
+    // A `Self` type just refers to the current type
+    proc new(x: i32, y: i32) Self {
+        return Self { x, y };
+    }
+
+    // copy self by value
+    proc as_array(self) [i32; 2] {
+        return [self.x, self.y];
+    }
+
+    // borrow self
+    proc as_array_ref(*self) *[i32; 2] {
+        return ptr_cast::<*[i32; 2]>(self);
+    }
+}
+
+// Allow extending types without traits for e.g. adding methods to a type
+// outside the current module
+extend Point {
+    proc foo(self) {
+        // do something
+    }
+    proc bar(*self, x: i32) i32 {}
+}
+
+extend Point: Display {
+    proc display(*self) String {
+        return "Point(x: \(self.x), y: \(self.y))";
+    }
+}
+
+@repr(u8)
+enum F {
+    A,
+    B(i32),
+    C { value: i32 },
+
+    proc as_int(*self) i32 {
+        match (self) {
+            F::A           -> { return 0; }
+            F::B(value)    -> { return value; }
+            F::C { value } -> { return value; }
+        }
+    }
+}
+
+extend F: Display {
+    proc display(*self) String {
+        match (self) {
+            F::A           -> { return "F::A"; }
+            F::B(value)    -> { return "F::B"; }
+            F::C { value } -> { return "F::C"; }
+        }
+    }
+}
+
+@export
+proc main() i32 {
+    let p: Point = Point::new(1, 2);
+    // when calling *self methods, the compiler will automatically reference
+    // the value if needed, so you can call `p.as_array_ref()` instead of
+    // `(&p).as_array_ref()`
+    let arr: *[i32; 2] = p.as_array_ref();
+
+    return 0;
+}

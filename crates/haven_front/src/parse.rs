@@ -1214,19 +1214,25 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         )
         .map(|((target, trait_), methods)| (TopLevelNode::Extend { target, trait_, methods }, Vec::new()));
 
-    // `trait Name { proc m(...) Ret; ... }`. Like `extend`, `trait` lexes as a
-    // `Var` (not a reserved keyword), so match it by text. Trait names are kept
-    // stable (unmangled) across modules, like enum names; a trait is always
-    // importable (Stage-2 keeps them effectively public).
-    let trait_ = select_ref! { Token::Var(s) if *s == "trait" => () }
-        .ignore_then(var.map(|s| *s))
+    // `[pub] trait Name { proc m(...) Ret; ... }`. Like `extend`, `trait` lexes as
+    // a `Var` (not a reserved keyword), so match it by text - which is why this
+    // can't use the shared `item_header` combinator (that one ends with a real
+    // keyword token). The `pub` marker is spelled out here instead; attributes on
+    // a trait are still not accepted, since `TopLevelNode::Trait` has nowhere to
+    // put them. Trait names are kept stable (unmangled) across modules, like enum
+    // names, so `pub` currently gates only whether another module can *import* the
+    // name - a bound `T: Trait` still resolves globally. See the module-system
+    // redesign notes.
+    let trait_ = just(Token::Pub).or_not().map(|o| o.is_some())
+        .then_ignore(select_ref! { Token::Var(s) if *s == "trait" => () })
+        .then(var.map(|s| *s))
         .then(
             parse_trait_method()
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|(name, methods)| (TopLevelNode::Trait { name, is_pub: true, methods }, Vec::new()));
+        .map(|((is_pub, name), methods)| (TopLevelNode::Trait { name, is_pub, methods }, Vec::new()));
 
     choice((
         function,
