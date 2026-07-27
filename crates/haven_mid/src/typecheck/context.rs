@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
+use haven_common::defs::MemberTable;
 
 /// Field index of the discriminant tag in a data-enum aggregate's synthetic
 /// struct, and of the payload byte-blob. Referenced by name in the struct table
@@ -134,6 +135,11 @@ pub struct Context<'a> {
     /// method call on a `T`-typed receiver resolve through the bound trait. Empty
     /// outside a bounded generic.
     pub generic_bounds: HashMap<&'a str, Vec<&'a str>>,
+    /// Every method and associated function in the program, keyed by
+    /// `(type name, method name)`. Built by the module resolver, which knows each
+    /// method's emitted name directly - so neither receiver-call resolution nor
+    /// conformance checking has to rebuild `Type$method` and hope it exists.
+    pub members: MemberTable<'a>,
 }
 
 /// A declared enum's definition: the discriminant repr, variant discriminant
@@ -177,6 +183,7 @@ impl<'a> Context<'a> {
             traits: HashMap::new(),
             impls: std::collections::HashSet::new(),
             generic_bounds: HashMap::new(),
+            members: MemberTable::new(),
         }
     }
 

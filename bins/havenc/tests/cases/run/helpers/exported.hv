@@ -1,0 +1,14 @@
+// Helper for `run/test_export_struct_method.hv`. Not collected by the harness.
+//
+// `@export` keeps the struct's emitted name as the bare `Vec2` so a host can
+// name it, but its desugared methods are still module-mangled. Reconstructing
+// `Vec2$sum` from the receiver's type name therefore missed them, exactly as it
+// did for enums.
+@export
+pub struct Vec2 {
+    x: i32,
+    y: i32,
+
+    proc make(x: i32, y: i32) Vec2 { return Vec2 { x: x, y: y }; }
+    proc sum(*self) i32 { return self.x + self.y; }
+}

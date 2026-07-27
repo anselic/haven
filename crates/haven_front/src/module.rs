@@ -68,7 +68,8 @@ use bumpalo::Bump;
 
 use haven_common::ast::*;
 use crate::parse;
-use haven_common::defs::{Def, DefKind, DefId, Defs, Linkage, ModId};
+use haven_common::defs::{Def, DefKind, DefId, Defs, Linkage, Member, MemberTable, ModId};
+
 use haven_common::diag::{self, Files};
 use haven_common::intrinsics::Intrinsic;
 
@@ -106,6 +107,9 @@ struct Module<'a> {
     /// `extend Target: Trait` conformance records from this module, in source
     /// (pre-mangling) names; remapped to final names after scopes are built.
     impls: Vec<RawImpl<'a>>,
+    /// every method this module declares, in source names; likewise remapped
+    /// after scopes are built, into `Defs`'s member table.
+    methods: Vec<RawMethod<'a>>,
 }
 
 /// One entry in a module's symbol table: the final (post-mangling) emitted name
@@ -196,6 +200,19 @@ fn load_import<'a>(imp: &Import, key: &str, dir: Option<&Path>, arena: &'a Bump)
 /// receiver's type); that resolution happens in the typechecker. An associated
 /// call `T::method()` is rewritten by name resolution (see `call_name`), keyed on
 /// the same `T$method` name minted here.
+/// A raw (pre-mangling) method record, collected while desugaring an `extend`
+/// block. `target`/`name` are as written; `fn_name` is the function
+/// `lower_methods` synthesized for it. `load_and_merge` maps all three to final
+/// names once scopes exist, and records the result in `Defs`'s member table -
+/// which is what makes a method reachable without reconstructing its name from
+/// its type's.
+struct RawMethod<'a> {
+    target: &'a str,
+    name: &'a str,
+    fn_name: &'a str,
+    receiver: Receiver,
+}
+
 /// A raw (pre-mangling) `extend Target: Trait` conformance record, collected
 /// while desugaring. `target`/`trait_` are the source names; `load_and_merge`
 /// remaps them to their final (mangled) forms through the module's scopes before
@@ -206,9 +223,12 @@ struct RawImpl<'a> {
     span: Span,
 }
 
-fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> (Vec<Error>, Vec<RawImpl<'a>>) {
+fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
+    -> (Vec<Error>, Vec<RawImpl<'a>>, Vec<RawMethod<'a>>)
+{
     let mut errors = Vec::new();
     let mut impls: Vec<RawImpl<'a>> = Vec::new();
+    let mut methods_out: Vec<RawMethod<'a>> = Vec::new();
 
     // Types declared generic in this module. A method's `self` type would need the
     // type's own params in scope (`*Vec<T>`), which Stage 1 doesn't handle - reject
@@ -250,7 +270,13 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> (Vec<Err
                 Receiver::Pointer => params.push(("self", Type::Pointer(Box::new(self_ty)))),
             }
             params.extend(mnode.params.iter().cloned());
+            // the synthesized name only has to be unique within the module - it is
+            // never reconstructed by a consumer, since the member record below is
+            // what makes this method findable.
             let fname: &'a str = arena.alloc_str(&format!("{}${}", target, mnode.name));
+            methods_out.push(RawMethod {
+                target, name: mnode.name, fn_name: fname, receiver: mnode.receiver,
+            });
             synthesized.push(Metadata::new(
                 TopLevelNode::Function {
                     name: fname,
@@ -267,7 +293,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> (Vec<Err
     }
     *items = kept;
     items.extend(synthesized);
-    (errors, impls)
+    (errors, impls, methods_out)
 }
 
 /// Lex + parse one module's source into `(imports, items)`, printing any
@@ -275,7 +301,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> (Vec<Err
 /// them for `'a`. `extend`/method blocks are desugared to functions here, so the
 /// returned items are already method-free.
 fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'a>)
-    -> Result<(Vec<Import<'a>>, Vec<TopLevel<'a>>, Vec<RawImpl<'a>>), ()>
+    -> Result<(Vec<Import<'a>>, Vec<TopLevel<'a>>, Vec<RawImpl<'a>>, Vec<RawMethod<'a>>), ()>
 {
     let (tokens, lex_errs) = parse::lex(file, src);
     for e in &lex_errs {
@@ -298,7 +324,7 @@ fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'
 
     // desugar `extend`/method blocks into functions before anything else looks at
     // the items.
-    let (method_errs, impls) = lower_methods(&mut items, arena);
+    let (method_errs, impls, methods) = lower_methods(&mut items, arena);
     if !method_errs.is_empty() {
         for e in &method_errs {
             diag::report_error("Method error", e, files);
@@ -306,7 +332,7 @@ fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'
         return Err(());
     }
 
-    Ok((imports, items, impls))
+    Ok((imports, items, impls, methods))
 }
 
 /// Name-resolution scopes for one module.
@@ -324,6 +350,9 @@ struct Scopes<'a> {
 /// place.
 struct Rewriter<'x, 'a> {
     scopes: &'x Scopes<'a>,
+    /// every method in the program, keyed by `(final type name, method name)`.
+    /// what makes `Point::new()` resolve for an imported `Point`.
+    members: &'x MemberTable<'a>,
     errs: &'x mut Vec<Error>,
     /// names bound by params/`let`/match-arm patterns in the function being
     /// walked, innermost last. used as a stack: a block records `locals.len()` on
@@ -412,14 +441,20 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         if let Some((qual, sym)) = full.split_once("::") {
             // `Type::sym` where `Type` is a known type: either an associated-function
             // call `Point::new(...)` or a data-enum constructor `Enum::Variant(...)`.
-            // Both are type-qualified, not module-qualified. If a desugared method
-            // `Type$sym` is in scope, this is the former - rewrite to it. Otherwise
-            // leave it untouched for typecheck's enum-constructor path.
-            if self.scopes.types.contains_key(qual) {
-                let method = format!("{}${}", qual, sym);
-                if let Some(&f) = self.scopes.calls.get(method.as_str()) {
-                    *name = f;
+            // Both are type-qualified, not module-qualified.
+            //
+            // The member lookup is keyed on the type's *final* name, so this works
+            // for an imported type too. The old form reconstructed `Type$sym` and
+            // looked it up in the call scope, which could only ever hit for a type
+            // declared in this same module: no import form can name `Point$new`
+            // (`$` is unlexable), so `import geo { Point }` + `Point::new()` was
+            // silently left unresolved.
+            if let Some(&ty) = self.scopes.types.get(qual) {
+                if let Some(m) = self.members.get(&(ty, sym)) {
+                    *name = m.name;
                 }
+                // otherwise a data-enum constructor `Enum::Variant(...)`, left for
+                // typecheck's constructor path.
                 return;
             }
         }
@@ -823,7 +858,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         // register the source before parsing: its spans carry this id, and any
         // lex/parse diagnostic has to be able to quote it.
         let file = files.add(p.key.clone(), p.src);
-        let (imports, items, impls) = match parse_module(file, p.src, arena, &files) {
+        let (imports, items, impls, methods) = match parse_module(file, p.src, arena, &files) {
             Ok(pi) => pi,
             Err(()) => { had_error = true; continue; }
         };
@@ -871,6 +906,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
             import_keys,
             items,
             impls,
+            methods,
         });
     }
 
@@ -983,11 +1019,24 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
     // pass 2: rewrite each module's items in place using its scopes. Also remap
     // each `extend T: Trait` conformance record to final (mangled) names through
     // the same scopes, so the typechecker matches them against the merged program.
+    // pass 1.5: record every method under its type's *final* name, before any
+    // module is rewritten. has to precede pass 2 because a call `Point::new()` in
+    // module A resolves through a member declared in module B.
+    for (id, m) in modules.iter().enumerate() {
+        let scopes = &all_scopes[id];
+        for rm in &m.methods {
+            let ty = scopes.types.get(rm.target).copied().unwrap_or(rm.target);
+            let f = scopes.calls.get(rm.fn_name).copied().unwrap_or(rm.fn_name);
+            defs.add_member(ty, rm.name, Member { name: f, receiver: rm.receiver });
+        }
+    }
+
     let mut impls: Vec<ImplDecl<'a>> = Vec::new();
     for (id, m) in modules.iter_mut().enumerate() {
         let scopes = &all_scopes[id];
         let mut rw = Rewriter {
             scopes,
+            members: defs.members(),
             errs: &mut errs,
             locals: Vec::new(),
             span: Span::new(m.file, 0, 0),

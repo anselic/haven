@@ -36,17 +36,17 @@ fn main() {
     // `files` holds every loaded module's path + source, indexed by the `FileId`
     // its spans carry, so diagnostics below quote the span's owning module - not
     // just the entry file.
-    // `_defs` owns every top-level definition's identity and is what produced the
-    // symbol names now in `ast`. Nothing downstream consumes it yet - the later
-    // stages still work off those names - so it is only kept alive here.
-    let (ast, files, _defs, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
+    // `defs` owns every top-level definition's identity: it produced the symbol
+    // names now in `ast`, and it carries the member table both typecheck passes
+    // use to resolve method calls.
+    let (ast, files, defs, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };
 
     {
         let mut cx = typecheck::Context::new();
-        let typecheck_errs = typecheck::typecheck_program(&mut cx, &ast, &impls);
+        let typecheck_errs = typecheck::typecheck_program(&mut cx, &ast, &impls, &defs);
 
         // check if there is no main function when compiling an executable
         if !args.shared && !args.static_lib {
@@ -87,8 +87,11 @@ fn main() {
             });
             // mono dropped all trait nodes and substituted every bounded type
             // param, so the concrete program has no impls left to check.
+            // methods are never generic (`extend` on a generic type is rejected),
+            // so monomorphization can't introduce or invalidate a member - the
+            // same table applies to the concrete program.
             let mut cx = typecheck::Context::new();
-            let mono_errs = typecheck::typecheck_program(&mut cx, &mono_ast, &[]);
+            let mono_errs = typecheck::typecheck_program(&mut cx, &mono_ast, &[], &defs);
             if !mono_errs.is_empty() {
                 mono_errs.iter()
                     .for_each(|e| diag::report_error("Typecheck error", e, &files));

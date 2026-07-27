@@ -18,17 +18,6 @@ fn is_place(expr: &Expr<'_>) -> bool {
         | ExprNode::Unary { op: UnaryOp::Deref, .. })
 }
 
-/// Whether `ty` is a `self` receiver of the type named `recv_name`: the nominal
-/// type `T`, a pointer `*T`, or the corresponding enum forms.
-fn receiver_matches(ty: &Type<'_>, recv_name: &str) -> bool {
-    match ty {
-        Type::Struct { name, .. } | Type::Enum { name, .. } => *name == recv_name,
-        Type::Pointer(inner) => matches!(inner.as_ref(),
-            Type::Struct { name, .. } | Type::Enum { name, .. } if *name == recv_name),
-        _ => false,
-    }
-}
-
 /// Resolve a method call `base.field(args)` when `base` is a (possibly
 /// pointer-wrapped) type parameter, dispatching through the param's trait bounds.
 /// Returns `Ok(Some(result_type))` on success, `Ok(None)` if `base_ty` is not a
@@ -809,14 +798,19 @@ fn infer<'a>(
                         _ => None,
                     };
                     if let Some(recv_name) = recv_name {
-                        let method_name = format!("{}${}", recv_name, field);
-                        // a receiver method's first param is a `self` of the receiver
-                        // type; an associated fn (no `self`) doesn't match, so calling
-                        // one as `value.assoc()` falls through rather than misbinding.
-                        let resolved = match cx.lookup_kv(&method_name) {
-                            Some((target, (_, Type::Function { params, return_type })))
-                                if params.first().is_some_and(|p| receiver_matches(p, recv_name)) =>
-                                Some((target, params.clone(), (**return_type).clone())),
+                        // an associated fn (no `self`) is not callable as
+                        // `value.assoc()`, so it falls through rather than
+                        // misbinding. The member record says which it is outright;
+                        // this used to be inferred by checking whether the first
+                        // parameter looked like a `self` of the right type.
+                        let resolved = match cx.members.get(&(recv_name, field)) {
+                            Some(m) if m.receiver != Receiver::Associated => {
+                                match cx.lookup(m.name) {
+                                    Some((_, Type::Function { params, return_type })) =>
+                                        Some((m.name, params.clone(), (**return_type).clone())),
+                                    _ => None,
+                                }
+                            }
                             _ => None,
                         };
                         if let Some((target, params, return_type)) = resolved {

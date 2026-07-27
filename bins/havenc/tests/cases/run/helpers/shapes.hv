@@ -1,0 +1,35 @@
+// Helper for the cross-module method fixtures. Not collected by the harness
+// (only `*.hv` directly under `run/` are fixtures); compiled via the import.
+
+// An enum with methods, declared OUTSIDE the entry module. Enum names are never
+// slug-prefixed but their desugared methods are, so reconstructing `Kind$rank`
+// from the receiver's type name missed the actual symbol and both the call and
+// the trait conformance failed. The member table records the real name instead.
+pub enum Kind { Small, Large }
+
+extend Kind {
+    proc rank(*self) i32 {
+        match (*self) {
+            Kind::Small -> { return 1; }
+            Kind::Large -> { return 9; }
+        }
+        return 0;
+    }
+}
+
+extend Kind: Ranked {
+    proc ranked(*self) i32 { return self.rank() * 2; }
+}
+
+pub trait Ranked {
+    proc ranked(*self) i32;
+}
+
+// A struct with an associated function, reached cross-module as `Geo::make`.
+pub struct Geo {
+    w: i32,
+    h: i32,
+
+    proc make(w: i32, h: i32) Geo { return Geo { w: w, h: h }; }
+    proc area(*self) i32 { return self.w * self.h; }
+}

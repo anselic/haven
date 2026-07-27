@@ -1,0 +1,15 @@
+// An associated function on an imported type is callable as `Geo::make(...)`.
+//
+// Broken before the member table: resolution rebuilt `Geo$make` and looked it up
+// in the call scope, which can only hit for a type declared in the *same* module.
+// No import form can name `Geo$make` - `$` is unlexable - so a whole-module or
+// selective import left the call unresolved.
+//@ exit: 12
+
+import helpers/shapes { Geo }
+
+@export
+proc main() i32 {
+    let g: Geo = Geo::make(3, 4);
+    return g.area();
+}

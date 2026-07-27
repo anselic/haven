@@ -1,0 +1,12 @@
+// Methods on an `@export`ed struct declared in another module are reachable.
+// Same failure shape as the enum case: the type's emitted name is not
+// slug-prefixed, its methods' names are, so rebuilding `Vec2$sum` found nothing.
+//@ exit: 7
+
+import helpers/exported { Vec2 }
+
+@export
+proc main() i32 {
+    let v: Vec2 = Vec2::make(3, 4);
+    return v.sum();
+}

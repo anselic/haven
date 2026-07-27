@@ -1,0 +1,20 @@
+// Methods on an enum declared in another module are reachable, both as a direct
+// receiver call and through a trait bound.
+//
+// Broken before the member table: `Kind` keeps its bare name (enums are never
+// slug-prefixed) while its desugared method is emitted as `helpers.shapes$Kind$rank`,
+// so rebuilding `Kind$rank` from the receiver's type name found nothing.
+//@ exit: 20
+
+import helpers/shapes { Kind, Ranked }
+
+proc via_bound<T: Ranked>(x: *T) i32 {
+    return x.ranked();
+}
+
+@export
+proc main() i32 {
+    let k: Kind = Kind::Large;
+    // 9 (direct receiver call) + 18 (through the trait bound) = 27... minus 7.
+    return k.rank() + via_bound::<Kind>(&k) - 7;
+}

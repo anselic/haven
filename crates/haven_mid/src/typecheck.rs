@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
+use haven_common::defs::Defs;
 use haven_common::layout;
 
 mod context;
@@ -379,8 +380,18 @@ fn check_toplevel<'a>(
     Ok(())
 }
 
-pub fn typecheck_program<'a>(cx: &mut Context<'a>, program: &[TopLevel<'a>], impls: &[ImplDecl<'a>]) -> Vec<Error> {
+pub fn typecheck_program<'a>(
+    cx: &mut Context<'a>,
+    program: &[TopLevel<'a>],
+    impls: &[ImplDecl<'a>],
+    defs: &Defs<'a>,
+) -> Vec<Error> {
     let mut errors = Vec::new();
+
+    // methods are resolved through the table the module resolver built, not by
+    // reconstructing names. cheap to clone: one entry per declared method, and
+    // both typecheck passes need it.
+    cx.members = defs.members().clone();
 
     // --- forward declaration pass
 
@@ -681,11 +692,18 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
     let self_ty = resolve_type(&[], &cx.enums, &Type::plain_struct(imp.target));
 
     for (mname, sig) in &trait_def.methods {
-        let fname = format!("{}${}", imp.target, mname);
-        let found = match cx.lookup(&fname) {
-            Some((_, Type::Function { params, return_type })) =>
-                Some((params.clone(), (**return_type).clone())),
-            _ => None,
+        // the member table knows what the impl actually declared; this used to
+        // rebuild `Target$method`, which missed entirely when the type's emitted
+        // name isn't slug-prefixed but its methods' are (enums, `@export`ed
+        // structs) - reporting "does not implement" for a method that was right
+        // there.
+        let found = match cx.members.get(&(imp.target, *mname)) {
+            Some(m) => match cx.lookup(m.name) {
+                Some((_, Type::Function { params, return_type })) =>
+                    Some((params.clone(), (**return_type).clone())),
+                _ => None,
+            },
+            None => None,
         };
         let Some((params, return_type)) = found else {
             errors.push(Error {

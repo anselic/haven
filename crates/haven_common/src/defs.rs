@@ -38,7 +38,7 @@ use std::path::Path;
 
 use bumpalo::Bump;
 
-use crate::ast::{FileId, Span};
+use crate::ast::{FileId, Receiver, Span};
 
 /// Identity of one top-level definition.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -76,6 +76,29 @@ pub struct Def<'a> {
     pub span: Span,
 }
 
+/// One method or associated function reachable through a type.
+#[derive(Clone, Copy, Debug)]
+pub struct Member<'a> {
+    /// Emitted name of the function `lower_methods` desugared this into.
+    pub name: &'a str,
+    /// Whether it takes `self`, `*self`, or nothing. Recorded at desugaring, so
+    /// resolution no longer has to guess by inspecting the first parameter.
+    pub receiver: Receiver,
+}
+
+/// Methods and associated functions, keyed by `(type, method name)`.
+///
+/// Replaces reconstructing `format!("{}${}", type_name, method)` and hoping it
+/// lands on a real symbol. That only ever worked because `<slug>$Point` plus
+/// `$area` happens to equal `<slug>$(Point$area)` — a coincidence of the mangling
+/// scheme, and one that does not hold for enums or `@export`ed structs, whose
+/// type names are not slug-prefixed while their methods' names are. Those cases
+/// were silently unreachable outside the entry module.
+///
+/// Keyed by *emitted type name* for now. Stage 4 re-keys it to `(DefId, &str)`,
+/// which is a type change here and at the three lookup sites, nothing more.
+pub type MemberTable<'a> = HashMap<(&'a str, &'a str), Member<'a>>;
+
 pub struct ModInfo {
     pub file: FileId,
     /// Canonical key: an absolute path, `std/...`, or `<prelude>`.
@@ -91,6 +114,7 @@ pub struct Defs<'a> {
     mods: Vec<ModInfo>,
     /// slugs already handed out, so two modules never share one.
     slugs: HashMap<String, ModId>,
+    members: MemberTable<'a>,
 }
 
 impl<'a> Defs<'a> {
@@ -119,6 +143,14 @@ impl<'a> Defs<'a> {
         self.defs.push(def);
         id
     }
+
+    /// Record a method or associated function on `ty`. Returns the previous
+    /// entry, if the same `(type, name)` pair was already claimed.
+    pub fn add_member(&mut self, ty: &'a str, name: &'a str, m: Member<'a>) -> Option<Member<'a>> {
+        self.members.insert((ty, name), m)
+    }
+
+    pub fn members(&self) -> &MemberTable<'a> { &self.members }
 
     pub fn get(&self, id: DefId) -> &Def<'a> { &self.defs[id.0 as usize] }
     pub fn module(&self, id: ModId) -> &ModInfo { &self.mods[id.0 as usize] }
