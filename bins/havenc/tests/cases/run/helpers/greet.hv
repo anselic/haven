@@ -1,0 +1,11 @@
+// Helper for `run/test_pub_trait_xmod.hv`. Not collected by the harness (only
+// `*.hv` directly under `run/` are fixtures); compiled via the import.
+pub trait Greet {
+    proc greet(*self) i32;
+}
+
+// A private trait in the same module: importing this one is rejected, which
+// `fail/test_private_trait.hv` asserts.
+trait Secret {
+    proc secret(*self) i32;
+}

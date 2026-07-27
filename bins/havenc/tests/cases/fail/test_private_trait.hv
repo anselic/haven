@@ -3,7 +3,7 @@
 // import silently succeeded.
 //@ error: is private; add `pub` to export it
 
-import aux/secret { Secret }
+import helpers/secret { Secret }
 
 struct S {
     n: i32,

@@ -1,0 +1,12 @@
+// Helper for `fail/test_trait_sig_unknown_type.hv`. NOT a fixture itself: the
+// harness only collects `*.hv` directly under `fail/`, so this subdirectory is
+// invisible to it and only compiles when the fixture imports it.
+//
+// This module declares a trait whose method signature names `Buf` - a type it
+// never imports. Reproduces the shape of the `std/prelude` `Display`/`String`
+// bug: before name resolution reported unresolved names, the unknown `Buf` was
+// silently left as-is and only surfaced much later as a mismatch against the
+// *importing* module's mangled `Buf`.
+pub trait Show {
+    proc show(*self) Buf;
+}

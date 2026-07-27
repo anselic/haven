@@ -68,7 +68,7 @@ use bumpalo::Bump;
 
 use haven_common::ast::*;
 use crate::parse;
-use haven_common::diag::{self, Sources};
+use haven_common::diag::{self, Files};
 use haven_common::intrinsics::Intrinsic;
 
 /// The whole `crt/std` tree, embedded into the binary at build time. Nested
@@ -90,11 +90,10 @@ fn std_source(key: &str) -> Option<&'static str> {
 /// A loaded module: parsed contents plus the bookkeeping the resolver needs to
 /// mangle and rewrite it
 struct Module<'a> {
-    /// canonical key (absolute path, or `std/...`, or `<prelude>`). de-dupes
-    /// modules reached by more than one import.
-    key: String,
-    /// source text, also the name shown in diagnostics.
-    src: &'a str,
+    /// this module's entry in the `Files` table: its spans point at this id, and
+    /// its canonical key (absolute path, or `std/...`, or `<prelude>`) and source
+    /// text are stored there rather than duplicated here.
+    file: FileId,
     /// mangling prefix, unique per module, e.g. `m2_math`.
     prefix: String,
     is_entry: bool,
@@ -290,16 +289,12 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump) -> (Vec<Err
 /// lex/parse diagnostics. tokens move into `arena` so the parsed AST can borrow
 /// them for `'a`. `extend`/method blocks are desugared to functions here, so the
 /// returned items are already method-free.
-fn parse_module<'a>(key: &'a str, src: &'a str, arena: &'a Bump)
+fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'a>)
     -> Result<(Vec<Import<'a>>, Vec<TopLevel<'a>>, Vec<RawImpl<'a>>), ()>
 {
-    // errors here can only point into this one module, so a single-source cache
-    // is enough to quote them.
-    let local: Sources = vec![(key.to_string(), src)];
-
-    let (tokens, lex_errs) = parse::lex(key, src);
+    let (tokens, lex_errs) = parse::lex(file, src);
     for e in &lex_errs {
-        diag::report("Lex error", &e.reason().to_string(), e.span(), &local);
+        diag::report("Lex error", &e.reason().to_string(), e.span(), files);
     }
     let tokens = match tokens {
         Some(t) if lex_errs.is_empty() => t,
@@ -307,9 +302,9 @@ fn parse_module<'a>(key: &'a str, src: &'a str, arena: &'a Bump)
     };
     let tokens: &'a [Metadata<Token<'a>>] = arena.alloc_slice_fill_iter(tokens);
 
-    let (parsed, parse_errs) = parse::parse(key.to_string(), src.len(), tokens);
+    let (parsed, parse_errs) = parse::parse(file, src.len(), tokens);
     for e in &parse_errs {
-        diag::report("Parse error", &e.reason().to_string(), e.span(), &local);
+        diag::report("Parse error", &e.reason().to_string(), e.span(), files);
     }
     let (imports, mut items) = match parsed {
         Some(pi) if parse_errs.is_empty() => pi,
@@ -317,11 +312,11 @@ fn parse_module<'a>(key: &'a str, src: &'a str, arena: &'a Bump)
     };
 
     // desugar `extend`/method blocks into functions before anything else looks at
-    // the items. errors here point into this one module, so `local` quotes them.
+    // the items.
     let (method_errs, impls) = lower_methods(&mut items, arena);
     if !method_errs.is_empty() {
         for e in &method_errs {
-            diag::report_error("Method error", e, &local);
+            diag::report_error("Method error", e, files);
         }
         return Err(());
     }
@@ -748,7 +743,7 @@ fn build_symtab<'a>(m: &Module<'a>, arena: &'a Bump) -> SymTab<'a> {
 }
 
 pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a Bump)
-    -> Result<(Vec<TopLevel<'a>>, Sources<'a>, Vec<ImplDecl<'a>>), ()>
+    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Vec<ImplDecl<'a>>), ()>
 {
     // a module we've decided to load but haven't parsed yet.
     struct Pending<'a> {
@@ -793,6 +788,10 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         is_entry: true,
     });
 
+    // every source a diagnostic might point into, indexed by the `FileId` its
+    // spans carry. filled in as modules are popped, so a lex/parse error can quote
+    // the module that produced it.
+    let mut files: Files<'a> = Files::new();
     let mut modules: Vec<Module<'a>> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut had_error = false;
@@ -802,8 +801,10 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         let id = modules.len();
         seen.insert(p.key.clone(), id);
 
-        let key_static = arena.alloc_str(&p.key);
-        let (imports, items, impls) = match parse_module(key_static, p.src, arena) {
+        // register the source before parsing: its spans carry this id, and any
+        // lex/parse diagnostic has to be able to quote it.
+        let file = files.add(p.key.clone(), p.src);
+        let (imports, items, impls) = match parse_module(file, p.src, arena, &files) {
             Ok(pi) => pi,
             Err(()) => { had_error = true; continue; }
         };
@@ -818,8 +819,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
             .replace(|c: char| !c.is_alphanumeric(), "_"));
 
         // resolve + enqueue each import. errors point at the import statement in
-        // this module, so a single-source cache quotes them.
-        let local: Sources = vec![(p.key.clone(), p.src)];
+        // this module.
         let mut import_keys = Vec::with_capacity(imports.len());
         for imp in &imports {
             match resolve_key(imp, p.dir.as_deref()) {
@@ -830,7 +830,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
                                 key: key.clone(), src, dir, is_entry: false,
                             }),
                             Err(msg) => {
-                                diag::report("Import error", &msg, &imp.span, &local);
+                                diag::report("Import error", &msg, &imp.span, &files);
                                 had_error = true;
                                 import_keys.push(None);
                                 continue;
@@ -840,7 +840,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
                     import_keys.push(Some(key));
                 }
                 Err(msg) => {
-                    diag::report("Import error", &msg, &imp.span, &local);
+                    diag::report("Import error", &msg, &imp.span, &files);
                     had_error = true;
                     import_keys.push(None);
                 }
@@ -848,8 +848,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
         }
 
         modules.push(Module {
-            key: p.key,
-            src: p.src,
+            file,
             prefix,
             is_entry: p.is_entry,
             imports,
@@ -862,11 +861,6 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
     if had_error {
         return Err(());
     }
-
-    // (file-key, source) for every loaded module. keys match `Span::file`, so any
-    // downstream stage can quote the span's *owning* module. also the value
-    // returned to the caller for its own diagnostics.
-    let sources: Sources = modules.iter().map(|m| (m.key.clone(), m.src)).collect();
 
     // symbol table for every module (indexed by module id).
     let symtabs: Vec<SymTab> = modules.iter().map(|m| build_symtab(m, arena)).collect();
@@ -977,7 +971,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
             scopes,
             errs: &mut errs,
             locals: Vec::new(),
-            span: Span { file: m.key.clone(), start: 0, end: 0 },
+            span: Span::new(m.file, 0, 0),
         };
         for tl in &mut m.items {
             rw.toplevel(tl);
@@ -992,7 +986,7 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
     }
 
     if !errs.is_empty() {
-        for e in &errs { diag::report_error("Import error", e, &sources); }
+        for e in &errs { diag::report_error("Import error", e, &files); }
         return Err(());
     }
 
@@ -1070,9 +1064,9 @@ pub fn load_and_merge<'a>(entry: &Path, prelude_src: Option<&'a str>, arena: &'a
     }
 
     if !merge_errs.is_empty() {
-        for e in &merge_errs { diag::report_error("Merge error", e, &sources); }
+        for e in &merge_errs { diag::report_error("Merge error", e, &files); }
         return Err(());
     }
 
-    Ok((out, sources, impls))
+    Ok((out, files, impls))
 }

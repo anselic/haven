@@ -1,4 +1,4 @@
-use std::{rc::Rc, u64};
+use std::u64;
 use chumsky::{
     input::MappedInput,
     pratt::*,
@@ -26,8 +26,9 @@ enum PatTail<'a> {
 }
 
 fn lexer<'a> (
-    // Rc should be cheaper to clone per token
-    file_path: Rc<str>,
+    // a `FileId` is a Copy integer, so each token's span carries it for free -
+    // this used to be an `Rc<str>` cloned per token, over a full filename.
+    file: FileId,
 )
 -> impl Parser<
     'a,
@@ -174,11 +175,7 @@ fn lexer<'a> (
 
             Metadata::new(
                 tok,
-                Span::new(
-                    file_path.to_string(),
-                    input_span.start,
-                    input_span.end,
-                ),
+                Span::new(file, input_span.start, input_span.end),
             )
         })
         .padded_by(comment.repeated())
@@ -188,22 +185,18 @@ fn lexer<'a> (
         .collect()
 }
 
-pub fn lex<'a>(file_path: &'a str, source: &'a str) -> (
+pub fn lex<'a>(file: FileId, source: &'a str) -> (
     Option<Vec<Metadata<Token<'a>>>>,
     Vec<chumsky::error::Rich<'a, char, Span>>
 ) {
-    let (tks, errs) = lexer(std::rc::Rc::from(file_path))
+    let (tks, errs) = lexer(file)
         .parse(source)
         .into_output_errors();
 
     (tks, errs.into_iter()
         .map(|e| {
             e.map_span(|simple_span| {
-                Span::new(
-                    file_path.to_string(),
-                    simple_span.start,
-                    simple_span.end
-                )
+                Span::new(file, simple_span.start, simple_span.end)
             })
         })
         .collect())
@@ -1305,7 +1298,7 @@ enum FileItem<'a> {
     Items(Vec<TopLevel<'a>>),
 }
 
-pub fn parse<'a>(file_path: String, len: usize, tokens: &'a [Metadata<Token<'a>>]) -> (
+pub fn parse<'a>(file: FileId, len: usize, tokens: &'a [Metadata<Token<'a>>]) -> (
     Option<(Vec<Import<'a>>, Vec<TopLevel<'a>>)>,
     Vec<chumsky::error::Rich<'a, Token<'a>, Span>>,
 ) {
@@ -1317,7 +1310,7 @@ pub fn parse<'a>(file_path: String, len: usize, tokens: &'a [Metadata<Token<'a>>
         .collect::<Vec<_>>()
         .parse(
             tokens
-            .map(Span::new(file_path, len, len),
+            .map(Span::new(file, len, len),
                 |Metadata { value: t, span: s, .. }| (t, s),
             ))
         .into_output_errors();

@@ -667,7 +667,7 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], arena: &'a Bump)
         queue: VecDeque::new(), seen: HashMap::new(),
         struct_queue: VecDeque::new(), struct_seen: HashMap::new(),
         enum_queue: VecDeque::new(), enum_seen: HashMap::new(),
-        cur_span: Span::new(String::new(), 0, 0),
+        cur_span: Span::unknown(),
         display: HashMap::new(),
     };
     let empty = Bindings::empty();

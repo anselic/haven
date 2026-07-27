@@ -25,6 +25,7 @@ use bumpalo::Bump;
 
 use crate::DocArgs;
 use haven_common::ast::{TopLevel, TopLevelNode, Type};
+use haven_common::diag::Files;
 use haven_front::parse;
 
 /// Entry point for the `doc` subcommand. Returns `Err(())` if nothing could be
@@ -168,8 +169,13 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
     // Parse into real signatures. A fresh arena per file is fine: everything we
     // keep (the rendered strings) is owned by the time it drops.
     let arena = Bump::new();
-    let key: &str = arena.alloc_str(&file.to_string_lossy());
     let src_ref: &str = arena.alloc_str(&src);
+
+    // havendoc renders one file at a time and never reports a span-carrying
+    // diagnostic (a lex/parse failure just fails the page), so a one-entry file
+    // table is all the spans need to be well-formed.
+    let mut files = Files::new();
+    let key = files.add(file.to_string_lossy().into_owned(), src_ref);
 
     let (tokens, lex_errs) = parse::lex(key, src_ref);
     let tokens = match tokens {
@@ -177,7 +183,7 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
         _ => return Err(()),
     };
     let tokens = arena.alloc_slice_fill_iter(tokens);
-    let (parsed, parse_errs) = parse::parse(key.to_string(), src_ref.len(), tokens);
+    let (parsed, parse_errs) = parse::parse(key, src_ref.len(), tokens);
     let (_imports, items) = match parsed {
         Some(pi) if parse_errs.is_empty() => pi,
         _ => return Err(()),

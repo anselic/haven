@@ -1,23 +1,42 @@
 use std::fmt::{Display, Formatter};
 
-#[derive(Clone, Debug)]
+/// Index of a source file in the [`crate::diag::Files`] table. Every token and
+/// every AST node carries one inside its `Span`, so it is deliberately a `Copy`
+/// integer: the filename itself is stored once, in `Files`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FileId(pub u32);
+
+impl FileId {
+    /// Placeholder for a span that doesn't point anywhere yet (a cursor field
+    /// initialized before the first real span is seen). `Files` renders it as
+    /// `<unknown>` rather than panicking, so a stray one degrades a diagnostic
+    /// instead of aborting the compiler.
+    pub const UNKNOWN: FileId = FileId(u32::MAX);
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct Span {
-    pub file: String,
+    pub file: FileId,
     pub start: usize,
     pub end: usize,
 }
 
 impl Span {
-    pub fn new(file: String, start: usize, end: usize) -> Self {
+    pub fn new(file: FileId, start: usize, end: usize) -> Self {
         Self { file, start, end }
+    }
+
+    /// A span pointing nowhere, for placeholder/cursor fields.
+    pub fn unknown() -> Self {
+        Self { file: FileId::UNKNOWN, start: 0, end: 0 }
     }
 }
 
 impl chumsky::span::Span for Span {
-    type Context = String;
+    type Context = FileId;
     type Offset = usize;
 
-    fn context(&self) -> Self::Context { self.file.clone() }
+    fn context(&self) -> Self::Context { self.file }
     fn new(context: Self::Context, range: std::ops::Range<Self::Offset>) -> Self {
         Self {
             file: context,

@@ -2,7 +2,7 @@
 // and used both as a bound and as an `extend` target.
 //@ exit: 12
 
-import aux/greet { Greet }
+import helpers/greet { Greet }
 
 struct Hi {
     n: i32,

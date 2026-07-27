@@ -33,9 +33,10 @@ fn main() {
     // prelude unless disabled, merge into one flat name-mangled program with all
     // imports resolved away. see `crate::module`
     // let prelude = if args.no_prelude { None } else { Some(PRELUDE_SRC) };
-    // `sources` is (file-key, src) for every loaded module, so diagnostics below
-    // quote the span's owning module - not just the entry file.
-    let (ast, sources, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
+    // `files` holds every loaded module's path + source, indexed by the `FileId`
+    // its spans carry, so diagnostics below quote the span's owning module - not
+    // just the entry file.
+    let (ast, files, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
         Ok(triple) => triple,
         Err(()) => std::process::exit(1),
     };
@@ -68,7 +69,7 @@ fn main() {
 
         if !typecheck_errs.is_empty() {
             typecheck_errs.iter()
-                .for_each(|e| diag::report_error("Typecheck error", e, &sources));
+                .for_each(|e| diag::report_error("Typecheck error", e, &files));
             std::process::exit(1);
         } else {
             // expand generics into concrete instances, then re-typecheck the
@@ -78,7 +79,7 @@ fn main() {
             // concrete fn) from scratch and throws away the first `cx`, when
             // only the new instances actually need checking
             let (mono_ast, mono_display) = mono::monomorphize(&ast, &arena).unwrap_or_else(|e| {
-                diag::report_error("Monomorphization error", &e, &sources);
+                diag::report_error("Monomorphization error", &e, &files);
                 std::process::exit(1);
             });
             // mono dropped all trait nodes and substituted every bounded type
@@ -87,13 +88,13 @@ fn main() {
             let mono_errs = typecheck::typecheck_program(&mut cx, &mono_ast, &[]);
             if !mono_errs.is_empty() {
                 mono_errs.iter()
-                    .for_each(|e| diag::report_error("Typecheck error", e, &sources));
+                    .for_each(|e| diag::report_error("Typecheck error", e, &files));
                 std::process::exit(1);
             }
 
             safecheck::alloc_check_program(&mono_ast, &mono_display).unwrap_or_else(|errs| {
                 for err in &errs {
-                    diag::report_error("Check error", err, &sources);
+                    diag::report_error("Check error", err, &files);
                 }
                 std::process::exit(1);
             });
