@@ -1,0 +1,22 @@
+// A directory is an implicit module namespace whose members are its files, so a
+// qualifier path can nest: `import helpers/geo` binds `geo`, and the modules
+// under it are reached by walking segment by segment.
+//
+// Before this, `import` could only name a *file*, and a qualifier was exactly
+// one segment - so a third segment had nowhere to resolve and the parser's
+// multi-segment paths were rejected outright.
+//
+// Four shapes are exercised: a qualified type in a binding, a qualified call,
+// an associated function on a qualified type (four segments), and an enum
+// variant of a type one directory deeper (also four).
+//@ exit: 42
+
+import helpers/geo
+
+@export
+proc main() i32 {
+    let r: geo::shapes::Rect = geo::shapes::Rect::make(3, 4);
+    let half: geo::units::angle::Turn = geo::units::angle::Turn::Half;
+    // 12 + 180 - 150
+    return r.area() + geo::units::angle::degrees(half) - 150;
+}

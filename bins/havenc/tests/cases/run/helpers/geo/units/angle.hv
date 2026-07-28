@@ -1,0 +1,11 @@
+// One directory deeper, so the namespace nests: `geo::units::angle::...`.
+
+pub enum Turn { Quarter = 90, Half = 180 }
+
+pub proc degrees(t: Turn) i32 {
+    match (t) {
+        Turn::Quarter -> { return 90; }
+        Turn::Half -> { return 180; }
+    }
+    return 0;
+}

@@ -1,0 +1,9 @@
+// A directory names no symbols of its own, so it can only be imported whole, as
+// a namespace. A selective import of one is rejected with the spelling that
+// would work.
+//@ error: is a directory of modules, not a module
+
+import std/dsp { osc }
+
+@export
+proc main() i32 { return 0; }

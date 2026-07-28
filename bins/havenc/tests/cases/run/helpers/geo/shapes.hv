@@ -1,0 +1,12 @@
+// A member of the `geo` directory namespace: reached as `geo::shapes::...` by a
+// module that does `import helpers/geo`.
+
+pub struct Rect { w: i32, h: i32 }
+
+extend Rect {
+    // an associated function, so a caller has to spell four segments:
+    // `geo::shapes::Rect::make`.
+    proc make(w: i32, h: i32) Rect { return Rect { w: w, h: h }; }
+
+    proc area(*self) i32 { return self.w * self.h; }
+}

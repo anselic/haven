@@ -1,0 +1,11 @@
+// A path may end in a name, or in a type followed by one of its members. Any
+// more segments after the module qualifier has been walked as far as it goes is
+// an error rather than a silently dropped tail.
+//@ error: has too many `::` segments after the module qualifier
+
+import std/dsp
+
+@export
+proc main() i32 {
+    return dsp::osc::Osc::make::extra();
+}

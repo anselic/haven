@@ -2,7 +2,7 @@
 // namespace. a private item like std/alloc's `rt_alloc` never enters the `alloc::`
 // namespace, so a qualified reference to it is unresolved. (the selective-import
 // form reports "is private" directly; the whole-module form can only say the
-// qualifier doesn't expose that name, see fail/test_pub_private_selective.hv.)
+// module doesn't export that name, see fail/test_pub_private_selective.hv.)
 
 import std/alloc
 
@@ -12,4 +12,4 @@ proc main() i32 {
     return 0;
 }
 
-//@ error: is not imported from module qualifier 'alloc'
+//@ error: 'rt_alloc' is not exported by module 'alloc'

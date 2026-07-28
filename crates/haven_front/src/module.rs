@@ -110,9 +110,9 @@ struct Module<'a> {
     mid: ModId,
     is_entry: bool,
     imports: Vec<Import<'a>>,
-    /// canonical key of each import (parallel to `imports`), or `None` if it
+    /// what each import resolved to (parallel to `imports`), or `None` if it
     /// failed to resolve (error already recorded).
-    import_keys: Vec<Option<String>>,
+    import_keys: Vec<Option<ImportTarget<'a>>>,
     items: Vec<TopLevel<'a>>,
     /// `extend Target: Trait` conformance records from this module, in source
     /// (pre-mangling) names; remapped to final names after scopes are built.
@@ -167,33 +167,132 @@ fn linkage_of<'a>(m: &Module<'_>, name: &'a str, attrs: &[Attribute], is_extern:
     }
 }
 
-/// Resolve an import to its canonical key. no file read for `std`; for the
-/// relative case canonicalizes the path (so the file has to exist). `dir` is the
-/// importing module's directory.
-fn resolve_key(imp: &Import, dir: Option<&FilePath>) -> Result<String, String> {
+/// One member of a directory namespace: the canonical key of a module file, and
+/// the path that names it *inside* the namespace - `["osc"]` for
+/// `std/dsp/osc.hv` imported via `import std/dsp`, `["a", "b"]` for a file one
+/// directory deeper.
+struct DirMember<'a> {
+    segments: Vec<&'a str>,
+    key: String,
+}
+
+/// What an import resolved to.
+enum ImportTarget<'a> {
+    /// A single module file, under its canonical key.
+    Module(String),
+    /// A directory. Its files become an implicit namespace: `import std/dsp`
+    /// binds the qualifier `dsp`, whose members are the modules below it, so
+    /// `dsp::osc::Osc` resolves segment by segment.
+    ///
+    /// Every member is loaded, not just the ones a path happens to mention -
+    /// resolution needs the whole namespace present before it can walk into it.
+    Dir(Vec<DirMember<'a>>),
+}
+
+/// Every `.hv` file under the embedded std directory `rel`, as
+/// `(segments below `rel`, std key)`. Recurses, so a nested directory becomes a
+/// nested namespace.
+fn std_dir_members<'a>(rel: &str, arena: &'a Bump) -> Option<Vec<DirMember<'a>>> {
+    fn walk<'a>(d: &include_dir::Dir<'_>, prefix: &[&'a str], arena: &'a Bump,
+                out: &mut Vec<DirMember<'a>>) {
+        for f in d.files() {
+            let Some(stem) = f.path().file_stem().and_then(|s| s.to_str()) else { continue };
+            if f.path().extension().and_then(|e| e.to_str()) != Some("hv") { continue }
+            let mut segments = prefix.to_vec();
+            segments.push(arena.alloc_str(stem));
+            let key = format!("std/{}", f.path().with_extension("").to_string_lossy()
+                .replace('\\', "/"));
+            out.push(DirMember { segments, key });
+        }
+        for sub in d.dirs() {
+            let Some(name) = sub.path().file_name().and_then(|s| s.to_str()) else { continue };
+            let mut prefix = prefix.to_vec();
+            prefix.push(arena.alloc_str(name));
+            walk(sub, &prefix, arena, out);
+        }
+    }
+    let d = STD_DIR.get_dir(rel)?;
+    let mut out = Vec::new();
+    walk(d, &[], arena, &mut out);
+    Some(out)
+}
+
+/// Every `.hv` file under the on-disk directory `root`, as `(segments below
+/// `root`, canonical key)`. Mirrors [`std_dir_members`] for user modules.
+fn dir_members<'a>(root: &FilePath, arena: &'a Bump) -> Result<Vec<DirMember<'a>>, String> {
+    fn walk<'a>(dir: &FilePath, prefix: &[&'a str], arena: &'a Bump,
+                out: &mut Vec<DirMember<'a>>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("cannot read module directory '{}': {}", dir.display(), e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("cannot read module directory '{}': {}", dir.display(), e))?;
+            let path = entry.path();
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            if path.is_dir() {
+                let mut prefix = prefix.to_vec();
+                prefix.push(arena.alloc_str(name));
+                walk(&path, &prefix, arena, out)?;
+            } else if path.extension().and_then(|e| e.to_str()) == Some("hv") {
+                let canon = std::fs::canonicalize(&path)
+                    .map_err(|_| format!("cannot find module file '{}'", path.display()))?;
+                let mut segments = prefix.to_vec();
+                segments.push(arena.alloc_str(name));
+                out.push(DirMember { segments, key: canon.to_string_lossy().into_owned() });
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(root, &[], arena, &mut out)?;
+    Ok(out)
+}
+
+/// Resolve an import to the module - or directory of modules - it names. No file
+/// read for `std`; for the relative case canonicalizes (so the path has to
+/// exist). `dir` is the importing module's directory.
+fn resolve_target<'a>(imp: &Import, dir: Option<&FilePath>, arena: &'a Bump)
+    -> Result<ImportTarget<'a>, String>
+{
     if imp.path.first() == Some(&"std") {
         let key = imp.path.join("/");
-        if std_source(&key).is_none() {
-            return Err(format!("unknown std module '{}'", key));
+        if std_source(&key).is_some() {
+            return Ok(ImportTarget::Module(key));
         }
-        Ok(key)
+        // not a file - a directory of them?
+        let rel = key.strip_prefix("std/").unwrap_or("");
+        if let Some(members) = std_dir_members(rel, arena) {
+            if members.is_empty() {
+                return Err(format!("std module directory '{}' contains no modules", key));
+            }
+            return Ok(ImportTarget::Dir(members));
+        }
+        Err(format!("unknown std module '{}'", key))
     } else {
         let dir = dir.ok_or_else(||
             "cannot resolve a relative import from this module (std/prelude modules may only import `std/...`)".to_string())?;
-        let mut p = dir.to_path_buf();
-        for seg in &imp.path { p.push(seg); }
-        p.set_extension("hv");
-        let canon = std::fs::canonicalize(&p)
-            .map_err(|_| format!("cannot find module file '{}'", p.display()))?;
-        Ok(canon.to_string_lossy().into_owned())
+        let mut base = dir.to_path_buf();
+        for seg in &imp.path { base.push(seg); }
+        let mut file = base.clone();
+        file.set_extension("hv");
+        if let Ok(canon) = std::fs::canonicalize(&file) {
+            return Ok(ImportTarget::Module(canon.to_string_lossy().into_owned()));
+        }
+        if base.is_dir() {
+            let members = dir_members(&base, arena)?;
+            if members.is_empty() {
+                return Err(format!("module directory '{}' contains no modules", base.display()));
+            }
+            return Ok(ImportTarget::Dir(members));
+        }
+        Err(format!("cannot find module file '{}'", file.display()))
     }
 }
 
-/// Load an import's source + the dir its own relative imports resolve against.
-/// assumes `resolve_key` already succeeded for this import.
+/// Load one module's source + the dir its own relative imports resolve against.
+/// assumes `resolve_target` already succeeded for this key.
 fn load_import<'a>(imp: &Import, key: &str, dir: Option<&FilePath>, arena: &'a Bump) -> Result<(&'a str, Option<PathBuf>), String> {
     if imp.path.first() == Some(&"std") {
-        Ok((std_source(key).expect("std source vanished after resolve_key"), None))
+        Ok((std_source(key).expect("std source vanished after resolve_target"), None))
     } else {
         let _ = dir; // key is already the canonical absolute path
         let canon = PathBuf::from(key);
@@ -368,10 +467,35 @@ struct Scopes<'a> {
 /// `math::sym`. Split by namespace like [`Scopes`] itself, so a module that
 /// exports both a `Buf` type and a `Buf` function doesn't have one hide the
 /// other — which a single flat map did, structs being inserted last.
+///
+/// `children` is what makes a qualifier path nest: importing a *directory*
+/// binds one qualifier whose children are the modules under it, so `dsp::osc`
+/// walks to a scope and `dsp::osc::Osc` reads a name out of it. A plain module
+/// import has no children, and a directory that also had a module of its own
+/// would fill both halves - nothing forbids it, there is just no syntax for it
+/// yet.
 #[derive(Default)]
 struct QualScope<'a> {
     calls: HashMap<&'a str, Sym<'a>>,
     types: HashMap<&'a str, Sym<'a>>,
+    children: HashMap<&'a str, QualScope<'a>>,
+}
+
+impl<'a> QualScope<'a> {
+    /// Fill this scope with a module's public exports.
+    fn fill_from(&mut self, st: &SymTab<'a>) {
+        for (&k, v) in &st.fns { if v.is_pub { self.calls.insert(k, *v); } }
+        for (&k, v) in &st.structs { if v.is_pub { self.types.insert(k, *v); } }
+    }
+
+    /// The descendant named by `segments`, creating empty scopes along the way.
+    fn child_at(&mut self, segments: &[&'a str]) -> &mut QualScope<'a> {
+        let mut cur = self;
+        for seg in segments {
+            cur = cur.children.entry(seg).or_default();
+        }
+        cur
+    }
 }
 
 /// What [`Rewriter::type_head`] resolved a written type path to: a definition,
@@ -523,6 +647,48 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         }
     }
 
+    /// Walk the leading qualifier segments of `segs`, returning the scope they
+    /// name and how many they consumed.
+    ///
+    /// Takes the *longest* prefix that resolves, so a module named like a type
+    /// in an outer namespace doesn't cut the walk short. `None` means the very
+    /// first segment isn't a qualifier at all - the caller then treats the path
+    /// as type-qualified (`Point::new`) or reports it.
+    fn qual_prefix<'s>(&'s self, segs: &[&'a str]) -> Option<(&'s QualScope<'a>, usize)> {
+        let mut cur = self.scopes.quals.get(segs[0])?;
+        let mut n = 1;
+        // stop before the last segment: a path always ends in a name, never in a
+        // bare qualifier, so the final segment is never part of the prefix.
+        while n + 1 < segs.len() {
+            match cur.children.get(segs[n]) {
+                Some(next) => { cur = next; n += 1; }
+                None => break,
+            }
+        }
+        Some((cur, n))
+    }
+
+    /// Report a path whose qualifier prefix resolved but whose remainder didn't
+    /// name anything, with the most specific message the shape allows.
+    fn qual_miss(&mut self, path: &Path<'a>, names_module: bool, scope_end: usize, what: &str) {
+        let segs = &path.segments;
+        let qual = segs[..scope_end].join("::");
+        let rest = &segs[scope_end..];
+        if rest.len() > 2 {
+            self.error_here(format!(
+                "'{}' has too many `::` segments after the module qualifier '{}'", path, qual));
+        } else if names_module {
+            // named a nested module where a name was expected - the likely slip
+            // after importing a directory.
+            self.error_here(format!(
+                "'{}::{}' is a module, not a {}; name something inside it, \
+                 e.g. `{}::{}::<name>`", qual, rest[0], what, qual, rest[0]));
+        } else {
+            self.error_here(format!(
+                "{} '{}' is not exported by module '{}'", what, rest[0], qual));
+        }
+    }
+
     /// What a written type path denotes.
     ///
     /// An unresolvable path is an error here, and falls back to an abstract
@@ -544,24 +710,23 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 }
             };
         }
-        let Some((qual, sym)) = path.as_variant() else {
+        // `<qualifier...>::Type`. The qualifier may be several segments deep
+        // when it came from a directory import (`dsp::osc::Osc`), so walk it
+        // rather than assuming exactly one.
+        let segs = &path.segments;
+        let Some((scope, n)) = self.qual_prefix(segs) else {
             self.error_here(format!(
-                "'{}' has too many `::` segments; only `qualifier::Type` is supported", path));
+                "unknown module qualifier '{}' (did you `import .../{}`?)", segs[0], segs[0]));
             return TypeHead::Param(path.last());
         };
-        match self.scopes.quals.get(qual).map(|m| m.types.get(sym)) {
-            Some(Some(s)) => TypeHead::Def(s.def),
-            Some(None) => {
-                self.error_here(format!(
-                    "type '{}' is not imported from module qualifier '{}'", sym, qual));
-                TypeHead::Param(sym)
-            }
-            None => {
-                self.error_here(format!(
-                    "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual));
-                TypeHead::Param(sym)
+        let names_module = scope.children.contains_key(path.last());
+        if segs.len() - n == 1 {
+            if let Some(sym) = scope.types.get(segs[n]) {
+                return TypeHead::Def(sym.def);
             }
         }
+        self.qual_miss(path, names_module, n, "type");
+        TypeHead::Param(path.last())
     }
 
     /// Resolve a name in call position to its final emitted name. A bare name
@@ -603,46 +768,73 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             return Some(one);
         }
 
-        let Some((qual, sym)) = path.as_variant() else {
-            self.error(span, format!(
-                "'{}' has too many `::` segments; only `qualifier::name` is supported", path));
-            return Some(path.last());
-        };
-        let (qual, sym) = (qual, sym);
-
-        // `Type::sym` where `Type` is a known type: an associated-function call
-        // `Point::new(...)`, or a data-enum variant `Enum::Variant`. Both are
-        // type-qualified, not module-qualified.
+        // `Type::sym` where `Type` is an unqualified type in scope: an
+        // associated-function call `Point::new(...)`, or a data-enum variant
+        // `Enum::Variant`. Both are type-qualified, not module-qualified, so
+        // they are tried before the qualifier walk.
         //
-        // The member lookup is keyed on the type's *final* name, so this works for
-        // an imported type too. The old form reconstructed `Type$sym` and looked it
-        // up in the call scope, which could only ever hit for a type declared in
-        // this same module: no import form can name `Point$new` (`$` is unlexable),
-        // so `import geo { Point }` + `Point::new()` was silently left unresolved.
-        if let Some(&ty) = self.scopes.types.get(qual) {
-            if let Some(m) = self.members.get(&(ty.def, sym)) { return Some(m.name); }
-            // otherwise an enum variant: record which enum, and leave the rest to
-            // typecheck's constructor/variant paths.
-            r.def = ty.def;
-            return None;
-        }
-
-        // a module-qualified value, `math::square`.
-        match self.scopes.quals.get(qual) {
-            Some(map) => match map.calls.get(sym) {
-                Some(s) => Some(s.name),
-                None => {
-                    self.error(span, format!(
-                        "'{}' is not imported from module qualifier '{}'", sym, qual));
-                    Some(sym)
-                }
-            },
-            None => {
-                self.error(span, format!(
-                    "unknown module qualifier '{}' (did you `import .../{}`?)", qual, qual));
-                Some(sym)
+        // The member lookup is keyed on the type's identity, so this works for
+        // an imported type too. The old form reconstructed `Type$sym` and looked
+        // it up in the call scope, which could only ever hit for a type declared
+        // in this same module: no import form can name `Point$new` (`$` is
+        // unlexable), so `import geo { Point }` + `Point::new()` was silently
+        // left unresolved.
+        let segs: Vec<&'a str> = path.segments.clone();
+        if segs.len() == 2 {
+            if let Some(&ty) = self.scopes.types.get(segs[0]) {
+                return self.type_qualified(r, ty.def, segs[1]);
             }
         }
+
+        // otherwise a module-qualified path: `math::square`, `dsp::osc::phase`,
+        // or a qualified type followed by one of its members
+        // (`dsp::osc::Osc::new`).
+        let Some((scope, n)) = self.qual_prefix(&segs) else {
+            self.error(span, format!(
+                "unknown module qualifier '{}' (did you `import .../{}`?)", segs[0], segs[0]));
+            return Some(path.last());
+        };
+        match segs.len() - n {
+            1 => {
+                if let Some(sym) = scope.calls.get(segs[n]) { return Some(sym.name); }
+                if scope.children.contains_key(segs[n]) {
+                    self.error(span, format!(
+                        "'{}::{}' is a module, not a value; name something inside it, \
+                         e.g. `{}::{}::<name>`",
+                        segs[..n].join("::"), segs[n], segs[..n].join("::"), segs[n]));
+                } else {
+                    self.error(span, format!(
+                        "'{}' is not exported by module '{}'", segs[n], segs[..n].join("::")));
+                }
+                Some(path.last())
+            }
+            2 => {
+                // `<qualifier...>::Type::sym`: resolve the type through the
+                // namespace, then take its member or variant exactly as an
+                // unqualified `Type::sym` would.
+                let Some(&ty) = scope.types.get(segs[n]) else {
+                    self.error(span, format!(
+                        "type '{}' is not exported by module '{}'", segs[n], segs[..n].join("::")));
+                    return Some(path.last());
+                };
+                self.type_qualified(r, ty.def, segs[n + 1])
+            }
+            _ => {
+                self.error(span, format!(
+                    "'{}' has too many `::` segments after the module qualifier '{}'",
+                    path, segs[..n].join("::")));
+                Some(path.last())
+            }
+        }
+    }
+
+    /// Resolve `sym` against the type `ty`: an associated function or method if
+    /// the member table has one, otherwise an enum variant left for typecheck's
+    /// constructor path (which is what `None` means to the caller).
+    fn type_qualified(&mut self, r: &mut NameRef<'a>, ty: DefId, sym: &'a str) -> Option<&'a str> {
+        if let Some(m) = self.members.get(&(ty, sym)) { return Some(m.name); }
+        r.def = ty;
+        None
     }
 
     fn expr(&mut self, e: &mut Expr<'a>, gparams: &HashSet<&str>) {
@@ -1060,29 +1252,37 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
         // this module.
         let mut import_keys = Vec::with_capacity(imports.len());
         for imp in &imports {
-            match resolve_key(imp, p.dir.as_deref()) {
-                Ok(key) => {
-                    if !seen.contains_key(&key) {
-                        match load_import(imp, &key, p.dir.as_deref(), arena) {
-                            Ok((src, dir)) => worklist.push_back(Pending {
-                                key: key.clone(), src, dir, is_entry: false,
-                            }),
-                            Err(msg) => {
-                                diag::report("Import error", &msg, &imp.span, &files);
-                                had_error = true;
-                                import_keys.push(None);
-                                continue;
-                            }
-                        }
-                    }
-                    import_keys.push(Some(key));
-                }
+            let target = match resolve_target(imp, p.dir.as_deref(), arena) {
+                Ok(t) => t,
                 Err(msg) => {
                     diag::report("Import error", &msg, &imp.span, &files);
                     had_error = true;
                     import_keys.push(None);
+                    continue;
+                }
+            };
+            // a directory import pulls in every module under it: resolution
+            // walks into the namespace, so the whole thing has to be present.
+            let keys: Vec<&str> = match &target {
+                ImportTarget::Module(k) => vec![k.as_str()],
+                ImportTarget::Dir(ms) => ms.iter().map(|m| m.key.as_str()).collect(),
+            };
+            let mut failed = false;
+            for key in keys {
+                if seen.contains_key(key) { continue; }
+                match load_import(imp, key, p.dir.as_deref(), arena) {
+                    Ok((src, dir)) => worklist.push_back(Pending {
+                        key: key.to_string(), src, dir, is_entry: false,
+                    }),
+                    Err(msg) => {
+                        diag::report("Import error", &msg, &imp.span, &files);
+                        had_error = true;
+                        failed = true;
+                        break;
+                    }
                 }
             }
+            import_keys.push(if failed { None } else { Some(target) });
         }
 
         modules.push(Module {
@@ -1126,9 +1326,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
     loop {
         let mut changed = false;
         for id in 0..modules.len() {
-            for (imp, key) in modules[id].imports.iter().zip(&modules[id].import_keys) {
+            for (imp, target) in modules[id].imports.iter().zip(&modules[id].import_keys) {
                 if !imp.is_pub { continue; }
-                let Some(key) = key else { continue };
+                let Some(ImportTarget::Module(key)) = target else { continue };
                 let Some(syms) = &imp.symbols else { continue };
                 let target = seen[key];
                 for sym in syms {
@@ -1156,7 +1356,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
         for imp in &m.imports {
             if imp.is_pub && imp.symbols.is_none() {
                 errs.push(Error::new(imp.span.clone(), format!(
-                    "`pub import {}` re-exports nothing: a whole-module import binds                      the qualifier '{}' rather than any names. List the symbols to                      re-export, e.g. `pub import {} {{ ... }}`",
+                    "`pub import {}` re-exports nothing: a whole-module import binds \
+                     the qualifier '{}' rather than any names. List the symbols to \
+                     re-export, e.g. `pub import {} {{ ... }}`",
                     imp.path.join("/"), imp.path.last().unwrap(), imp.path.join("/"))));
             }
         }
@@ -1181,10 +1383,46 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
         // 2. explicit imports
         let mut from_import_calls: HashSet<&str> = HashSet::new();
         let mut from_import_types: HashSet<&str> = HashSet::new();
-        let mut qual_owner: HashMap<&str, usize> = HashMap::new();
+        let mut qual_owner: HashMap<&str, String> = HashMap::new();
 
-        for (imp, key) in m.imports.iter().zip(&m.import_keys) {
-            let Some(key) = key else { continue };
+        for (imp, target) in m.imports.iter().zip(&m.import_keys) {
+            let Some(target) = target else { continue };
+
+            // a directory names no symbols of its own, so it can only be
+            // imported whole - as a namespace.
+            if let (ImportTarget::Dir(_), Some(_)) = (target, &imp.symbols) {
+                errs.push(Error::new(imp.span.clone(), format!(
+                    "'{}' is a directory of modules, not a module: import it whole \
+                     (`import {}`) and reach its members through the qualifier, \
+                     e.g. `{}::<module>::<name>`",
+                    imp.path.join("/"), imp.path.join("/"), imp.path.last().unwrap())));
+                continue;
+            }
+
+            let ImportTarget::Module(key) = target else {
+                // a directory import: bind one qualifier whose children are the
+                // modules under it, so `dsp::osc::Osc` walks `dsp` -> `osc` ->
+                // the name. Members are namespaced by their path below the
+                // directory, so a nested directory nests here too.
+                let ImportTarget::Dir(members) = target else { unreachable!() };
+                let qualifier = *imp.path.last().unwrap();
+                let owner = imp.path.join("/");
+                if let Some(prev) = qual_owner.get(qualifier) {
+                    if *prev != owner {
+                        errs.push(Error::new(imp.span.clone(), format!(
+                            "qualifier '{}' already refers to a different module", qualifier)));
+                    }
+                }
+                qual_owner.insert(qualifier, owner);
+                for member in members {
+                    let st = &symtabs[seen[&member.key]];
+                    scopes.quals.entry(qualifier).or_default()
+                        .child_at(&member.segments)
+                        .fill_from(st);
+                }
+                continue;
+            };
+
             let target_id = seen[key];
             let target = &symtabs[target_id];
 
@@ -1193,18 +1431,17 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
                     // whole module: every symbol visible only as `qualifier::sym`,
                     // qualified under the module's last path segment.
                     let qualifier = *imp.path.last().unwrap();
-                    if let Some(&prev) = qual_owner.get(qualifier) {
-                        if prev != target_id {
+                    let owner = imp.path.join("/");
+                    if let Some(prev) = qual_owner.get(qualifier) {
+                        if *prev != owner {
                             errs.push(Error::new(imp.span.clone(), format!(
                                 "qualifier '{}' already refers to a different module", qualifier)));
                         }
                     }
-                    qual_owner.insert(qualifier, target_id);
-                    let map = scopes.quals.entry(qualifier).or_default();
+                    qual_owner.insert(qualifier, owner);
                     // only `pub` items are importable; private ones are invisible
                     // outside their own module.
-                    for (&k, v) in &target.fns { if v.is_pub { map.calls.insert(k, *v); } }
-                    for (&k, v) in &target.structs { if v.is_pub { map.types.insert(k, *v); } }
+                    scopes.quals.entry(qualifier).or_default().fill_from(target);
                 }
                 Some(syms) => {
                     // selective: the named symbols visible unqualified. a name that
