@@ -191,32 +191,23 @@ pub(crate) fn subst_param_type<'a>(
     }
 }
 
-/// Typecheck a call to a user generic function: bind the turbofish type args to
-/// the callee's type params, substitute them into the sig, check the value args,
-/// and return the substituted result type. mono materializes the instance later.
-pub(crate) fn check_generic_call<'a>(
-    cx: &mut Context<'a>,
-    name: &'a str,
-    sig: &GenericFnSig<'a>,
+/// Bind turbofish arguments to generic parameters, positionally, and verify each
+/// bounded parameter's argument implements the traits it was declared to.
+///
+/// `generics` and `type_args` must already be the same length — the arity error
+/// belongs to the caller, which knows whether it is checking a whole call
+/// (`f::<A, B>()`) or only the tail a method declares for itself, after
+/// unification has bound its `extend` block's share.
+pub(crate) fn bind_turbofish<'a>(
+    cx: &Context<'a>,
+    name: &str,
+    generics: &[GenericParam<'a>],
     type_args: &[GenericArg<'a>],
-    args: &[Expr<'a>],
     span: &Span,
-) -> Result<Type<'a>, Error> {
-    if type_args.len() != sig.generics.len() {
-        return Err(Error {
-            msg: format!(
-                "{}() expects {} generic argument{} in `::<...>`, got {}",
-                name, sig.generics.len(),
-                if sig.generics.len() == 1 { "" } else { "s" }, type_args.len(),
-            ),
-            span: span.clone(),
-        });
-    }
-
-    // bind each turbofish arg to its generic param, matched positionally.
+) -> Result<(HashMap<&'a str, Type<'a>>, HashMap<&'a str, ConstVal<'a>>), Error> {
     let mut type_bindings: HashMap<&'a str, Type<'a>> = HashMap::new();
     let mut const_bindings: HashMap<&'a str, ConstVal<'a>> = HashMap::new();
-    for (gp, ta) in sig.generics.iter().zip(type_args) {
+    for (gp, ta) in generics.iter().zip(type_args) {
         match (gp, ta) {
             (GenericParam::Type { name: pname, .. }, GenericArg::Type(ty)) => {
                 // resolve against the caller's own type params (a generic body
@@ -268,7 +259,7 @@ pub(crate) fn check_generic_call<'a>(
     // forwarded type param satisfies a bound iff it carries the same bound in the
     // enclosing generic (bound propagation); a concrete struct/enum must have a
     // matching recorded impl; anything else can't satisfy a bound.
-    for gp in &sig.generics {
+    for gp in generics {
         if let GenericParam::Type { name: pname, bounds } = gp {
             if bounds.is_empty() { continue; }
             let Some(arg_ty) = type_bindings.get(pname) else { continue };
@@ -294,6 +285,34 @@ pub(crate) fn check_generic_call<'a>(
             }
         }
     }
+
+    Ok((type_bindings, const_bindings))
+}
+
+/// Typecheck a call to a user generic function: bind the turbofish type args to
+/// the callee's type params, substitute them into the sig, check the value args,
+/// and return the substituted result type. mono materializes the instance later.
+pub(crate) fn check_generic_call<'a>(
+    cx: &mut Context<'a>,
+    name: &'a str,
+    sig: &GenericFnSig<'a>,
+    type_args: &[GenericArg<'a>],
+    args: &[Expr<'a>],
+    span: &Span,
+) -> Result<Type<'a>, Error> {
+    if type_args.len() != sig.generics.len() {
+        return Err(Error {
+            msg: format!(
+                "{}() expects {} generic argument{} in `::<...>`, got {}",
+                name, sig.generics.len(),
+                if sig.generics.len() == 1 { "" } else { "s" }, type_args.len(),
+            ),
+            span: span.clone(),
+        });
+    }
+
+    let (type_bindings, const_bindings) =
+        bind_turbofish(cx, name, &sig.generics, type_args, span)?;
 
     let params: Vec<Type<'a>> = sig.params.iter()
         .map(|p| subst_param_type(&type_bindings, &const_bindings, p)).collect();

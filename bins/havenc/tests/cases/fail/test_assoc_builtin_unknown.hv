@@ -1,0 +1,13 @@
+// A built-in type has no variants, so a type-qualified path that finds no
+// member is an outright error - unlike a `Type::sym` on a struct or enum, which
+// is left for typecheck's enum-constructor path when the member table misses.
+//@ error: no associated function 'from' on built-in type 'i32'
+
+extend i32 {
+    proc zero() i32 { return 0; }
+}
+
+@export
+proc main() i32 {
+    return i32::from(1);
+}

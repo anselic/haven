@@ -1,0 +1,52 @@
+// A method that declares generic parameters of its own, beyond whatever its
+// `extend` target binds.
+//
+// Two sources of bindings meet at the call. The impl's parameters are recovered
+// by unifying its target against the receiver - the `T` of `extend [T]` is
+// whatever `xs` turned out to be a slice of. The method's own are not determined
+// by the receiver at all, so they come from a turbofish on the call. Since the
+// desugared function lists the impl's parameters first, the two are simply the
+// head and tail of one list.
+//@ exit: 25
+
+struct Box<T> {
+    value: T,
+
+    proc get(*self) T { return self.value; }
+}
+
+// generic target + method generic: `T` from the receiver, `U` from the call.
+extend Box<T> {
+    proc mapped<U>(*self, f: proc(T) U) Box<U> {
+        return Box::<U> { value: f(self.value) };
+    }
+}
+
+// structural target, same split.
+extend [T] {
+    proc len_or<U>(self, d: U) U { return d; }
+}
+
+// concrete target: the impl binds nothing, so the whole list is the method's.
+struct Tag { n: i32 }
+
+extend Tag {
+    proc echo<U>(*self, v: U) U { return v; }
+}
+
+proc widen(v: i32) i64 { return 70i64; }
+
+@export
+proc main() i32 {
+    let a: Box<i32> = Box::<i32> { value: 7 };
+    let b: Box<i64> = a.mapped::<i64>(widen);
+    printf::<i64>("%lld\n", b.get());
+
+    let xs: [i32] = [1, 2, 3];
+    printf::<u64>("%llu\n", xs.len_or::<u64>(9u64));
+
+    let t: Tag = Tag { n: 1 };
+    printf::<i32>("%d\n", t.echo::<i32>(5));
+
+    return a.get() + t.echo::<i32>(18);   // 7 + 18
+}

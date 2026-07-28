@@ -240,6 +240,42 @@ fn parse_expr<'tks, 'src: 'tks>()
     recursive(|expr| {
         let var = select_ref! { Token::Var(ident) => ident };
 
+        // `::<T, N>` — the turbofish, shared by every site that takes one. The
+        // leading `::` is what disambiguates the angle brackets from the `<`/`>`
+        // comparison operators, so it is part of the production rather than the
+        // caller's job; the sites differ only in what may follow.
+        let turbofish = just(Token::ColonColon)
+            .ignore_then(
+                choice((
+                    select! { Token::Int32(n) => n }.try_map(|n, span| {
+                        if n < 0 {
+                            Err(Rich::custom(span, "const turbofish argument must be non-negative"))
+                        } else {
+                            Ok(GenericArg::Const(ConstVal::Lit(n as usize)))
+                        }
+                    }),
+                    // a bare ident is ambiguous between a type and a forwarded
+                    // const param; it parses as a type and is reclassified
+                    // downstream once the callee's or type's kinds are known.
+                    parse_type().map(GenericArg::Type),
+                ))
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(
+                    just(Token::BinaryOp(BinaryOp::Lt)),
+                    just(Token::BinaryOp(BinaryOp::Gt))),
+            )
+            .boxed();
+
+        // `(a, b, c)` — a call's argument list.
+        let call_args = expr.clone()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .boxed();
+
         macro_rules! una {
             // Separate $from and $op because some operators (like '-') can be
             // both unary and binary
@@ -315,32 +351,7 @@ fn parse_expr<'tks, 'src: 'tks>()
             // turbofish does. The segment alternative rejects `::<` (not an ident)
             // and backtracks, so the turbofish still sees it.
             path_of!(var)
-                .then(
-                    just(Token::ColonColon)
-                        .ignore_then(
-                            choice((
-                                select! { Token::Int32(n) => n }.try_map(|n, span| {
-                                    if n < 0 {
-                                        Err(Rich::custom(span, "const turbofish argument must be non-negative"))
-                                    } else {
-                                        Ok(GenericArg::Const(ConstVal::Lit(n as usize)))
-                                    }
-                                }),
-                                // a bare ident is ambiguous between a type and a
-                                // forwarded const param; parses as a type, reclassified
-                                // downstream once the struct's kinds are known.
-                                parse_type().map(GenericArg::Type),
-                            ))
-                                .separated_by(just(Token::Comma))
-                                .allow_trailing()
-                                .collect::<Vec<_>>()
-                                .delimited_by(
-                                    just(Token::BinaryOp(BinaryOp::Lt)),
-                                    just(Token::BinaryOp(BinaryOp::Gt))),
-                        )
-                        .or_not()
-                        .map(|t| t.unwrap_or_default())
-                )
+                .then(turbofish.clone().or_not().map(|t| t.unwrap_or_default()))
                 .then(
                     var.map(|s| *s)
                         .then_ignore(just(Token::Colon))
@@ -354,6 +365,37 @@ fn parse_expr<'tks, 'src: 'tks>()
                     name: NameRef::new(name),
                     type_args,
                     fields,
+                }),
+
+            // An associated function reached through a *generic* type, with the
+            // turbofish on the type rather than the call: `Buf::<i32>::make()`,
+            // `mod::Buf::<i32>::make()`, `Buf::<i32>::make::<U>()`.
+            //
+            // The whole call is built here, arguments included, because the
+            // turbofish sits in the middle of the name: `path_of!` stops at
+            // `Buf` (`::<` is not a segment), so a postfix operator would have
+            // to graft the trailing segment back onto whatever it was applied
+            // to - including expressions that are not names at all. Requiring
+            // the leading path syntactically means that case cannot arise.
+            //
+            // Both turbofishes land in one `type_args` list, in written order.
+            // That is exactly right: `extend` desugars each method to a function
+            // whose generics are the impl's followed by the method's own, so
+            // `Buf::<i32>::make::<U>()` is just `Buf$make::<i32, U>()`.
+            path_of!(var)
+                .then(turbofish.clone())
+                .then(just(Token::ColonColon).ignore_then(var.map(|s| *s)))
+                .then(turbofish.clone().or_not().map(|t| t.unwrap_or_default()))
+                .then(call_args.clone())
+                .map_with(|((((mut path, mut type_args), assoc), own_args), args), e| {
+                    path.segments.push(assoc);
+                    type_args.extend(own_args);
+                    ExprNode::Call {
+                        func: Box::new(Metadata::new(
+                            ExprNode::Path(NameRef::new(path)), e.span())),
+                        type_args,
+                        args,
+                    }
                 }),
 
             // a variable, or a qualified ref `qualifier::symbol` (`math::sinf`,
@@ -399,37 +441,10 @@ fn parse_expr<'tks, 'src: 'tks>()
             // `::` disambiguates from the `<`/`>` comparison operators.
             postfix(
                 300,
-                just(Token::ColonColon)
-                    .ignore_then(
-                        choice((
-                            select! { Token::Int32(n) => n }.try_map(|n, span| {
-                                if n < 0 {
-                                    Err(Rich::custom(span, "const turbofish argument must be non-negative"))
-                                } else {
-                                    Ok(GenericArg::Const(ConstVal::Lit(n as usize)))
-                                }
-                            }),
-                            // a bare ident here (e.g. `N`) is ambiguous between a type
-                            // and a forwarded const param; it parses as a type and gets
-                            // reclassified downstream once the callee's kinds are known.
-                            parse_type().map(GenericArg::Type),
-                        ))
-                        .separated_by(just(Token::Comma))
-                        .allow_trailing()
-                        .collect::<Vec<_>>()
-                        .delimited_by(
-                            just(Token::BinaryOp(BinaryOp::Lt)),
-                            just(Token::BinaryOp(BinaryOp::Gt))),
-                    )
+                turbofish.clone()
                     .or_not()
                     .map(|t| t.unwrap_or_default())
-                    .then(
-                        expr.clone()
-                            .separated_by(just(Token::Comma))
-                            .allow_trailing()
-                            .collect::<Vec<_>>()
-                            .delimited_by(just(Token::LParen), just(Token::RParen)),
-                    )
+                    .then(call_args.clone())
                     .boxed(),
                 |func, (type_args, args), e|
                 Metadata::new(

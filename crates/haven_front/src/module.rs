@@ -928,6 +928,14 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         // left unresolved.
         let segs: Vec<&'a str> = path.segments.clone();
         if segs.len() == 2 {
+            // a built-in type's associated function, `i32::from(x)`. Tried
+            // first because the built-in names are keywords: `parse_type` maps
+            // them before any user type can shadow them, so letting a `struct
+            // i32` win here would make one name mean two things depending on
+            // whether it is written in type or expression position.
+            if let Some(head) = TyHead::of_builtin(segs[0]) {
+                return Some(self.builtin_qualified(head, segs[0], segs[1], span));
+            }
             if let Some(&ty) = self.scopes.types.get(segs[0]) {
                 return self.type_qualified(r, ty.def, segs[1]);
             }
@@ -982,6 +990,21 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         if let Some(m) = self.members.get(&(TyHead::Def(ty), sym)) { return Some(m.name); }
         r.def = ty;
         None
+    }
+
+    /// Resolve `sym` against a built-in type: `i32::from(x)`, `str::len(s)`.
+    ///
+    /// Unlike [`Self::type_qualified`] there is no fallback — a primitive has no
+    /// variants, so a miss here is an error rather than something left for
+    /// typecheck's enum-constructor path. Returning the bare `sym` on failure
+    /// keeps the tree well-formed for the rest of the pass; the error already
+    /// stops compilation.
+    fn builtin_qualified(&mut self, head: TyHead, ty: &str, sym: &'a str, span: &Span) -> &'a str {
+        if let Some(m) = self.members.get(&(head, sym)) { return m.name; }
+        self.error(span, format!(
+            "no associated function '{}' on built-in type '{}'; declare one with \
+             `extend {} {{ proc {}(...) ... }}`", sym, ty, ty, sym));
+        sym
     }
 
     fn expr(&mut self, e: &mut Expr<'a>, gparams: &HashSet<&str>) {
@@ -1710,6 +1733,16 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
             let Some((self_ty, head)) =
                 resolve_extend_target(&rm.target, &rm.generics, scopes, &no_members, m.file)
             else { continue };
+            // an associated function is only ever reached by naming its type, so
+            // one declared on a target no path can name could never be called.
+            // Rejecting it here beats emitting a symbol with no way in.
+            if rm.receiver == Receiver::Associated && !head.is_nameable() {
+                errs.push(Error::new(rm.span.clone(), format!(
+                    "associated function '{}' cannot be reached: a call would have \
+                     to name '{}', and only a declared type or a built-in keyword \
+                     can be written as a path. Give it a `self` parameter so it is \
+                     found through its receiver instead", rm.name, rm.target)));
+            }
             let f = scopes.calls.get(rm.fn_name).map(|s| s.name).unwrap_or(rm.fn_name);
             let prev = defs.add_member(head, rm.name, Member {
                 name: f,

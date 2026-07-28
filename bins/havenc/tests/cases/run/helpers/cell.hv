@@ -1,0 +1,13 @@
+// Helper for `run/test_assoc_generic_type.hv`. Not collected by the harness.
+//
+// A generic type whose associated function lives outside the entry module, so a
+// call has to walk the module qualifier to the type *and* find the member on the
+// type's template - with the turbofish sitting between the two:
+// `cell::Cell::<i32>::of(4)`.
+pub struct Cell<T> {
+    v: T,
+
+    proc of(v: T) Cell<T> { return Cell::<T> { v: v }; }
+
+    proc get(*self) T { return self.v; }
+}

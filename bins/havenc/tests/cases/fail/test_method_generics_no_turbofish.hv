@@ -1,0 +1,16 @@
+// Unification against the receiver binds the `extend` block's parameters and
+// nothing else, so a parameter the *method* declares has to be written out.
+// Inferring it from the argument types is real inference, which this compiler
+// does nowhere - every other generic call is turbofished - so the omission is an
+// arity error naming what is missing rather than a mismatch further downstream.
+//@ error: declares 1 generic parameter of its own
+
+extend [T] {
+    proc first_or<U>(self, d: U) U { return d; }
+}
+
+@export
+proc main() i32 {
+    let xs: [i32] = [1, 2, 3];
+    return xs.first_or(0);
+}

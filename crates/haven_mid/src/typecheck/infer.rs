@@ -3,7 +3,7 @@ use haven_common::ast::*;
 use crate::intrinsics::Intrinsic;
 use haven_common::defs::{DefId, Member};
 use super::context::{Context, MethodCall, RecvAdjust};
-use super::generics::{bind_generics, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self};
+use super::generics::{bind_generics, bind_turbofish, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self};
 use super::enums::{enum_variant, split_enum_variant, enum_variant_ctor, check_variant_pattern};
 
 /// Whether `expr` denotes a place (an addressable location) rather than a
@@ -38,46 +38,66 @@ pub(crate) fn receiver_member<'a>(cx: &Context<'a>, base_ty: &Type<'a>, field: &
 }
 
 /// A member's signature as seen at one call site: its parameter types (`self`
-/// first) and return type, with the impl's parameters bound to whatever the
-/// receiver supplied.
+/// first) and return type, fully specialized.
 ///
-/// A method of a generic `extend` is a generic *function*, so its signature
-/// comes from `generic_fns` and needs substituting; a method of a concrete one
-/// is an ordinary value-scope binding and is already in final form.
+/// Two sources of bindings meet here. The `extend` block's own parameters come
+/// from `u`, recovered by unifying the impl's target against the receiver — the
+/// `T` of `extend [T]` is whatever `xs` turned out to be a slice of. Parameters
+/// the *method* declares beyond those are not determined by the receiver, so
+/// they come from the call's turbofish: `xs.fold::<u64>(...)`. Because the
+/// desugared function lists the impl's parameters first, the two sets are just
+/// the head and tail of one list.
+///
+/// Inferring the method's own parameters from the argument types instead would
+/// be real inference, which this compiler does nowhere (every generic call is
+/// turbofished), so an omitted turbofish is an arity error naming what is
+/// missing rather than a confusing mismatch downstream.
 fn method_signature<'a>(
     cx: &Context<'a>,
     m: &Member<'a>,
     u: &Unified<'a>,
     field: &str,
+    type_args: &[GenericArg<'a>],
     span: &Span,
 ) -> Result<Option<(&'a str, Vec<Type<'a>>, Type<'a>)>, Error> {
-    if m.generics.is_empty() {
+    // a method of a *concrete* `extend` that declares no generics of its own is
+    // an ordinary function, already in final form in the value scope.
+    let Some(sig) = cx.generic_fns.get(m.name) else {
+        if !type_args.is_empty() {
+            return Err(Error {
+                msg: format!("method '{}' takes no generic arguments", field),
+                span: span.clone(),
+            });
+        }
         return Ok(match cx.lookup(m.name) {
             Some((_, Type::Function { params, return_type })) =>
                 Some((m.name, params.clone(), (**return_type).clone())),
             _ => None,
         });
-    }
-    let Some(sig) = cx.generic_fns.get(m.name) else { return Ok(None) };
-    // unification binds the impl's own parameters and nothing else, so a method
-    // that declares parameters of its own has some left over. Inferring those
-    // from the argument types is real inference, which this compiler does not do
-    // anywhere yet (every other generic call is turbofished), so say so plainly
-    // rather than substitute half a signature and fail on a confusing mismatch.
-    if sig.generics.len() != m.generics.len() {
+    };
+
+    // the parameters the receiver could not determine: everything the desugared
+    // function declares past the impl's own list.
+    let own = &sig.generics[sig.generics.len().min(m.generics.len())..];
+    if type_args.len() != own.len() {
         return Err(Error {
             msg: format!(
-                "method '{}' declares generic parameters of its own; calling it \
-                 would need to infer them from the arguments, which is not \
-                 supported yet - move them onto the `extend` target instead",
-                field),
+                "method '{}' declares {} generic parameter{} of its own; supply \
+                 {} with a turbofish, e.g. `.{}::<...>(...)` (they cannot be \
+                 inferred from the arguments), got {}",
+                field, own.len(), if own.len() == 1 { "" } else { "s" },
+                if own.len() == 1 { "it" } else { "them" }, field, type_args.len()),
             span: span.clone(),
         });
     }
+
+    let (mut types, mut consts) = bind_turbofish(cx, field, own, type_args, span)?;
+    types.extend(u.types.iter().map(|(k, v)| (*k, v.clone())));
+    consts.extend(u.consts.iter().map(|(k, v)| (*k, v.clone())));
     Ok(Some((
         m.name,
-        sig.params.iter().map(|p| subst_param_type(&u.types, &u.consts, p)).collect(),
-        subst_param_type(&u.types, &u.consts, &sig.return_type),
+        sig.params.iter().map(|p| subst_param_type(&types, &consts, p)).collect(),
+        subst_param_type(&types, &consts, &sig.return_type),
     )))
 }
 
@@ -860,63 +880,68 @@ fn infer<'a>(
             // `method_calls` for MIL lowering. When there's no such method this
             // falls through to the ordinary access-then-call path below (which
             // handles a function-pointer struct field called as `x.f()`).
-            if type_args.is_empty() {
-                if let ExprNode::Access { base, field } = &func.value {
-                    let base_ty = infer(cx, base)?;
-                    // a bounded type-param receiver: `x.m(...)` where `x: T` (or
-                    // `*T`) and `T: SomeTrait`. Resolve through the bound and yield
-                    // the trait method's result type. The generic body itself is
-                    // never lowered - monomorphization substitutes `T` and the
-                    // concrete call re-resolves via the path below - so we only
-                    // typecheck here and record nothing in `method_calls`.
-                    if let Some(ret) = resolve_bounded_method(cx, &base_ty, field, args, &span)? {
-                        cx.node_types.insert(metadata.id, ret.clone());
-                        return Ok(ret);
+            if let ExprNode::Access { base, field } = &func.value {
+                let base_ty = infer(cx, base)?;
+                // a bounded type-param receiver: `x.m(...)` where `x: T` (or
+                // `*T`) and `T: SomeTrait`. Resolve through the bound and yield
+                // the trait method's result type. The generic body itself is
+                // never lowered - monomorphization substitutes `T` and the
+                // concrete call re-resolves via the path below - so we only
+                // typecheck here and record nothing in `method_calls`.
+                if let Some(ret) = resolve_bounded_method(cx, &base_ty, field, args, &span)? {
+                    // a trait declares no generic methods, so there is nothing a
+                    // turbofish here could bind - and silently dropping it would
+                    // typecheck a different call than the one written.
+                    if !type_args.is_empty() {
+                        return Err(Error {
+                            msg: format!("trait method '{}' takes no generic arguments", field),
+                            span,
+                        });
                     }
-                    // an associated fn (no `self`) is not callable as
-                    // `value.assoc()`, so it falls through rather than
-                    // misbinding. The member record says which it is outright;
-                    // this used to be inferred by checking whether the first
-                    // parameter looked like a `self` of the right type.
-                    let resolved = match receiver_member(cx, &base_ty, field) {
-                        Some((m, u)) if m.receiver != Receiver::Associated =>
-                            method_signature(cx, &m, &u, field, &span)?,
-                        _ => None,
+                    cx.node_types.insert(metadata.id, ret.clone());
+                    return Ok(ret);
+                }
+                // an associated fn (no `self`) is not callable as
+                // `value.assoc()`, so it falls through rather than
+                // misbinding. The member record says which it is outright;
+                // this used to be inferred by checking whether the first
+                // parameter looked like a `self` of the right type.
+                let resolved = match receiver_member(cx, &base_ty, field) {
+                    Some((m, u)) if m.receiver != Receiver::Associated =>
+                        method_signature(cx, &m, &u, field, type_args, &span)?,
+                    _ => None,
+                };
+                if let Some((target, params, return_type)) = resolved {
+                    let base_is_ptr = matches!(base_ty, Type::Pointer(_));
+
+                    // params[0] is the receiver `self`; args match the rest.
+                    let arg_params = &params[1..];
+                    if args.len() != arg_params.len() {
+                        return Err(Error {
+                            msg: format!("method '{}' expects {} argument(s), got {}",
+                                field, arg_params.len(), args.len()),
+                            span,
+                        });
+                    }
+                    for (param_ty, arg) in arg_params.iter().zip(args.iter()) {
+                        check_expr(cx, param_ty, arg)?;
+                    }
+
+                    // a `*self` method called on a value takes its address;
+                    // otherwise the base passes straight through (a `*self`
+                    // on a `*T`, or a value receiver whose aggregate is
+                    // already handled by pointer).
+                    let self_is_ptr = matches!(params[0], Type::Pointer(_));
+                    let adjust = if self_is_ptr && !base_is_ptr {
+                        RecvAdjust::AddrOf
+                    } else {
+                        RecvAdjust::AsIs
                     };
-                    {
-                        if let Some((target, params, return_type)) = resolved {
-                            let base_is_ptr = matches!(base_ty, Type::Pointer(_));
-
-                            // params[0] is the receiver `self`; args match the rest.
-                            let arg_params = &params[1..];
-                            if args.len() != arg_params.len() {
-                                return Err(Error {
-                                    msg: format!("method '{}' expects {} argument(s), got {}",
-                                        field, arg_params.len(), args.len()),
-                                    span,
-                                });
-                            }
-                            for (param_ty, arg) in arg_params.iter().zip(args.iter()) {
-                                check_expr(cx, param_ty, arg)?;
-                            }
-
-                            // a `*self` method called on a value takes its address;
-                            // otherwise the base passes straight through (a `*self`
-                            // on a `*T`, or a value receiver whose aggregate is
-                            // already handled by pointer).
-                            let self_is_ptr = matches!(params[0], Type::Pointer(_));
-                            let adjust = if self_is_ptr && !base_is_ptr {
-                                RecvAdjust::AddrOf
-                            } else {
-                                RecvAdjust::AsIs
-                            };
-                            cx.method_calls.insert(metadata.id, MethodCall {
-                                target, adjust, param_tys: params, return_type: return_type.clone(),
-                            });
-                            cx.node_types.insert(metadata.id, return_type.clone());
-                            return Ok(return_type);
-                        }
-                    }
+                    cx.method_calls.insert(metadata.id, MethodCall {
+                        target, adjust, param_tys: params, return_type: return_type.clone(),
+                    });
+                    cx.node_types.insert(metadata.id, return_type.clone());
+                    return Ok(return_type);
                 }
             }
 

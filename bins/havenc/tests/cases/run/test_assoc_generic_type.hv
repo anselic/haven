@@ -1,0 +1,48 @@
+// Associated functions (no `self`) on a generic type. The type arguments cannot
+// come from a receiver, because there isn't one - so they are written as a
+// turbofish on the *type*: `Box::<i32>::make(7)`.
+//
+// That form needs its own grammar production. A path stops at `Box` (`::<` is
+// not an identifier segment), so the name being called is split in two by the
+// turbofish, and the trailing `::make` has to be folded back on. The arguments
+// then ride along as the call's own, which is exactly right: `extend` desugars
+// each method to a function whose generics are the impl's, so `Box::<i32>::make`
+// is `Box$make::<i32>`.
+//@ exit: 42
+
+import helpers/cell
+
+struct Box<T> {
+    value: T,
+
+    // inherent, and associated: the body desugars to `extend Box<T>`, so `T`
+    // here is the type's own parameter and the turbofish supplies it.
+    proc make(v: T) Box<T> {
+        return Box::<T> { value: v };
+    }
+
+    proc get(*self) T { return self.value; }
+}
+
+// out of line, on the same generic target.
+extend Box<T> {
+    proc pair(a: T, b: T) Box<T> {
+        return Box::<T> { value: a };
+    }
+}
+
+@export
+proc main() i32 {
+    let a: Box<i32> = Box::<i32>::make(7);
+    // a second instantiation of the same associated function.
+    let b: Box<u64> = Box::<u64>::make(30u64);
+    let c: Box<i32> = Box::<i32>::pair(5, 9);
+
+    // through a module qualifier: `cell::Cell::<i32>::of`, four segments with a
+    // turbofish in the middle of them.
+    let d: cell::Cell<i32> = cell::Cell::<i32>::of(-1);
+
+    printf::<u64>("%llu\n", b.get());
+
+    return a.get() + c.get() + d.get() + 31;   // 7 + 5 - 1 + 31
+}

@@ -1,0 +1,16 @@
+// An associated function has no receiver, so the only way to reach it is to
+// name its type - and a path is a list of identifiers, which `[T]` is not.
+// There is no `<[T]>::make()` production, so this would emit a symbol with no
+// way in. A *method* on the same target is fine: it is found through `self`.
+//@ error: cannot be reached
+
+extend [T] {
+    proc make() [T] { return []; }
+
+    proc first(self) i32 { return 0; }
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

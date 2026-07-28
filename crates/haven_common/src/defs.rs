@@ -164,6 +164,51 @@ impl TyHead {
         })
     }
 
+    /// The head a built-in type *keyword* names, for a type-qualified path in
+    /// expression position: the `i32` of `i32::from(x)`.
+    ///
+    /// In type position the parser has already mapped these names to a
+    /// [`Type`], so [`Self::of`] suffices; in expression position a path is
+    /// just a list of identifiers and nothing has looked at them yet. The list
+    /// deliberately mirrors the scalar table in `parse_type` — these are
+    /// keywords, so one name must not mean two things depending on where it is
+    /// written.
+    ///
+    /// The structural heads have no entry: `[i32]` is not an identifier, so
+    /// there is no path that could name one. Reaching a slice's associated
+    /// functions would need a `<[i32]>::` form, which the grammar has no
+    /// production for.
+    pub fn of_builtin(name: &str) -> Option<Self> {
+        Some(match name {
+            "void" => TyHead::Void,
+            "bool" => TyHead::Bool,
+            "i8"   => TyHead::Int8,
+            "i32"  => TyHead::Int32,
+            "i64"  => TyHead::Int64,
+            "u8"   => TyHead::Uint8,
+            "u32"  => TyHead::Uint32,
+            "u64"  => TyHead::Uint64,
+            "f32"  => TyHead::Float32,
+            "f64"  => TyHead::Float64,
+            "str"  => TyHead::Str,
+            _ => return None,
+        })
+    }
+
+    /// Whether a written path can name this head — what an associated function
+    /// needs, since it has no receiver to be found through: `Point::new()`,
+    /// `i32::zero()`.
+    ///
+    /// The structural heads cannot. A path is a list of identifiers and `[i32]`
+    /// is not one, so reaching a slice's associated functions would need a
+    /// `<[i32]>::` form the grammar has no production for. A *method* on a
+    /// structural target is unaffected — it is found through its receiver.
+    pub fn is_nameable(self) -> bool {
+        !matches!(self,
+            TyHead::Pointer | TyHead::Slice | TyHead::Array
+            | TyHead::Simd | TyHead::Function)
+    }
+
     /// An identifier-safe fragment naming this head, for building a desugared
     /// method's symbol. Not injective across definitions (every struct is
     /// `ty`), which is fine: the module resolver uniquifies within a module and

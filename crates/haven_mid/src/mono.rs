@@ -545,6 +545,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         &mut self,
         base: &Expr<'a>,
         field: &'a str,
+        type_args: &[GenericArg<'a>],
         new_args: &[Expr<'a>],
         b: &Bindings<'a>,
         span: &Span,
@@ -558,17 +559,22 @@ impl<'p, 'a> Mono<'p, 'a> {
         // dispatch by head, then through one pointer level - the same two-step
         // the typechecker uses, so both agree on which impl a receiver picks.
         let (m, u) = member_of(&self.members, &recv_ty, field)?;
-        if m.generics.is_empty() || m.receiver == Receiver::Associated { return None; }
+        if m.receiver == Receiver::Associated { return None; }
+        // not a template: a method of a concrete `extend` that declares no
+        // generics of its own needs no instance, and the post-mono typecheck
+        // resolves it through the member table exactly as before.
         if !self.templates.contains_key(m.name) { return None; }
 
         // the instance's arguments, in the order the desugared function declares
-        // its parameters - which is the impl's own list, since a method that adds
-        // parameters of its own is rejected at the call site by the typechecker.
+        // its parameters: the impl's own list first, bound by unifying against
+        // the receiver, then whatever the method declares for itself, which only
+        // the turbofish can supply. The typechecker has already checked that the
+        // two together account for every parameter.
         //
-        // Each is put through `subst_ty` so a *nested* generic argument collapses
-        // to its instance (`Buf<Vec<i32>>` binds `T = Vec$i32`, not `Vec<i32>`),
-        // matching how every other request spells its arguments - two spellings
-        // of one type would otherwise mint the instance twice.
+        // Each impl argument is put through `subst_ty` so a *nested* generic one
+        // collapses to its instance (`Buf<Vec<i32>>` binds `T = Vec$i32`, not
+        // `Vec<i32>`), matching how every other request spells its arguments -
+        // two spellings of one type would otherwise mint the instance twice.
         let mut cargs: Vec<ConcreteArg<'a>> = Vec::with_capacity(m.generics.len());
         for g in &m.generics {
             cargs.push(match g {
@@ -577,6 +583,12 @@ impl<'p, 'a> Mono<'p, 'a> {
                     ConcreteArg::Type(self.subst_ty(&bound, &Bindings::empty()))
                 }
                 GenericParam::Const(name, _) => ConcreteArg::Const(u.consts.get(name)?.expect_lit()),
+            });
+        }
+        for ta in type_args {
+            cargs.push(match self.subst_targ(ta, b) {
+                GenericArg::Type(t) => ConcreteArg::Type(t),
+                GenericArg::Const(cv) => ConcreteArg::Const(cv.expect_lit()),
             });
         }
         let mangled = self.request(m.name, cargs, span.clone());
@@ -609,16 +621,16 @@ impl<'p, 'a> Mono<'p, 'a> {
                 let new_args: Vec<Expr<'a>> =
                     args.iter().map(|a| self.rebuild_expr(a, b)).collect();
 
-                // a method from a generic `extend` needs its instance minted and
-                // the call pointed at it; everything else falls through to the
-                // ordinary paths below.
-                if type_args.is_empty() {
-                    if let ExprNode::Access { base, field } = &func.value {
-                        if let Some(call) =
-                            self.generic_method_call(base, field, &new_args, b, &expr.span)
-                        {
-                            return Metadata::new(call, expr.span.clone());
-                        }
+                // a method whose desugared function is a template needs its
+                // instance minted and the call pointed at it; everything else
+                // falls through to the ordinary paths below. A turbofish here
+                // belongs to the method's own parameters, so it goes with it
+                // rather than staying on the rewritten call.
+                if let ExprNode::Access { base, field } = &func.value {
+                    if let Some(call) =
+                        self.generic_method_call(base, field, type_args, &new_args, b, &expr.span)
+                    {
+                        return Metadata::new(call, expr.span.clone());
                     }
                 }
                 // sub type params inside the turbofish (user generic calls +

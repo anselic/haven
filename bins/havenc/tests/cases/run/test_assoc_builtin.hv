@@ -1,0 +1,37 @@
+// Associated functions on a built-in type: `i32::zero()`, `u64::wide()`.
+//
+// A path in expression position is just a list of identifiers, so nothing has
+// looked at `i32` by the time it reaches name resolution - unlike type position,
+// where the parser mapped it to a `Type` long before. Resolution therefore has
+// to recognise the built-in names itself, and it tries them *before* the module
+// type scope: they are keywords, so a `struct i32` must not make one name mean
+// two things depending on where it is written.
+//@ exit: 12
+
+extend i32 {
+    proc zero() i32 { return 0; }
+    // an associated function with generics of its own, on a primitive target:
+    // the impl binds nothing, so the whole turbofish is the method's.
+    proc pick<T>(a: T, b: T) T { return a; }
+}
+
+extend u64 {
+    proc wide() u64 { return 12u64; }
+}
+
+extend bool {
+    proc yes() bool { return true; }
+}
+
+@export
+proc main() i32 {
+    let z: i32 = i32::zero();
+    let w: u64 = u64::wide();
+    let p: i32 = i32::pick::<i32>(5, 9);
+
+    if (bool::yes()) {
+        printf::<u64>("%llu\n", w);
+        printf::<i32>("%d\n", p);
+    }
+    return z + 12;
+}
