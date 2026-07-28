@@ -503,18 +503,6 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
         // short-circuiting && and ||
         ExprNode::Binary { op: op @ (BinaryOp::And | BinaryOp::Or), left, right } => {
             let lhs = lower_expr(cx, left);
-            // branch needs a Register, but lhs might be a bare Const(Bool) (e.g. `true && foo()`)
-            let lhs_reg = match lhs {
-                Value::Reg(r) => r,
-                v => {
-                    let r = cx.fresh_reg();
-                    cx.emit(Inst::Alloca { dst: r, ty: Type::Bool, align: None });
-                    cx.emit(Inst::Store { ptr: r, val: v, ty: Type::Bool, align: None });
-                    let s = cx.fresh_reg();
-                    cx.emit(Inst::Load { dst: s, ptr: r, ty: Type::Bool, align: None });
-                    s
-                }
-            };
 
             let result_ptr = cx.fresh_reg();
             cx.emit(Inst::Alloca { dst: result_ptr, ty: Type::Bool, align: None });
@@ -526,8 +514,8 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             // && : lhs false -> skip rhs, result = false
             // || : lhs true  -> skip rhs, result = true
             cx.terminate(match op {
-                BinaryOp::And => Terminator::Branch { cond: lhs_reg, then_block: rhs_block, else_block: short_circuit_block },
-                BinaryOp::Or  => Terminator::Branch { cond: lhs_reg, then_block: short_circuit_block, else_block: rhs_block },
+                BinaryOp::And => Terminator::Branch { cond: lhs, then_block: rhs_block, else_block: short_circuit_block },
+                BinaryOp::Or  => Terminator::Branch { cond: lhs, then_block: short_circuit_block, else_block: rhs_block },
                 _ => unreachable!(),
             });
 

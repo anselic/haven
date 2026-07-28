@@ -1,0 +1,46 @@
+// A branch condition that folds to a bare constant rather than a register.
+//
+// `Terminator::Branch` used to type its `cond` as a `Register`, so every branch
+// site had to materialize a constant into one first. `while` and the `&&`/`||`
+// short-circuit lowering each carried their own alloca/store/load to do that;
+// `if` had no such path and hit `unreachable!()` in mil lowering, so a bare
+// `if (true)` panicked the compiler. `cond` is a `Value` now and branches on the
+// immediate directly, so the constant reaches the terminator unwrapped.
+//
+// `true && foo()` also pairs a constant lhs with an rhs that must still run,
+// which the existing short-circuit fixture never exercises (both of its cases
+// skip the rhs).
+
+proc foo() bool {
+    println("foo");
+    return true;
+}
+
+@export
+proc main() i32 {
+    if (true) {
+        println("then");
+    }
+
+    if (false) {
+        println("unreachable");
+    } else {
+        println("else");
+    }
+
+    // nested, so the inner branch lowers inside an already-branched block
+    if (true) {
+        if (false) {
+            println("unreachable");
+        } else {
+            println("nested else");
+        }
+    }
+
+    // constant lhs, rhs still evaluated
+    if (true && foo()) {
+        println("and");
+    }
+
+    return 0;
+}

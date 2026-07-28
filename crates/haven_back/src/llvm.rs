@@ -526,7 +526,7 @@ fn emit_terminator<'a>(cx: &mut EmitCtx<'a>, term: Terminator<'a>) {
         Return(Some((value, ty))) => emitln!(cx, "    ret {} {}", emit_type(&ty, &cx.types), emit_value(value)),
         Jump(label) => emitln!(cx, "    br label %{label}"),
         Branch { cond, then_block, else_block } =>
-            emitln!(cx, "    br i1 {cond}, label %{then_block}, label %{else_block}"),
+            emitln!(cx, "    br i1 {}, label %{then_block}, label %{else_block}", emit_value(cond)),
         Switch { value, value_ty, default, cases } => {
             let ty = emit_type(&value_ty, &cx.types);
             let arms = cases.iter()

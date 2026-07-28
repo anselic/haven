@@ -99,16 +99,12 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             cx.emit(Inst::Comment(format!("if {}", condition.value)));
 
             let cond_val = lower_expr(cx, condition);
-            let cond_reg = match cond_val {
-                Value::Reg(r) => r,
-                _ => unreachable!(),
-            };
 
             let then_block = cx.fresh_block();
             let else_block = cx.fresh_block();
             let merge_block = cx.fresh_block();
 
-            cx.terminate(Terminator::Branch { cond: cond_reg, then_block, else_block });
+            cx.terminate(Terminator::Branch { cond: cond_val, then_block, else_block });
 
             // then branch
             cx.current_block = then_block;
@@ -146,21 +142,8 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             cx.current_block = cond_block;
             cx.emit(Inst::Comment(format!("while {}", condition.value)));
             let cond_val = lower_expr(cx, condition);
-            let cond_reg = match cond_val {
-                Value::Reg(r) => r,
-                // if simple expression (e.g. while(true)) then we have to get
-                // the value into a register first to branch on it
-                v => {
-                    let r = cx.fresh_reg();
-                    cx.emit(Inst::Alloca { dst: r, ty: Type::Bool, align: None });
-                    cx.emit(Inst::Store { ptr: r, val: v, ty: Type::Bool, align: None });
-                    let s = cx.fresh_reg();
-                    cx.emit(Inst::Load { dst: s, ptr: r, ty: Type::Bool, align: None });
-                    s
-                }
-            };
             cx.terminate(Terminator::Branch {
-                cond: cond_reg,
+                cond: cond_val,
                 then_block: body_block,
                 else_block: merge_block,
             });

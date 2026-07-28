@@ -151,8 +151,10 @@ pub enum Terminator<'a> {
     Jump(BlockId),
 
     // br i1 %cond, label %then, label %else
+    // the condition is a Value, not a Register: a constant condition (`if (true)`,
+    // `while (true)`, `true && f()`) branches on the immediate directly.
     Branch {
-        cond: Register,
+        cond: Value,
         then_block: BlockId,
         else_block: BlockId,
     },
