@@ -1,0 +1,16 @@
+// `pub import` re-exports a symbol, so an importer of the re-exporting module
+// sees it as though it were declared there.
+//
+// The chain is base -> mid -> top, and this file imports only `top`, which
+// declares none of these itself. A re-export changes visibility and nothing
+// else: `Tag` here is the *same* type as `helpers/reexport_base`'s, which is
+// what lets a value built by `tag_of` be passed to `mid_double`.
+//@ exit: 84
+
+import helpers/reexport_top { Tag, tag_of, mid_double }
+
+@export
+proc main() i32 {
+    let t: Tag = tag_of(42);
+    return mid_double(&t);
+}

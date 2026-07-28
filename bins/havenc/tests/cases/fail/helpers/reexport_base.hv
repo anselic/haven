@@ -1,0 +1,6 @@
+pub struct Tag { id: i32 }
+
+pub proc tag_of(id: i32) Tag { return Tag { id: id }; }
+
+// deliberately not re-exported by `reexport_mid`.
+pub proc base_only() i32 { return 1; }

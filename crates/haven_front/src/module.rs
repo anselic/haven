@@ -382,6 +382,29 @@ enum TypeHead<'a> {
     Param(&'a str),
 }
 
+/// Which half of a [`SymTab`] a lookup means. Lets the re-export pass do the
+/// same thing to both namespaces without duplicating the loop - a re-exported
+/// name lands in whichever namespace(s) it exists in, exactly as a plain
+/// selective import does.
+#[derive(Clone, Copy)]
+enum Namespace { Fns, Structs }
+
+impl Namespace {
+    fn get<'a>(self, st: &SymTab<'a>, sym: &str) -> Option<Sym<'a>> {
+        match self {
+            Namespace::Fns => st.fns.get(sym).copied(),
+            Namespace::Structs => st.structs.get(sym).copied(),
+        }
+    }
+
+    fn get_mut<'t, 'a>(self, st: &'t mut SymTab<'a>) -> &'t mut HashMap<&'a str, Sym<'a>> {
+        match self {
+            Namespace::Fns => &mut st.fns,
+            Namespace::Structs => &mut st.structs,
+        }
+    }
+}
+
 /// Holds the per-module scopes and error sink while rewriting a module's AST in
 /// place.
 struct Rewriter<'x, 'a> {
@@ -1085,6 +1108,59 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
         .map(|m| build_symtab(m, &mut defs, arena, &mut errs))
         .collect();
     let prelude_id = if has_prelude { Some(0usize) } else { None };
+
+    // re-exports: fold every `pub import`'s symbols into the importing module's
+    // own export set, so a third module importing it sees them.
+    //
+    // This has to happen before any module's scopes are built, since a scope is
+    // built from other modules' *export sets* - and it runs to a fixpoint rather
+    // than in one pass, because a re-export can itself be re-exported (A pulls a
+    // symbol from B, which pulled it from C) and module order says nothing about
+    // which comes first. The set only grows and is bounded by modules x names,
+    // so it terminates; an import cycle just stops adding.
+    //
+    // Nothing is copied but a visibility flag: the entry keeps the `DefId` and
+    // emitted name it already had, which is what makes a re-exported type the
+    // *same* type rather than a look-alike.
+    let mut symtabs = symtabs;
+    loop {
+        let mut changed = false;
+        for id in 0..modules.len() {
+            for (imp, key) in modules[id].imports.iter().zip(&modules[id].import_keys) {
+                if !imp.is_pub { continue; }
+                let Some(key) = key else { continue };
+                let Some(syms) = &imp.symbols else { continue };
+                let target = seen[key];
+                for sym in syms {
+                    for ns in [Namespace::Fns, Namespace::Structs] {
+                        let Some(entry) = ns.get(&symtabs[target], sym).filter(|e| e.is_pub)
+                        else { continue };
+                        // a module's own declaration wins over anything it
+                        // re-exports, exactly as it wins over a plain import.
+                        let dst = ns.get_mut(&mut symtabs[id]);
+                        if dst.contains_key(sym) { continue; }
+                        dst.insert(sym, entry);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed { break; }
+    }
+
+    // a whole-module `pub import` has no symbols to re-export - it binds a
+    // qualifier, and passing a qualifier on to *this* module's importers would
+    // need module-level namespaces the resolver doesn't have yet. Reject it
+    // outright rather than silently doing nothing.
+    for m in &modules {
+        for imp in &m.imports {
+            if imp.is_pub && imp.symbols.is_none() {
+                errs.push(Error::new(imp.span.clone(), format!(
+                    "`pub import {}` re-exports nothing: a whole-module import binds                      the qualifier '{}' rather than any names. List the symbols to                      re-export, e.g. `pub import {} {{ ... }}`",
+                    imp.path.join("/"), imp.path.last().unwrap(), imp.path.join("/"))));
+            }
+        }
+    }
 
     // pass 1: build every module's name-resolution scopes (owned; values are all
     // `&'a`, so `all_scopes` borrows nothing from `modules`/`symtabs`).

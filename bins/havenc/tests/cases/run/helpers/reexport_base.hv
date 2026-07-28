@@ -1,0 +1,9 @@
+// The module a re-export ultimately comes from.
+pub struct Tag { id: i32 }
+
+pub proc tag_of(id: i32) Tag { return Tag { id: id }; }
+
+pub proc tag_id(t: *Tag) i32 { return t.id; }
+
+// not re-exported anywhere; stays reachable only from here.
+pub proc base_only() i32 { return 1; }

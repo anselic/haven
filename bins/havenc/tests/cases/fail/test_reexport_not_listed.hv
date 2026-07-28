@@ -1,0 +1,9 @@
+// A `pub import` re-exports exactly the symbols it lists. `helpers/reexport_mid`
+// re-exports `Tag` and `tag_of` from `reexport_base` but not `base_only`, so
+// `base_only` stays reachable only through the module that declares it.
+//@ error: module 'helpers/reexport_mid' has no exported symbol 'base_only'
+
+import helpers/reexport_mid { base_only }
+
+@export
+proc main() i32 { return base_only(); }

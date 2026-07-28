@@ -1289,8 +1289,9 @@ fn parse_import<'tks, 'src: 'tks>()
     // TODO: path segments are `var` only, so a segment that lexes to a keyword
     // (`import std/const`) won't parse. and `{}` is `.at_least(1)`, so an empty
     // selective import is a hard error rather than a no-op.
-    just(Token::Import)
-        .ignore_then(
+    just(Token::Pub).or_not().map(|p| p.is_some())
+        .then_ignore(just(Token::Import))
+        .then(
             var.separated_by(just(Token::BinaryOp(BinaryOp::Div)))
                 .at_least(1)
                 .collect::<Vec<_>>()
@@ -1303,7 +1304,7 @@ fn parse_import<'tks, 'src: 'tks>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
                 .or_not()
         )
-        .map_with(|(path, symbols), e| Import { span: e.span(), path, symbols })
+        .map_with(|((is_pub, path), symbols), e| Import { span: e.span(), path, symbols, is_pub })
         .boxed()
 }
 

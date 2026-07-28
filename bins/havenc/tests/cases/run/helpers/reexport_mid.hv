@@ -1,0 +1,7 @@
+// Re-exports part of `reexport_base`'s surface as though it were its own, and
+// adds one symbol of its own. `base_only` is deliberately NOT re-exported.
+pub import reexport_base { Tag, tag_of }
+
+pub proc mid_double(t: *Tag) i32 { return tag_id(t) * 2; }
+
+import reexport_base { tag_id }

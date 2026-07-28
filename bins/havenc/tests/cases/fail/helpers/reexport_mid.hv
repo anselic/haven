@@ -1,0 +1,2 @@
+// re-exports part of `reexport_base`'s surface, but not `base_only`.
+pub import reexport_base { Tag, tag_of }

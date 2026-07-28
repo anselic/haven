@@ -1,0 +1,4 @@
+// A re-export of a re-export: `Tag` reaches here through `reexport_mid`, which
+// itself never declared it. Proves the fold runs to a fixpoint rather than one
+// pass deep.
+pub import reexport_mid { Tag, tag_of, mid_double }

@@ -1,0 +1,10 @@
+// A whole-module `pub import` has no symbols to re-export: it binds the
+// qualifier `math`, and passing a qualifier on to this module's own importers
+// needs module-level namespaces the resolver doesn't have yet. Rejected rather
+// than silently doing nothing.
+//@ error: re-exports nothing
+
+pub import std/math
+
+@export
+proc main() i32 { return 0; }
