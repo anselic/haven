@@ -274,10 +274,14 @@ pub(crate) fn check_generic_call<'a>(
             let Some(arg_ty) = type_bindings.get(pname) else { continue };
             for bound in bounds {
                 let ok = match arg_ty {
-                    Type::Named { def, .. } => cx.impls.contains(&(*def, bound.def)),
+                    // a forwarded type param satisfies a bound only by carrying
+                    // it; there is no impl to consult until it is substituted.
                     Type::Param(fp) =>
                         cx.generic_bounds.get(fp).is_some_and(|bs| bs.contains(&bound.def)),
-                    _ => false,
+                    // anything with a head can be covered by an impl - which now
+                    // includes primitives and structural types, so `[T]` may
+                    // satisfy a `Display` bound just as a struct does.
+                    concrete => cx.implements(concrete, bound.def),
                 };
                 if !ok {
                     return Err(Error {

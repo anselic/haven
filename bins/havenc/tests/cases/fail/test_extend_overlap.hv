@@ -1,0 +1,19 @@
+// Dispatch narrows a receiver to one impl by its type *constructor*, so every
+// slice reaches the same `(Slice, "show")` slot. Two `extend` blocks claiming it
+// would be ambiguous at every call site - `extend [i32]` here is trying to
+// specialize `extend [T]`, which is exactly what Rust forbids without the
+// unstable `specialization` feature.
+//@ error: is already defined for this type
+
+extend [T] {
+    proc show(*self) i32 { return 0; }
+}
+
+extend [i32] {
+    proc show(*self) i32 { return 1; }
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

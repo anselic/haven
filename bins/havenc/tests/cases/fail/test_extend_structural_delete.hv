@@ -1,0 +1,18 @@
+// `Delete` is the one trait whose subject must be a named type.
+//
+// A destructor is called from code the ownership pass synthesizes after
+// monomorphization, so the specialized `delete` has to already exist - and mono
+// mints one per generic *type instance*, an event a structural type has no
+// equivalent of. Allowing this would compile to a silent leak, so it is an
+// error. (It is also the wrong thing to want: a slice is a borrowed view, and
+// destroying one would destroy something it does not own.)
+//@ error: cannot implement `Delete`
+
+extend [T]: Delete {
+    proc delete(*self) {}
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

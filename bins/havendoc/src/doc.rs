@@ -255,7 +255,18 @@ fn item_name<'a>(node: &TopLevelNode<'a>) -> &'a str {
         | TopLevelNode::Global { name, .. }
         | TopLevelNode::Enum { name, .. }
         | TopLevelNode::Trait { name, .. } => name,
-        TopLevelNode::Extend { target, .. } => target,
+        // an `extend` target is a type, not a name: `[T]` and `*Point` have no
+        // identifier to report. Group those under their constructor, and a named
+        // target under the name it extends, which is what a reader looks for.
+        TopLevelNode::Extend { target, .. } => match target {
+            Type::Path { path, .. } => path.last(),
+            Type::Slice(_) => "[]",
+            Type::Array(..) => "[;]",
+            Type::Pointer(_) => "*",
+            Type::Simd(..) => "simd",
+            Type::Function { .. } => "proc",
+            _ => "builtin",
+        },
     }
 }
 

@@ -21,7 +21,7 @@
       "patterns": [
         {
           "name": "keyword.control.haven",
-          "match": "\\b(let|if|else|return|while|break|continue|proc|extern|const|struct|enum|import|pub|match)\\b"
+          "match": "\\b(let|if|else|return|while|break|continue|proc|extern|const|struct|enum|import|pub|match|extend|trait)\\b"
         },
         {
           "name": "constant.language.haven",

@@ -1,0 +1,42 @@
+// Methods on a generic type. The `extend` target is `Box<T>`, so `self` is a
+// `Box<T>` and the desugared method is generic in the type's own `T` -
+// monomorphization mints one instance of the method per instance of the type.
+// Inherent methods written in the type's body get the same treatment: the body
+// of `struct Box<T>` desugars to `extend Box<T>`, not to `extend Box`.
+//@ exit: 9
+
+struct Box<T> {
+    value: T,
+
+    // inherent, on a generic type: `self` is a `*Box<T>`, not a `*Box`.
+    proc get(*self) T {
+        return self.value;
+    }
+}
+
+// the same type extended out of line. `T` is inferred from the target: it
+// appears as an argument of `Box<...>` and names no type in scope.
+extend Box<T> {
+    proc replace(*self, v: T) T {
+        let old: T = self.get();
+        self.value = v;
+        return old;
+    }
+}
+
+proc box_of<T>(v: T) Box<T> {
+    return Box::<T> { value: v };
+}
+
+@export
+proc main() i32 {
+    let a: Box<i32> = box_of::<i32>(4);
+    // two instances of `Box`, so two instances of each of its methods.
+    let b: Box<u64> = box_of::<u64>(100u64);
+
+    let old: i32 = a.replace(5);          // 4, and `a` now holds 5
+    printf::<i32>("%d\n", old);
+    printf::<u64>("%llu\n", b.get());     // 100
+
+    return old + a.get();                 // 4 + 5 = 9
+}

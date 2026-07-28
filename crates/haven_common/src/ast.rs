@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use crate::defs::DefId;
+use crate::defs::{DefId, TyHead};
 
 /// Index of a source file in the [`crate::diag::Files`] table. Every token and
 /// every AST node carries one inside its `Span`, so it is deliberately a `Copy`
@@ -452,6 +452,73 @@ impl<'a> Display for Type<'a> {
     }
 }
 
+/// The bindings a successful [`unify`] produced: each of the pattern's free
+/// parameters mapped to what the concrete type had in that position.
+#[derive(Clone, Debug, Default)]
+pub struct Unified<'a> {
+    pub types: std::collections::HashMap<&'a str, Type<'a>>,
+    pub consts: std::collections::HashMap<&'a str, ConstVal<'a>>,
+}
+
+/// Match `concrete` against `pattern`, whose free names are `params`, binding
+/// each parameter to whatever `concrete` has in that position. `Vec<T>` against
+/// `Vec<i32>` binds `T = i32`; `[T]` against `[[u8]]` binds `T = [u8]`.
+///
+/// This is what makes a structural `extend` dispatch: [`TyHead`] narrows a
+/// receiver to one impl, and this recovers the arguments the head threw away.
+/// One-directional by design - only the pattern may contain parameters, and a
+/// parameter in `concrete` (an unsubstituted `T` inside a generic body) matches
+/// nothing, which is correct: such a call is checked against the *bound*, not
+/// against an impl.
+///
+/// A parameter appearing twice must bind consistently, so `extend Pair<T, T>`
+/// rejects `Pair<i32, f32>`.
+///
+/// [`TyHead`]: crate::defs::TyHead
+pub fn unify<'a>(
+    pattern: &Type<'a>,
+    concrete: &Type<'a>,
+    params: &[&'a str],
+    out: &mut Unified<'a>,
+) -> bool {
+    // a const position binds like a type one, but only a literal is concrete
+    // enough to bind to.
+    fn unify_cv<'a>(p: &ConstVal<'a>, c: &ConstVal<'a>, params: &[&'a str], out: &mut Unified<'a>) -> bool {
+        match (p, c) {
+            (ConstVal::Param(n), c) if params.contains(n) => match out.consts.get(n) {
+                Some(prev) => prev == c,
+                None => { out.consts.insert(n, c.clone()); true }
+            },
+            _ => p == c,
+        }
+    }
+    match (pattern, concrete) {
+        (Type::Param(n), c) if params.contains(n) => match out.types.get(n) {
+            Some(prev) => prev == c,
+            None => { out.types.insert(n, c.clone()); true }
+        },
+        (Type::Named { def: a, args: pa }, Type::Named { def: b, args: ca }) => {
+            if a != b || pa.len() != ca.len() { return false; }
+            pa.iter().zip(ca).all(|(p, c)| match (p, c) {
+                (GenericArg::Type(p), GenericArg::Type(c)) => unify(p, c, params, out),
+                (GenericArg::Const(p), GenericArg::Const(c)) => unify_cv(p, c, params, out),
+                _ => false,
+            })
+        }
+        (Type::Pointer(p), Type::Pointer(c)) | (Type::Slice(p), Type::Slice(c)) =>
+            unify(p, c, params, out),
+        (Type::Array(p, pn), Type::Array(c, cn)) | (Type::Simd(p, pn), Type::Simd(c, cn)) =>
+            unify(p, c, params, out) && unify_cv(pn, cn, params, out),
+        (Type::Function { params: pp, return_type: pr },
+         Type::Function { params: cp, return_type: cr }) =>
+            pp.len() == cp.len()
+                && pp.iter().zip(cp).all(|(p, c)| unify(p, c, params, out))
+                && unify(pr, cr, params, out),
+        // scalars, `str`, `void`: no structure to descend into.
+        (p, c) => p == c,
+    }
+}
+
 /// A reference to a named type, in an expression or a pattern.
 ///
 /// The parser records only what was written; `def` starts as
@@ -871,9 +938,16 @@ pub struct TraitMethod<'a> {
 /// implements every method of `Trait` and registers the impl so a `T: Trait`
 /// bound can be checked at a generic call site.
 #[derive(Clone, Debug)]
-pub struct ImplDecl {
-    /// The implementing type, and the trait it conforms to.
-    pub target: DefId,
+pub struct ImplDecl<'a> {
+    /// The implementing type as written, resolved: `i32`, `[T]`, `Vec<T>`. This
+    /// is no longer a `DefId`, because a structural or primitive target has no
+    /// definition to name — see [`TyHead`](crate::defs::TyHead).
+    pub self_ty: Type<'a>,
+    /// `self_ty`'s head, precomputed: what a candidate receiver is looked up by.
+    pub head: TyHead,
+    /// The impl's own type parameters (the `T` of `extend [T]`), inferred from
+    /// the free names in `self_ty`. Empty for a fully concrete target.
+    pub generics: Vec<GenericParam<'a>>,
     pub trait_: DefId,
     pub span: Span,
 }
@@ -966,13 +1040,17 @@ pub enum TopLevelNode<'a> {
 
     /// An `extend Type { ... }` (or `extend Type: Trait { ... }`) block adding
     /// methods to `target`. Inherent methods written directly in a struct/enum
-    /// body are also parsed into one of these (with `trait_: None`). Trait
-    /// conformance is not enforced in Stage 1 - `trait_` is recorded for later
-    /// stages but otherwise ignored. The module resolver desugars every method
-    /// into a top-level `Function` (see `lower_methods`) before typecheck, so no
-    /// stage past front-end module resolution ever observes this variant.
+    /// body are also parsed into one of these (with `trait_: None`). The module
+    /// resolver desugars every method into a top-level `Function` (see
+    /// `lower_methods`) before typecheck, so no stage past front-end module
+    /// resolution ever observes this variant.
+    ///
+    /// `target` is a full type, not a name: `i32`, `[T]` and `Vec<T>` are all
+    /// extensible, so there is nothing to look up in a name table. Any type
+    /// parameters it mentions are *inferred* rather than declared in a binder —
+    /// see `lower_methods`'s `impl_generics`.
     Extend {
-        target: &'a str,
+        target: Type<'a>,
         trait_: Option<&'a str>,
         methods: Vec<Method<'a>>,
     },

@@ -1208,10 +1208,14 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         }, methods));
 
     // `extend Type { methods }` or `extend Type: Trait { methods }`. `extend` isn't
-    // a reserved keyword (it lexes as a `Var`), so match it by text. The trait name
-    // is recorded but unchecked in Stage 1.
+    // a reserved keyword (it lexes as a `Var`), so match it by text.
+    //
+    // The target is a full type rather than a name, which is what admits `i32`,
+    // `[T]` and `Vec<T>` alongside `Point`. The type grammar stops before the
+    // `:` and the `{`, so neither the trait nor the body needs a delimiter to
+    // separate it from the target.
     let extend_ = select_ref! { Token::Var(s) if *s == "extend" => () }
-        .ignore_then(var.map(|s| *s))
+        .ignore_then(parse_type())
         .then(just(Token::Colon).ignore_then(var.map(|s| *s)).or_not())
         .then(
             parse_method()
@@ -1260,9 +1264,22 @@ fn parse_toplevel<'tks, 'src: 'tks>()
             // targeting that type, emitted right after the type node.
             let mut out = vec![Metadata::new(node, span.clone())];
             if !methods.is_empty() {
-                let target = match &out[0].value {
-                    TopLevelNode::Struct { name, .. } | TopLevelNode::Enum { name, .. } => *name,
+                // the target is the type *applied to its own parameters*, so a
+                // generic type's inherent methods desugar exactly as if the
+                // author had written `extend Vec<T> { ... }` out of line - the
+                // block's `self` is a `Vec<T>`, not a bare `Vec`.
+                let (name, generics) = match &out[0].value {
+                    TopLevelNode::Struct { name, generics, .. }
+                    | TopLevelNode::Enum { name, generics, .. } => (*name, generics),
                     _ => unreachable!("only struct/enum bodies carry inherent methods"),
+                };
+                let target = Type::Path {
+                    path: Path::single(name),
+                    args: generics.iter().map(|g| match g {
+                        GenericParam::Type { name, .. } =>
+                            GenericArg::Type(Type::path(Path::single(name))),
+                        GenericParam::Const(name, _) => GenericArg::Const(ConstVal::Param(name)),
+                    }).collect(),
                 };
                 out.push(Metadata::new(
                     TopLevelNode::Extend { target, trait_: None, methods },

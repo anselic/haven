@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use haven_common::ast::*;
 use crate::intrinsics::Intrinsic;
-use haven_common::defs::DefId;
+use haven_common::defs::{DefId, Member};
 use super::context::{Context, MethodCall, RecvAdjust};
 use super::generics::{bind_generics, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self};
 use super::enums::{enum_variant, split_enum_variant, enum_variant_ctor, check_variant_pattern};
@@ -17,6 +17,68 @@ fn is_place(expr: &Expr<'_>) -> bool {
         | ExprNode::Access { .. }
         | ExprNode::Index { .. }
         | ExprNode::Unary { op: UnaryOp::Deref, .. })
+}
+
+/// The `extend` method `field` a receiver of type `base_ty` dispatches to, with
+/// the bindings that specialize the impl to it.
+///
+/// The receiver is tried as written first, then through one level of pointer, so
+/// `p.area()` on a `*Point` still finds `extend Point`'s method — while an
+/// `extend *T` block, which the head machinery now makes expressible, gets first
+/// refusal on a pointer receiver.
+pub(crate) fn receiver_member<'a>(cx: &Context<'a>, base_ty: &Type<'a>, field: &str)
+    -> Option<(Member<'a>, Unified<'a>)>
+{
+    let direct = cx.member_for(base_ty, field);
+    let found = match (direct, base_ty) {
+        (None, Type::Pointer(inner)) => cx.member_for(inner, field),
+        (found, _) => found,
+    };
+    found.map(|(m, u)| (m.clone(), u))
+}
+
+/// A member's signature as seen at one call site: its parameter types (`self`
+/// first) and return type, with the impl's parameters bound to whatever the
+/// receiver supplied.
+///
+/// A method of a generic `extend` is a generic *function*, so its signature
+/// comes from `generic_fns` and needs substituting; a method of a concrete one
+/// is an ordinary value-scope binding and is already in final form.
+fn method_signature<'a>(
+    cx: &Context<'a>,
+    m: &Member<'a>,
+    u: &Unified<'a>,
+    field: &str,
+    span: &Span,
+) -> Result<Option<(&'a str, Vec<Type<'a>>, Type<'a>)>, Error> {
+    if m.generics.is_empty() {
+        return Ok(match cx.lookup(m.name) {
+            Some((_, Type::Function { params, return_type })) =>
+                Some((m.name, params.clone(), (**return_type).clone())),
+            _ => None,
+        });
+    }
+    let Some(sig) = cx.generic_fns.get(m.name) else { return Ok(None) };
+    // unification binds the impl's own parameters and nothing else, so a method
+    // that declares parameters of its own has some left over. Inferring those
+    // from the argument types is real inference, which this compiler does not do
+    // anywhere yet (every other generic call is turbofished), so say so plainly
+    // rather than substitute half a signature and fail on a confusing mismatch.
+    if sig.generics.len() != m.generics.len() {
+        return Err(Error {
+            msg: format!(
+                "method '{}' declares generic parameters of its own; calling it \
+                 would need to infer them from the arguments, which is not \
+                 supported yet - move them onto the `extend` target instead",
+                field),
+            span: span.clone(),
+        });
+    }
+    Ok(Some((
+        m.name,
+        sig.params.iter().map(|p| subst_param_type(&u.types, &u.consts, p)).collect(),
+        subst_param_type(&u.types, &u.consts, &sig.return_type),
+    )))
 }
 
 /// Resolve a method call `base.field(args)` when `base` is a (possibly
@@ -811,29 +873,17 @@ fn infer<'a>(
                         cx.node_types.insert(metadata.id, ret.clone());
                         return Ok(ret);
                     }
-                    // the receiver's type, looking through one level of
-                    // pointer (`p.method()` on a `*Point`).
-                    let recv_def = match &base_ty {
-                        Type::Named { def, .. } => Some(*def),
-                        Type::Pointer(inner) => inner.def(),
+                    // an associated fn (no `self`) is not callable as
+                    // `value.assoc()`, so it falls through rather than
+                    // misbinding. The member record says which it is outright;
+                    // this used to be inferred by checking whether the first
+                    // parameter looked like a `self` of the right type.
+                    let resolved = match receiver_member(cx, &base_ty, field) {
+                        Some((m, u)) if m.receiver != Receiver::Associated =>
+                            method_signature(cx, &m, &u, field, &span)?,
                         _ => None,
                     };
-                    if let Some(recv_name) = recv_def {
-                        // an associated fn (no `self`) is not callable as
-                        // `value.assoc()`, so it falls through rather than
-                        // misbinding. The member record says which it is outright;
-                        // this used to be inferred by checking whether the first
-                        // parameter looked like a `self` of the right type.
-                        let resolved = match cx.members.get(&(recv_name, field)) {
-                            Some(m) if m.receiver != Receiver::Associated => {
-                                match cx.lookup(m.name) {
-                                    Some((_, Type::Function { params, return_type })) =>
-                                        Some((m.name, params.clone(), (**return_type).clone())),
-                                    _ => None,
-                                }
-                            }
-                            _ => None,
-                        };
+                    {
                         if let Some((target, params, return_type)) = resolved {
                             let base_is_ptr = matches!(base_ty, Type::Pointer(_));
 

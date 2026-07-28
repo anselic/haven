@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
-use haven_common::defs::{DefId, Defs, PRELUDE_KEY};
+use haven_common::defs::{DefId, Defs, TyHead, PRELUDE_KEY};
 use haven_common::layout::{self, TypeInfo, TypeTable, EnumRepr};
 
 mod context;
@@ -379,7 +379,7 @@ fn check_toplevel<'a>(
 pub fn typecheck_program<'a>(
     cx: &mut Context<'a>,
     program: &[TopLevel<'a>],
-    impls: &[ImplDecl],
+    impls: &[ImplDecl<'a>],
     defs: &Defs<'a>,
 ) -> Vec<Error> {
     let mut errors = Vec::new();
@@ -659,8 +659,11 @@ pub fn typecheck_program<'a>(
 /// avoids a duplicate "does not implement" at the bound site). A method's
 /// receiver is expanded to the concrete `self` type and any `Self` in the trait
 /// signature is substituted with the implementing type before comparison.
-fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl, errors: &mut Vec<Error>) {
-    let (target, trait_) = (cx.name_of(imp.target), cx.name_of(imp.trait_));
+fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: &mut Vec<Error>) {
+    // the implementing type, which is no longer necessarily nameable as a
+    // definition - `[T]` and `i32` have only their written form.
+    let self_ty = imp.self_ty.clone();
+    let (target, trait_) = (cx.show(&self_ty), cx.name_of(imp.trait_));
     let trait_def = match cx.traits.get(&imp.trait_) {
         Some(d) => d.clone(),
         None => {
@@ -671,8 +674,6 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl, errors: &mut
             return;
         }
     };
-    // the implementing type.
-    let self_ty = Type::named(imp.target);
 
     for (mname, sig) in &trait_def.methods {
         // the member table knows what the impl actually declared; this used to
@@ -680,12 +681,20 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl, errors: &mut
         // name isn't slug-prefixed but its methods' are (enums, `@export`ed
         // structs) - reporting "does not implement" for a method that was right
         // there.
-        let found = match cx.members.get(&(imp.target, *mname)) {
-            Some(m) => match cx.lookup(m.name) {
+        //
+        // A method of a *generic* impl is a generic function, so it lives in
+        // `generic_fns` rather than the ordinary value scope. Its signature is
+        // compared symbolically - in terms of the impl's own parameters, which
+        // is also how `self_ty` is spelled - so `extend Vec<T>: Delete` is
+        // checked once for all `T` rather than per instance.
+        let found = match cx.members.get(&(imp.head, *mname)) {
+            Some(m) if m.generics.is_empty() => match cx.lookup(m.name) {
                 Some((_, Type::Function { params, return_type })) =>
                     Some((params.clone(), (**return_type).clone())),
                 _ => None,
             },
+            Some(m) => cx.generic_fns.get(m.name)
+                .map(|sig| (sig.params.clone(), sig.return_type.clone())),
             None => None,
         };
         let Some((params, return_type)) = found else {
@@ -720,5 +729,23 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl, errors: &mut
         }
     }
 
-    cx.impls.insert((imp.target, imp.trait_));
+    // `Delete` is the one trait whose subject must be a *named* type. Its
+    // destructor is called from code the ownership pass synthesizes after
+    // monomorphization, so the specialized `delete` has to have been minted
+    // already - and mono only mints per generic-type instance, an event a
+    // structural type has no equivalent of. Allowing it would compile to a
+    // silent leak rather than an error, so it is rejected here.
+    if Some(imp.trait_) == cx.delete_trait && !matches!(imp.head, TyHead::Def(_)) {
+        errors.push(Error {
+            msg: format!(
+                "`{}` cannot implement `Delete`: only a struct or enum may own a \
+                 resource. A primitive or structural type ([T], *T, [T; N]) is a \
+                 value or a borrowed view, and destroying one would destroy \
+                 something it does not own",
+                target),
+            span: imp.span.clone(),
+        });
+    }
+
+    cx.impls.push(imp.clone());
 }

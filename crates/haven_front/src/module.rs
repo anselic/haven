@@ -83,7 +83,7 @@ use bumpalo::Bump;
 
 use haven_common::ast::*;
 use crate::parse;
-use haven_common::defs::{Def, DefKind, DefId, Defs, Linkage, Member, MemberTable, ModId};
+use haven_common::defs::{Def, DefKind, DefId, Defs, Linkage, Member, MemberTable, ModId, TyHead};
 
 use haven_common::diag::{self, Files};
 use haven_common::intrinsics::Intrinsic;
@@ -331,66 +331,190 @@ fn load_import<'a>(imp: &Import, key: &str, dir: Option<&FilePath>, arena: &'a B
 /// which is what makes a method reachable without reconstructing its name from
 /// its type's.
 struct RawMethod<'a> {
-    target: &'a str,
+    /// The `extend` target as written (unresolved). Resolved through the
+    /// module's scopes in pass 1.5, which is where its head is computed.
+    target: Type<'a>,
+    /// The target's inferred type parameters, which are also the leading
+    /// generics of `fn_name`.
+    generics: Vec<GenericParam<'a>>,
     name: &'a str,
     fn_name: &'a str,
     receiver: Receiver,
+    span: Span,
 }
 
 /// A raw (pre-mangling) `extend Target: Trait` conformance record, collected
-/// while desugaring. `target`/`trait_` are the source names; `load_and_merge`
-/// remaps them to their final (mangled) forms through the module's scopes before
-/// handing them to the typechecker.
+/// while desugaring. `target`/`trait_` are as written; `load_and_merge` resolves
+/// them through the module's scopes before handing them to the typechecker.
 struct RawImpl<'a> {
-    target: &'a str,
+    target: Type<'a>,
+    generics: Vec<GenericParam<'a>>,
     trait_: &'a str,
     span: Span,
+}
+
+/// The type parameters an `extend` target introduces, in first-appearance order.
+///
+/// Haven has no binder for them — the user writes `extend [T]`, not
+/// `extend<T> [T]` — so they are recovered from the target itself. A name is a
+/// parameter when it is all three of:
+///
+///   * a single-segment, argument-less path (`T`, never `geo::Point` or
+///     `Vec<T>`),
+///   * a *proper subterm* of the target, and
+///   * not a type in scope, per `known`.
+///
+/// The last two are each load-bearing. Without "proper subterm", a typo'd
+/// `extend Poitn { ... }` becomes a blanket impl over a parameter named `Poitn`
+/// rather than the unknown-type error it should be — so a bare `extend T` is
+/// always a named type, and blanket impls simply do not exist yet. Without
+/// `known`, `extend *Point` would read its own element type as a parameter.
+///
+/// A `ConstVal::Param` in an array or SIMD length is a const parameter by the
+/// same reasoning; there is no scope to check it against, since a length is
+/// never a type name.
+fn impl_generics<'a>(target: &Type<'a>, known: &dyn Fn(&str) -> bool) -> Vec<GenericParam<'a>> {
+    fn push_ty<'a>(n: &'a str, out: &mut Vec<GenericParam<'a>>) {
+        if !out.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if *name == n)) {
+            out.push(GenericParam::Type { name: n, bounds: Vec::new() });
+        }
+    }
+    fn push_const<'a>(n: &'a str, out: &mut Vec<GenericParam<'a>>) {
+        if !out.iter().any(|g| matches!(g, GenericParam::Const(name, _) if *name == n)) {
+            // the declared type of an inferred const param is unknowable from its
+            // use; `u32` matches how the parser types a bare array length.
+            out.push(GenericParam::Const(n, Type::Uint32));
+        }
+    }
+    fn arg<'a>(a: &GenericArg<'a>, known: &dyn Fn(&str) -> bool, out: &mut Vec<GenericParam<'a>>) {
+        match a {
+            GenericArg::Type(t) => walk(t, known, out),
+            GenericArg::Const(ConstVal::Param(n)) => push_const(n, out),
+            GenericArg::Const(ConstVal::Lit(_)) => {}
+        }
+    }
+    fn walk<'a>(ty: &Type<'a>, known: &dyn Fn(&str) -> bool, out: &mut Vec<GenericParam<'a>>) {
+        match ty {
+            Type::Path { path, args } => {
+                match path.as_single() {
+                    Some(one) if args.is_empty() && !known(one) => push_ty(one, out),
+                    _ => {}
+                }
+                for a in args { arg(a, known, out); }
+            }
+            Type::Pointer(inner) | Type::Slice(inner) => walk(inner, known, out),
+            Type::Array(inner, n) | Type::Simd(inner, n) => {
+                walk(inner, known, out);
+                if let ConstVal::Param(n) = n { push_const(n, out); }
+            }
+            Type::Function { params, return_type } => {
+                for p in params { walk(p, known, out); }
+                walk(return_type, known, out);
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    // descend one level before collecting, so the target itself is never taken
+    // for a parameter.
+    match target {
+        Type::Path { args, .. } => for a in args { arg(a, known, &mut out); },
+        other => walk(other, known, &mut out),
+    }
+    out
+}
+
+/// Resolve an `extend` target through a module's scopes, yielding the type in
+/// resolved form plus the head it dispatches on.
+///
+/// `None` means the target names something that doesn't exist, or is a bare type
+/// parameter (a blanket impl, which has no head and isn't supported). Either way
+/// the caller drops the record silently: the same target is resolved again in
+/// pass 2 as the `self` parameter's type, and *that* is where the diagnostic
+/// comes from — reporting here as well would say it twice.
+fn resolve_extend_target<'a>(
+    target: &Type<'a>,
+    generics: &[GenericParam<'a>],
+    scopes: &Scopes<'a>,
+    members: &MemberTable<'a>,
+    file: FileId,
+) -> Option<(Type<'a>, TyHead)> {
+    let mut errs = Vec::new();
+    let mut rw = Rewriter {
+        scopes, members, errs: &mut errs,
+        locals: Vec::new(),
+        span: Span::new(file, 0, 0),
+    };
+    let mut resolved = target.clone();
+    rw.ty(&mut resolved, &generic_names(generics));
+    if !errs.is_empty() { return None; }
+    let head = TyHead::of(&resolved)?;
+    Some((resolved, head))
+}
+
+/// An identifier-safe fragment naming an `extend` target, for the symbol of the
+/// functions its methods desugar into. Only has to be stable and mostly
+/// distinct: the emitted name is never parsed back, and `lower_methods`
+/// uniquifies within the module.
+fn target_key(ty: &Type<'_>) -> String {
+    match ty {
+        Type::Path { path, .. } => path.last().to_string(),
+        Type::Pointer(inner) => format!("ptr_{}", target_key(inner)),
+        Type::Slice(inner) => format!("slice_{}", target_key(inner)),
+        Type::Array(inner, _) => format!("array_{}", target_key(inner)),
+        Type::Simd(inner, _) => format!("simd_{}", target_key(inner)),
+        Type::Function { .. } => "proc".to_string(),
+        // a scalar prints as its own keyword (`i32`, `bool`, `str`), which is
+        // already identifier-safe.
+        scalar => scalar.to_string(),
+    }
 }
 
 fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
     -> (Vec<Error>, Vec<RawImpl<'a>>, Vec<RawMethod<'a>>)
 {
-    let mut errors = Vec::new();
+    // desugaring itself can no longer fail: what used to be rejected here (a
+    // method on a generic type) is now the point of the exercise, and the
+    // remaining ways an `extend` can be wrong - an unknown target, a parameter
+    // name clash, a duplicate method - are all only decidable once scopes exist.
+    let errors = Vec::new();
     let mut impls: Vec<RawImpl<'a>> = Vec::new();
     let mut methods_out: Vec<RawMethod<'a>> = Vec::new();
 
-    // Types declared generic in this module. A method's `self` type would need the
-    // type's own params in scope (`*Vec<T>`), which Stage 1 doesn't handle - reject
-    // with a clear message rather than emit a function with an unbound `Param`.
-    let mut generic_types: HashSet<&str> = HashSet::new();
-    for tl in items.iter() {
-        match &tl.value {
-            TopLevelNode::Struct { name, generics, .. } if !generics.is_empty() => { generic_types.insert(*name); }
-            TopLevelNode::Enum { name, generics, .. } if !generics.is_empty() => { generic_types.insert(*name); }
-            _ => {}
-        }
-    }
-
     let mut synthesized: Vec<TopLevel<'a>> = Vec::new();
     let mut kept: Vec<TopLevel<'a>> = Vec::with_capacity(items.len());
+    // synthesized names already handed out in this module, so two `extend`
+    // blocks whose targets share a key (`extend [i32]` and `extend [f32]`) don't
+    // emit two functions under one symbol. A same-named *method* on both is
+    // separately a duplicate-member error in pass 1.5; this only keeps the
+    // symbols apart long enough to get there.
+    let mut used_names: HashSet<String> = HashSet::new();
     for tl in items.drain(..) {
         let TopLevelNode::Extend { target, trait_, methods } = &tl.value else {
             kept.push(tl);
             continue;
         };
-        let target: &'a str = target;
-        // record the conformance obligation; remapped to final names later.
+        // record the conformance obligation; resolved through the module's
+        // scopes in `load_and_merge`, which is also where the target's inferred
+        // parameters are worked out - they need a type scope, which does not
+        // exist yet at parse time.
         if let Some(tr) = trait_ {
-            impls.push(RawImpl { target, trait_: tr, span: tl.span.clone() });
+            impls.push(RawImpl {
+                target: target.clone(),
+                generics: Vec::new(),
+                trait_: tr,
+                span: tl.span.clone(),
+            });
         }
-        if generic_types.contains(target) {
-            errors.push(Error::new(tl.span.clone(), format!(
-                "methods on generic type '{}' are not supported yet (Stage 1 supports methods on non-generic types only)",
-                target)));
-            continue;
-        }
+        let key = target_key(target);
         for m in methods {
             let mnode = &m.value;
             let mut params: Vec<(&'a str, Type<'a>)> = Vec::with_capacity(mnode.params.len() + 1);
-            // an unresolved path, exactly as if the author had written the target
-            // type's name - `extend` runs before name resolution, so a `Struct`
-            // here would be skipped by the rewriter and keep the source spelling.
-            let self_ty = Type::path(Path::single(target));
+            // the target type verbatim, still unresolved: `extend` is desugared
+            // before name resolution, so the rewriter sees the same `Path` here
+            // that it would have seen written out by hand - and rewrites it with
+            // this function's (later-patched) generics in scope.
+            let self_ty = target.clone();
             match mnode.receiver {
                 Receiver::Associated => {}
                 Receiver::Value => params.push(("self", self_ty)),
@@ -400,9 +524,20 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
             // the synthesized name only has to be unique within the module - it is
             // never reconstructed by a consumer, since the member record below is
             // what makes this method findable.
-            let fname: &'a str = arena.alloc_str(&format!("{}${}", target, mnode.name));
+            let mut base = format!("{}${}", key, mnode.name);
+            for n in 1.. {
+                if used_names.insert(base.clone()) { break; }
+                base = format!("{}${}${}", key, mnode.name, n);
+            }
+            let fname: &'a str = arena.alloc_str(&base);
             methods_out.push(RawMethod {
-                target, name: mnode.name, fn_name: fname, receiver: mnode.receiver,
+                target: target.clone(),
+                // filled in by `load_and_merge` once a type scope exists.
+                generics: Vec::new(),
+                name: mnode.name,
+                fn_name: fname,
+                receiver: mnode.receiver,
+                span: tl.span.clone(),
             });
             synthesized.push(Metadata::new(
                 TopLevelNode::Function {
@@ -410,6 +545,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                     def: DefId::UNRESOLVED,
                     is_pub: mnode.is_pub,
                     attributes: mnode.attributes.clone(),
+                    // the impl's own parameters are prepended in `load_and_merge`.
                     generics: mnode.generics.clone(),
                     params,
                     return_type: mnode.return_type.clone(),
@@ -843,7 +979,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// the member table has one, otherwise an enum variant left for typecheck's
     /// constructor path (which is what `None` means to the caller).
     fn type_qualified(&mut self, r: &mut NameRef<'a>, ty: DefId, sym: &'a str) -> Option<&'a str> {
-        if let Some(m) = self.members.get(&(ty, sym)) { return Some(m.name); }
+        if let Some(m) = self.members.get(&(TyHead::Def(ty), sym)) { return Some(m.name); }
         r.def = ty;
         None
     }
@@ -1184,7 +1320,7 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
 /// std module either way, so an explicit `import std/prelude` is not a second
 /// copy of it.
 pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bump)
-    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl>), ()>
+    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>), ()>
 {
     // a module we've decided to load but haven't parsed yet.
     struct Pending<'a> {
@@ -1517,22 +1653,83 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
     // pass 2: rewrite each module's items in place using its scopes. Also remap
     // each `extend T: Trait` conformance record to final (mangled) names through
     // the same scopes, so the typechecker matches them against the merged program.
-    // pass 1.5: record every method under its type's *final* name, before any
-    // module is rewritten. has to precede pass 2 because a call `Point::new()` in
-    // module A resolves through a member declared in module B.
+    // pass 1.25: work out each `extend` target's inferred type parameters and
+    // push them onto the functions its methods desugared into. This could not
+    // happen at desugaring time: telling the `T` of `extend [T]` from the
+    // `Point` of `extend *Point` needs a type scope, and there wasn't one yet.
+    for (id, m) in modules.iter_mut().enumerate() {
+        let types = &all_scopes[id].types;
+        let known = |n: &str| types.contains_key(n);
+        for rm in m.methods.iter_mut() { rm.generics = impl_generics(&rm.target, &known); }
+        for ri in m.impls.iter_mut() { ri.generics = impl_generics(&ri.target, &known); }
+
+        // the impl's parameters lead the method's own, so `self`'s type resolves
+        // against them and a turbofish on the desugared function stays in source
+        // order (`extend [T] { proc map<U>(...) }` -> `<T, U>`).
+        let mut by_fn: HashMap<&'a str, &RawMethod<'a>> =
+            m.methods.iter().map(|rm| (rm.fn_name, rm)).collect();
+        for tl in m.items.iter_mut() {
+            let TopLevelNode::Function { name, generics, .. } = &mut tl.value else { continue };
+            let Some(rm) = by_fn.remove(*name) else { continue };
+            for ig in &rm.generics {
+                let ig_name = match ig {
+                    GenericParam::Type { name, .. } => *name,
+                    GenericParam::Const(name, _) => *name,
+                };
+                if generics.iter().any(|g| match g {
+                    GenericParam::Type { name, .. } => *name == ig_name,
+                    GenericParam::Const(name, _) => *name == ig_name,
+                }) {
+                    errs.push(Error::new(rm.span.clone(), format!(
+                        "method '{}' declares a generic parameter '{}' that its \
+                         `extend` target already binds; rename one of them",
+                        rm.name, ig_name)));
+                }
+            }
+            let own = std::mem::take(generics);
+            generics.extend(rm.generics.iter().cloned());
+            generics.extend(own);
+        }
+    }
+
+    // pass 1.5: record every method under its target's *head*, before any module
+    // is rewritten. has to precede pass 2 because a call `Point::new()` in module
+    // A resolves through a member declared in module B.
+    //
+    // Resolving the target needs a `Rewriter`, which wants a member table it will
+    // never consult (type resolution touches no members) - so it gets an empty
+    // one, leaving `defs`'s free to be written to here.
+    let no_members = MemberTable::new();
     for (id, m) in modules.iter().enumerate() {
         let scopes = &all_scopes[id];
         for rm in &m.methods {
             // an `extend` on an unknown type is reported when the block's `self`
-            // parameter is resolved; skip the member rather than inventing an
-            // identity for a type that doesn't exist.
-            let Some(ty) = scopes.types.get(rm.target) else { continue };
+            // parameter is resolved in pass 2; drop the errors from this
+            // speculative resolution so it isn't reported twice, and skip the
+            // member rather than key it on a type that doesn't exist.
+            let Some((self_ty, head)) =
+                resolve_extend_target(&rm.target, &rm.generics, scopes, &no_members, m.file)
+            else { continue };
             let f = scopes.calls.get(rm.fn_name).map(|s| s.name).unwrap_or(rm.fn_name);
-            defs.add_member(ty.def, rm.name, Member { name: f, receiver: rm.receiver });
+            let prev = defs.add_member(head, rm.name, Member {
+                name: f,
+                receiver: rm.receiver,
+                self_ty,
+                generics: rm.generics.clone(),
+            });
+            // one impl per `(head, method)`: see `MemberTable`. Two `extend`
+            // blocks reaching the same slot are ambiguous at every call site, so
+            // this is an error rather than a silent last-one-wins.
+            if prev.is_some() {
+                errs.push(Error::new(rm.span.clone(), format!(
+                    "method '{}' is already defined for this type; a second \
+                     `extend` block cannot add or specialize it (`extend [T]` and \
+                     `extend [i32]` both claim every slice)", rm.name)));
+            }
         }
     }
 
-    let mut impls: Vec<ImplDecl> = Vec::new();
+    let mut impls: Vec<ImplDecl<'a>> = Vec::new();
     for (id, m) in modules.iter_mut().enumerate() {
         let scopes = &all_scopes[id];
         let mut rw = Rewriter {
@@ -1549,10 +1746,14 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
             // as above: an `extend T: Trait` naming an unknown `T` or `Trait`
             // has already produced an error through the type/bound paths, so
             // dropping the record here loses no diagnostic.
-            let (Some(target), Some(trait_)) =
-                (scopes.types.get(imp.target), scopes.types.get(imp.trait_)) else { continue };
+            let (Some((self_ty, head)), Some(trait_)) = (
+                resolve_extend_target(&imp.target, &imp.generics, scopes, &no_members, m.file),
+                scopes.types.get(imp.trait_),
+            ) else { continue };
             impls.push(ImplDecl {
-                target: target.def,
+                self_ty,
+                head,
+                generics: imp.generics.clone(),
                 trait_: trait_.def,
                 span: imp.span.clone(),
             });

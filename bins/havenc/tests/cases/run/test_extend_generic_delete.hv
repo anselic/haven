@@ -1,0 +1,41 @@
+// `Delete` on a generic type: each instantiation gets its own destructor, and
+// the ownership pass calls it at end of scope like any other owner.
+//
+// This is the one method that cannot be instantiated on demand - the calls to it
+// are synthesized *after* monomorphization, so there is no call site left to
+// drive the request. Creating `Buf<i32>` is therefore what creates
+// `Buf$delete$i32`, which is what this test is really checking: two
+// instantiations, two destructors, both actually run.
+// The `.out` golden is what pins the destructor order down.
+//@ exit: 0
+
+import std/alloc { alloc, dealloc }
+import std/option { unwrap }
+
+struct Buf<T> {
+    data: *T,
+    cap: u64,
+
+    proc size(*self) u64 { return self.cap; }
+}
+
+proc buf_new<T>(n: u64) Buf<T> {
+    return Buf::<T> { data: unwrap::<T>(alloc::<T>(n)), cap: n };
+}
+
+extend Buf<T>: Delete {
+    proc delete(*self) {
+        printf::<u64>("free %llu\n", self.cap);
+        dealloc::<T>(self.data);
+    }
+}
+
+@export
+proc main() i32 {
+    let a: Buf<i32> = buf_new::<i32>(4u64);
+    printf::<u64>("size %llu\n", a.size());
+    let b: Buf<f64> = buf_new::<f64>(2u64);
+    printf::<u64>("size %llu\n", b.size());
+    // both are destroyed here, in reverse declaration order.
+    return 0;
+}

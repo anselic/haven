@@ -44,7 +44,7 @@
 use std::collections::{HashMap, HashSet};
 
 use haven_common::ast::*;
-use haven_common::defs::DefId;
+use haven_common::defs::{DefId, TyHead};
 use haven_common::layout::TypeTable;
 
 use crate::typecheck::{Context, EnumDef, RecvAdjust};
@@ -722,22 +722,42 @@ fn merge<'a>(entry: &Flow<'a>, a: Flow<'a>, a_div: bool, b: Flow<'a>, b_div: boo
 /// `impls` is the conformance list from name resolution rather than `cx.impls`:
 /// monomorphization drops the trait declarations, so the post-mono typecheck
 /// pass has none to record and the context's own copy is empty by this point.
+/// It says only *which* types own something; the destructor to call for each
+/// comes from the member table, so that a generic owner resolves to its
+/// instance's `delete` rather than to the template's.
 pub fn ownership_check<'a>(
     program: &mut [TopLevel<'a>],
     cx: &mut Context<'a>,
     delete_trait: Option<DefId>,
-    impls: &[ImplDecl],
+    impls: &[ImplDecl<'a>],
 ) -> Result<(), Vec<Error>> {
     // no `Delete` trait (or nobody implements it) means nothing in this program
     // owns anything, and every value is `Copy` exactly as it was before.
     let Some(delete_trait) = delete_trait else { return Ok(()) };
+
+    // which definitions own something. `extend Vec<T>: Delete` records the
+    // *template*, so a concrete `Vec$i32` is an owner by way of the template it
+    // instantiates - conformance is a property of the generic type, not of each
+    // instance separately. Conformance checking has already rejected a `Delete`
+    // impl on anything but a named type, so a non-`Def` head cannot appear here.
+    let owning: HashSet<DefId> = impls.iter()
+        .filter(|i| i.trait_ == delete_trait)
+        .filter_map(|i| match i.head { TyHead::Def(d) => Some(d), _ => None })
+        .collect();
+
+    // the destructor to call for each owning type, taken from the member table
+    // rather than from `impls` directly: for a generic owner the name wanted is
+    // the *instance's* `delete` (`Vec$delete$i32`), which monomorphization minted
+    // and registered against the instance when it created it. Reading `impls`
+    // alone would find only the template's, which has no code by this point.
     let mut deletes: HashMap<DefId, &'a str> = HashMap::new();
-    for imp in impls {
-        if imp.trait_ != delete_trait { continue; }
+    for ((head, name), m) in cx.members.iter() {
+        if *name != DELETE_METHOD { continue; }
+        let TyHead::Def(d) = head else { continue };
+        let owner = owning.contains(d)
+            || cx.instances.get(d).is_some_and(|t| owning.contains(t));
         // a missing `delete` was already reported by conformance checking.
-        if let Some(m) = cx.members.get(&(imp.target, DELETE_METHOD)) {
-            deletes.insert(imp.target, m.name);
-        }
+        if owner { deletes.insert(*d, m.name); }
     }
     if deletes.is_empty() { return Ok(()); }
 

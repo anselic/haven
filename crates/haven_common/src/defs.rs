@@ -46,7 +46,7 @@ use std::path::Path;
 
 use bumpalo::Bump;
 
-use crate::ast::{FileId, Receiver, Span};
+use crate::ast::{FileId, GenericParam, Receiver, Span, Type};
 
 /// The implicit prelude's canonical module key.
 ///
@@ -113,17 +113,98 @@ pub struct Def<'a> {
     pub span: Span,
 }
 
+/// The type constructor an `extend` block dispatches on.
+///
+/// A definition is its own head, so a struct and an enum are as distinct as two
+/// structs. Everything else in the type grammar is *structural* and has no
+/// definition to name: `[i32]`, `*Point` and `[u8; 4]` are built by applying a
+/// constructor to other types, and there are infinitely many of them, so they
+/// cannot each be given a `DefId`. They share the head of their constructor
+/// instead - every slice is `Slice` - and the argument types are recovered by
+/// unifying against the impl's written self type (see [`Member::self_ty`]).
+///
+/// A generic type's head is its *template*: `Vec<i32>` and `Vec<f32>` are both
+/// `Def(Vec)`, which is what lets one `extend Vec<T>` answer for every instance.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TyHead {
+    /// A struct, enum or enum-payload definition, generic template included.
+    Def(DefId),
+    Void, Bool,
+    Int8, Int32, Int64,
+    Uint8, Uint32, Uint64,
+    Float32, Float64,
+    Str,
+    Pointer, Slice, Array, Simd, Function,
+}
+
+impl TyHead {
+    /// The head `ty` dispatches on, or `None` for a type that cannot carry
+    /// methods: a bare type parameter (whose methods come from its bounds, not
+    /// from an impl) and an unresolved path (a compiler bug this far along).
+    pub fn of(ty: &Type<'_>) -> Option<Self> {
+        Some(match ty {
+            Type::Named { def, .. } => TyHead::Def(*def),
+            Type::Void => TyHead::Void,
+            Type::Bool => TyHead::Bool,
+            Type::Int8 => TyHead::Int8,
+            Type::Int32 => TyHead::Int32,
+            Type::Int64 => TyHead::Int64,
+            Type::Uint8 => TyHead::Uint8,
+            Type::Uint32 => TyHead::Uint32,
+            Type::Uint64 => TyHead::Uint64,
+            Type::Float32 => TyHead::Float32,
+            Type::Float64 => TyHead::Float64,
+            Type::Str => TyHead::Str,
+            Type::Pointer(_) => TyHead::Pointer,
+            Type::Slice(_) => TyHead::Slice,
+            Type::Array(..) => TyHead::Array,
+            Type::Simd(..) => TyHead::Simd,
+            Type::Function { .. } => TyHead::Function,
+            Type::Param(_) | Type::Path { .. } => return None,
+        })
+    }
+
+    /// An identifier-safe fragment naming this head, for building a desugared
+    /// method's symbol. Not injective across definitions (every struct is
+    /// `ty`), which is fine: the module resolver uniquifies within a module and
+    /// the emitted name is never parsed back.
+    pub fn tag(self) -> &'static str {
+        match self {
+            TyHead::Def(_) => "ty",
+            TyHead::Void => "void", TyHead::Bool => "bool",
+            TyHead::Int8 => "i8", TyHead::Int32 => "i32", TyHead::Int64 => "i64",
+            TyHead::Uint8 => "u8", TyHead::Uint32 => "u32", TyHead::Uint64 => "u64",
+            TyHead::Float32 => "f32", TyHead::Float64 => "f64",
+            TyHead::Str => "str",
+            TyHead::Pointer => "ptr", TyHead::Slice => "slice",
+            TyHead::Array => "array", TyHead::Simd => "simd",
+            TyHead::Function => "proc",
+        }
+    }
+}
+
 /// One method or associated function reachable through a type.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Member<'a> {
-    /// Emitted name of the function `lower_methods` desugared this into.
+    /// Emitted name of the function `lower_methods` desugared this into. When
+    /// [`Self::generics`] is non-empty this names a *template*, and the concrete
+    /// instance is minted by monomorphization.
     pub name: &'a str,
     /// Whether it takes `self`, `*self`, or nothing. Recorded at desugaring, so
     /// resolution no longer has to guess by inspecting the first parameter.
     pub receiver: Receiver,
+    /// The `extend` target this was declared on, resolved: `i32`, `[T]`,
+    /// `Vec<T>`. The head alone is too coarse to dispatch on - every slice
+    /// shares one - so a receiver reaches this method only if it *unifies* with
+    /// this type, and unification is also what binds `generics` for the call.
+    pub self_ty: Type<'a>,
+    /// The impl block's own type parameters, inferred from the free names in
+    /// `self_ty`. Empty for a target with no parameters (`i32`, `Point`), in
+    /// which case unification degenerates to equality.
+    pub generics: Vec<GenericParam<'a>>,
 }
 
-/// Methods and associated functions, keyed by `(type, method name)`.
+/// Methods and associated functions, keyed by `(receiver head, method name)`.
 ///
 /// Replaces reconstructing `format!("{}${}", type_name, method)` and hoping it
 /// lands on a real symbol. That only ever worked because `<slug>$Point` plus
@@ -132,9 +213,15 @@ pub struct Member<'a> {
 /// type names are not slug-prefixed while their methods' names are. Those cases
 /// were silently unreachable outside the entry module.
 ///
-/// Keyed by the receiver type's identity, so two modules may each declare a
-/// `Point` with an `area` method without one shadowing the other.
-pub type MemberTable<'a> = HashMap<(DefId, &'a str), Member<'a>>;
+/// Keyed by [`TyHead`] rather than by `DefId` so a method can hang off a type
+/// that has no definition to key on - a primitive or a structural type. The
+/// consequence is that the key is no longer exact: `extend [i32]` and
+/// `extend [f32]` both want `(Slice, ...)`. Rather than make every value a
+/// candidate list with an overlap check, one impl per `(head, method)` wins the
+/// slot and a second is a duplicate-method error - which forbids specializing
+/// `extend [T]` with an `extend [i32]`, exactly as Rust does without the
+/// unstable `specialization` feature.
+pub type MemberTable<'a> = HashMap<(TyHead, &'a str), Member<'a>>;
 
 /// What a monomorphized instance came from.
 ///
@@ -214,10 +301,12 @@ impl<'a> Defs<'a> {
         id
     }
 
-    /// Record a method or associated function on `ty`. Returns the previous
-    /// entry, if the same `(type, name)` pair was already claimed.
-    pub fn add_member(&mut self, ty: DefId, name: &'a str, m: Member<'a>) -> Option<Member<'a>> {
-        self.members.insert((ty, name), m)
+    /// Record a method or associated function on the type headed by `head`.
+    /// Returns the previous entry, if the same `(head, name)` pair was already
+    /// claimed - which the caller reports as a duplicate, since one slot per
+    /// pair is what keeps dispatch unambiguous without overlap checking.
+    pub fn add_member(&mut self, head: TyHead, name: &'a str, m: Member<'a>) -> Option<Member<'a>> {
+        self.members.insert((head, name), m)
     }
 
     pub fn members(&self) -> &MemberTable<'a> { &self.members }

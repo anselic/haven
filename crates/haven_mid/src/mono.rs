@@ -15,7 +15,12 @@ use std::collections::{HashMap, VecDeque};
 use bumpalo::Bump;
 
 use haven_common::ast::*;
-use haven_common::defs::{Def, DefId, Defs, Linkage};
+use haven_common::defs::{Def, DefId, Defs, Linkage, Member, MemberTable, TyHead};
+
+/// The one method a `Delete` impl provides. Mirrors `own::DELETE_METHOD`, which
+/// is where the lang item is actually interpreted; mono only needs to recognize
+/// the name to know which member to instantiate eagerly.
+const DELETE_METHOD: &str = "delete";
 
 /// one requested instantiation: `base` specialized to `args`, emitted as
 /// `mangled`. `span` is the call site that first asked for it (for errors).
@@ -114,6 +119,21 @@ struct Mono<'p, 'a> {
     /// registered here with the template it came from, so post-mono passes can
     /// map an instance back to its template without taking its name apart.
     defs: &'p mut Defs<'a>,
+    /// Every method in the program, snapshotted from `defs` before minting
+    /// starts. A copy rather than a borrow because `defs` is also written to
+    /// here; nothing added during mono needs to be *dispatched* through, so the
+    /// snapshot cannot go stale in a way that matters.
+    members: MemberTable<'a>,
+    /// What the pre-monomorphization typecheck inferred for every expression.
+    ///
+    /// This is the one piece of type information mono has, and it exists for a
+    /// single job: a call `xs.show()` names no callee that a syntactic pass could
+    /// resolve, so instantiating `extend [T]`'s methods needs to know what `xs`
+    /// is. Keyed by the *template* AST's node ids, which is what `rebuild_expr`
+    /// reads from, and the types are in terms of the template's own parameters -
+    /// so `subst_ty` with the current bindings turns one into the concrete
+    /// receiver at this instantiation.
+    node_types: &'p HashMap<usize, Type<'a>>,
 }
 
 /// A bound const generic parameter: its concrete value plus declared type, so a
@@ -274,6 +294,33 @@ fn display_name<'a>(defs: &Defs<'a>, base: DefId, args: &[ConcreteArg<'a>]) -> S
     format!("{}::<{}>", defs.get(base).source_name, targs)
 }
 
+/// The method `name` a receiver of type `ty` dispatches to, plus the bindings
+/// that specialize the impl to it.
+///
+/// The same two-step as `Context::member_for`/`receiver_member`, duplicated here
+/// rather than shared because mono holds a plain [`MemberTable`] and no
+/// typecheck context. Both must agree on which impl a receiver picks — mono
+/// mints the instance the typechecker will later expect to exist.
+fn member_of<'a>(members: &MemberTable<'a>, ty: &Type<'a>, name: &str)
+    -> Option<(Member<'a>, Unified<'a>)>
+{
+    fn direct<'a>(members: &MemberTable<'a>, ty: &Type<'a>, name: &str)
+        -> Option<(Member<'a>, Unified<'a>)>
+    {
+        let m = members.get(&(TyHead::of(ty)?, name))?;
+        let params: Vec<&'a str> = m.generics.iter().map(|g| match g {
+            GenericParam::Type { name, .. } => *name,
+            GenericParam::Const(name, _) => *name,
+        }).collect();
+        let mut u = Unified::default();
+        unify(&m.self_ty, ty, &params, &mut u).then(|| (m.clone(), u))
+    }
+    match (direct(members, ty, name), ty) {
+        (None, Type::Pointer(inner)) => direct(members, inner, name),
+        (found, _) => found,
+    }
+}
+
 impl<'p, 'a> Mono<'p, 'a> {
     /// Record an instantiation request, return its (stable) mangled name.
     /// de-dupes so each distinct instance is built exactly once.
@@ -325,10 +372,39 @@ impl<'p, 'a> Mono<'p, 'a> {
         }
         let (def, mangled) = self.mint(base, &args);
         self.struct_seen.insert(key, (def, mangled));
+        self.instantiate_destructor(base, def, &args);
         self.struct_queue.push_back(StructInstantiation {
             base, args, def, mangled, span: self.cur_span.clone(),
         });
         def
+    }
+
+    /// Mint the destructor for a freshly created generic-type instance.
+    ///
+    /// Every other method of a generic `extend` is instantiated on demand, from
+    /// the call that needs it. A destructor has no such call: the ownership pass
+    /// *synthesizes* the calls to it, and runs after monomorphization has
+    /// finished, so by the time anything wants `Vec$delete$i32` there is nobody
+    /// left to mint it. Creating the type is therefore what creates its
+    /// destructor, and the instance's `delete` is registered as a member of the
+    /// instance so the ownership pass can find it by the concrete type in hand.
+    ///
+    /// Requesting it here rather than lazily costs one specialized function per
+    /// owning instance, which is exactly the set that can need destroying.
+    fn instantiate_destructor(&mut self, base: DefId, inst: DefId, args: &[ConcreteArg<'a>]) {
+        let Some(m) = self.members.get(&(TyHead::Def(base), DELETE_METHOD)) else { return };
+        // a non-generic `delete` on a generic type cannot happen (the impl's
+        // parameters are the type's), but a template that never made it into the
+        // function table can - a conformance error, already reported.
+        if m.generics.is_empty() || !self.templates.contains_key(m.name) { return; }
+        let (name, receiver) = (m.name, m.receiver);
+        let mangled = self.request(name, args.to_vec(), self.cur_span.clone());
+        self.defs.add_member(TyHead::Def(inst), DELETE_METHOD, Member {
+            name: mangled,
+            receiver,
+            self_ty: Type::named(inst),
+            generics: Vec::new(),
+        });
     }
 
     /// Record a generic-enum instantiation request, return its mangled name
@@ -342,6 +418,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         }
         let (def, mangled) = self.mint(base, &args);
         self.enum_seen.insert(key, (def, mangled));
+        self.instantiate_destructor(base, def, &args);
         // a data variant's payload struct is an identity of its own, and the
         // instance needs its own set - the template's payloads are typed in terms
         // of the template's parameters.
@@ -404,6 +481,37 @@ impl<'p, 'a> Mono<'p, 'a> {
         }
     }
 
+    /// Substitute bound params in `ty` *without* collapsing generic types to
+    /// their instances.
+    ///
+    /// [`Self::subst_ty`] does both jobs at once, which is right everywhere a
+    /// type is being rewritten for emission - but wrong for deciding which
+    /// `extend` block a receiver dispatches to. Dispatch happens on the head, and
+    /// collapsing turns `Buf<i32>` into the fresh instance `Buf$i32`, whose head
+    /// is an identity no impl was ever registered against. The generic form is
+    /// what has to be matched against the impl's `Buf<T>`, so this keeps it.
+    fn subst_params(&self, ty: &Type<'a>, b: &Bindings<'a>) -> Type<'a> {
+        match ty {
+            Type::Param(n) if b.types.contains_key(n) => b.types[n].clone(),
+            Type::Named { def, args } => Type::Named {
+                def: *def,
+                args: args.iter().map(|a| match a {
+                    GenericArg::Type(t) => GenericArg::Type(self.subst_params(t, b)),
+                    GenericArg::Const(cv) => GenericArg::Const(subst_cv(cv, b)),
+                }).collect(),
+            },
+            Type::Pointer(inner)  => Type::Pointer(Box::new(self.subst_params(inner, b))),
+            Type::Array(inner, n) => Type::Array(Box::new(self.subst_params(inner, b)), subst_cv(n, b)),
+            Type::Slice(inner)    => Type::Slice(Box::new(self.subst_params(inner, b))),
+            Type::Simd(inner, n)  => Type::Simd(Box::new(self.subst_params(inner, b)), subst_cv(n, b)),
+            Type::Function { params, return_type } => Type::Function {
+                params: params.iter().map(|p| self.subst_params(p, b)).collect(),
+                return_type: Box::new(self.subst_params(return_type, b)),
+            },
+            other => other.clone(),
+        }
+    }
+
     /// Substitute bound params in a turbofish argument. A const generic forwarded
     /// by name (`simd_load::<f32, N>`) reaches here as a bare-ident `Type` - but
     /// the name binds in `consts`, not `types` - so resolve it to a literal
@@ -418,11 +526,101 @@ impl<'p, 'a> Mono<'p, 'a> {
         }
     }
 
+    /// Specialize a receiver call `recv.m(args)` whose method came from a
+    /// *generic* `extend` block, rewriting it into a direct call on the
+    /// instance: `xs.show()` with `xs: [i32]` becomes `slice$show$i32(xs)`.
+    ///
+    /// `None` leaves the call alone, which is the right answer for every method
+    /// of a concrete `extend` (`Point`, `i32`): those need no instance, and the
+    /// post-mono typecheck resolves them through the member table exactly as
+    /// before. Only a generic impl has to be rewritten here, because its
+    /// instance's name exists nowhere until this function mints it.
+    ///
+    /// A `*self` method on a receiver that isn't a place produces `&<temporary>`,
+    /// which the post-mono typecheck rejects with its usual "bind it to a `let`
+    /// first" message. That is a real limitation of desugaring to a call rather
+    /// than carrying the adjustment through to lowering, but the diagnostic
+    /// lands on the offending call and says what to do.
+    fn generic_method_call(
+        &mut self,
+        base: &Expr<'a>,
+        field: &'a str,
+        new_args: &[Expr<'a>],
+        b: &Bindings<'a>,
+        span: &Span,
+    ) -> Option<ExprNode<'a>> {
+        // what the receiver is *here*: its type in the template, with this
+        // instantiation's parameters bound but generic types left generic, since
+        // that is the form an impl is written against.
+        let recv_ty = self.node_types.get(&base.id)?.clone();
+        let recv_ty = self.subst_params(&recv_ty, b);
+
+        // dispatch by head, then through one pointer level - the same two-step
+        // the typechecker uses, so both agree on which impl a receiver picks.
+        let (m, u) = member_of(&self.members, &recv_ty, field)?;
+        if m.generics.is_empty() || m.receiver == Receiver::Associated { return None; }
+        if !self.templates.contains_key(m.name) { return None; }
+
+        // the instance's arguments, in the order the desugared function declares
+        // its parameters - which is the impl's own list, since a method that adds
+        // parameters of its own is rejected at the call site by the typechecker.
+        //
+        // Each is put through `subst_ty` so a *nested* generic argument collapses
+        // to its instance (`Buf<Vec<i32>>` binds `T = Vec$i32`, not `Vec<i32>`),
+        // matching how every other request spells its arguments - two spellings
+        // of one type would otherwise mint the instance twice.
+        let mut cargs: Vec<ConcreteArg<'a>> = Vec::with_capacity(m.generics.len());
+        for g in &m.generics {
+            cargs.push(match g {
+                GenericParam::Type { name, .. } => {
+                    let bound = u.types.get(name)?.clone();
+                    ConcreteArg::Type(self.subst_ty(&bound, &Bindings::empty()))
+                }
+                GenericParam::Const(name, _) => ConcreteArg::Const(u.consts.get(name)?.expect_lit()),
+            });
+        }
+        let mangled = self.request(m.name, cargs, span.clone());
+
+        // a `*self` method called on a value takes its address; a value `self`,
+        // or a `*self` already reached through a pointer, passes straight through.
+        let recv = self.rebuild_expr(base, b);
+        let recv = if m.receiver == Receiver::Pointer && !matches!(recv_ty, Type::Pointer(_)) {
+            Metadata::new(
+                ExprNode::Unary { op: UnaryOp::AddrOf, operand: Box::new(recv) },
+                base.span.clone(),
+            )
+        } else {
+            recv
+        };
+
+        let mut args = Vec::with_capacity(new_args.len() + 1);
+        args.push(recv);
+        args.extend(new_args.iter().cloned());
+        Some(ExprNode::Call {
+            func: Box::new(Metadata::new(ExprNode::Var(mangled), base.span.clone())),
+            type_args: Vec::new(),
+            args,
+        })
+    }
+
     fn rebuild_expr(&mut self, expr: &Expr<'a>, b: &Bindings<'a>) -> Expr<'a> {
         let node = match &expr.value {
             ExprNode::Call { func, type_args, args } => {
                 let new_args: Vec<Expr<'a>> =
                     args.iter().map(|a| self.rebuild_expr(a, b)).collect();
+
+                // a method from a generic `extend` needs its instance minted and
+                // the call pointed at it; everything else falls through to the
+                // ordinary paths below.
+                if type_args.is_empty() {
+                    if let ExprNode::Access { base, field } = &func.value {
+                        if let Some(call) =
+                            self.generic_method_call(base, field, &new_args, b, &expr.span)
+                        {
+                            return Metadata::new(call, expr.span.clone());
+                        }
+                    }
+                }
                 // sub type params inside the turbofish (user generic calls +
                 // intrinsics like `sizeof::<T>()`)
                 let subst_targs: Vec<GenericArg<'a>> =
@@ -699,9 +897,15 @@ impl<'p, 'a> Mono<'p, 'a> {
 /// the template it specializes, which is how the post-mono typecheck matches a
 /// template-named match pattern to an instance-typed scrutinee, and how the
 /// alloc check reports `alloc::<Vec2>` instead of `std.alloc$alloc$Vec2`.
-pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'a Bump)
-    -> Result<Vec<TopLevel<'a>>, Error>
-{
+/// `node_types` is the pre-mono typecheck's inference result: mono needs it only
+/// to know what a method call's receiver is, which is what lets a generic
+/// `extend` block's methods be instantiated at all (see `generic_method_call`).
+pub fn monomorphize<'a>(
+    program: &[TopLevel<'a>],
+    defs: &mut Defs<'a>,
+    arena: &'a Bump,
+    node_types: &HashMap<usize, Type<'a>>,
+) -> Result<Vec<TopLevel<'a>>, Error> {
     // functions stay keyed by emitted name: a call site names its callee, and
     // there is no `Type` involved to carry an identity. Types key by identity.
     let templates: HashMap<&'a str, (DefId, &TopLevel<'a>)> = program.iter()
@@ -734,7 +938,9 @@ pub fn monomorphize<'a>(program: &[TopLevel<'a>], defs: &mut Defs<'a>, arena: &'
         struct_queue: VecDeque::new(), struct_seen: HashMap::new(),
         enum_queue: VecDeque::new(), enum_seen: HashMap::new(),
         cur_span: Span::unknown(),
+        members: defs.members().clone(),
         defs,
+        node_types,
     };
     let empty = Bindings::empty();
 

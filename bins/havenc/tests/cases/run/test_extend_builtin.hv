@@ -1,0 +1,48 @@
+// `extend` on types that have no definition to hang a method off: a primitive
+// and a structural type. Dispatch is by type *constructor* (the head), so `i32`
+// and every slice can each carry methods and satisfy a trait bound, the same as
+// a struct does.
+//@ exit: 10
+
+trait Display {
+    proc show(*self) i32;
+}
+
+// a primitive target. `i32` is not a name in any module's type scope - it is a
+// type keyword - so this only works because dispatch stopped keying on
+// definitions.
+extend i32: Display {
+    proc show(*self) i32 {
+        printf::<i32>("i32 %d\n", *self);
+        return *self;
+    }
+}
+
+// a structural target, generic in its element. `T` is inferred: it is a proper
+// subterm of `[T]` and names no type in scope.
+extend [T]: Display {
+    proc show(*self) i32 {
+        let n: u64 = slice_len::<T>(self);
+        printf::<u64>("slice of %llu\n", n);
+        return numerical_cast::<i32>(n);
+    }
+}
+
+// both targets satisfy the bound, and each call site dispatches statically.
+proc render<T: Display>(x: *T) i32 {
+    return x.show();
+}
+
+@export
+proc main() i32 {
+    let a: i32 = 7;
+    a.show();                       // direct receiver call on a primitive
+
+    let arr: [i32; 3] = [1, 2, 3];
+    let sl: [i32] = arr;
+    sl.show();                      // and on a slice
+
+    // through the bound: `Display` is satisfied by a primitive and by a
+    // structural type, neither of which used to be expressible.
+    return render::<i32>(&a) + render::<[i32]>(&sl);  // 7 + 3 = 10
+}

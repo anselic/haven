@@ -87,15 +87,17 @@ fn main() {
             // node: the post-mono pass below has no trait declarations left to
             // find it in.
             let delete_trait = cx.delete_trait;
-            let mut mono_ast = mono::monomorphize(&ast, &mut defs, &arena).unwrap_or_else(|e| {
+            let mut mono_ast = mono::monomorphize(&ast, &mut defs, &arena, &cx.node_types).unwrap_or_else(|e| {
                 diag::report_error("Monomorphization error", &e, &files);
                 std::process::exit(1);
             });
             // mono dropped all trait nodes and substituted every bounded type
             // param, so the concrete program has no impls left to check.
-            // methods are never generic (`extend` on a generic type is rejected),
-            // so monomorphization can't introduce or invalidate a member - the
-            // same table applies to the concrete program.
+            // A method of a *generic* `extend` is a template, and mono rewrote
+            // every call to one into a direct call on the instance it minted, so
+            // what is left in the member table for this pass to resolve is the
+            // concrete impls - plus the per-instance destructors mono added,
+            // which the ownership pass below reads.
             let mut cx = typecheck::Context::new();
             let mono_errs = typecheck::typecheck_program(&mut cx, &mono_ast, &[], &defs);
             if !mono_errs.is_empty() {

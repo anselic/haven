@@ -1,7 +1,16 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
-use haven_common::defs::{DefId, Defs, MemberTable};
+use haven_common::defs::{DefId, Defs, Member, MemberTable, TyHead};
 use haven_common::layout::TypeTable;
+
+/// The bare names of a generic parameter list, which is the form [`unify`] wants
+/// its free-variable set in.
+pub fn param_names<'a>(generics: &[GenericParam<'a>]) -> Vec<&'a str> {
+    generics.iter().map(|g| match g {
+        GenericParam::Type { name, .. } => *name,
+        GenericParam::Const(name, _) => *name,
+    }).collect()
+}
 
 /// Field index of the discriminant tag in a data-enum aggregate's synthetic
 /// struct, and of the payload byte-blob. Referenced by name in the struct table
@@ -134,10 +143,15 @@ pub struct Context<'a> {
     /// (`--no-prelude`), in which case no type owns anything and the whole
     /// ownership pass is a no-op.
     pub delete_trait: Option<DefId>,
-    /// Which `(type, trait)` conformances hold, from `extend T: Trait` blocks
-    /// (verified during the forward pass). A `T: Trait` bound at a generic call
-    /// site is satisfied iff the concrete argument type is present here.
-    pub impls: std::collections::HashSet<(DefId, DefId)>,
+    /// Which conformances hold, from `extend T: Trait` blocks (verified during
+    /// the forward pass). A `T: Trait` bound at a generic call site is satisfied
+    /// iff some impl here covers the concrete argument type — see
+    /// [`Context::implements`].
+    ///
+    /// A list rather than a `HashSet<(DefId, DefId)>`: an impl's subject can be a
+    /// structural type (`[T]`) with no identity to hash, and deciding whether it
+    /// covers a given type takes unification, not a lookup.
+    pub impls: Vec<ImplDecl<'a>>,
     /// Trait bounds on the type params of the function currently being checked,
     /// e.g. `{"T": ["Display"]}` inside `proc show<T: Display>(...)`. Lets a
     /// method call on a `T`-typed receiver resolve through the bound trait. Empty
@@ -205,13 +219,45 @@ impl<'a> Context<'a> {
             method_calls: HashMap::new(),
             traits: HashMap::new(),
             delete_trait: None,
-            impls: std::collections::HashSet::new(),
+            impls: Vec::new(),
             generic_bounds: HashMap::new(),
             members: MemberTable::new(),
             instances: HashMap::new(),
             payloads: HashMap::new(),
             names: HashMap::new(),
         }
+    }
+
+    /// The method `name` reachable on a receiver of type `ty`, together with the
+    /// bindings that specialize it to this receiver.
+    ///
+    /// Two steps, because the member table's key is deliberately coarse: the
+    /// head narrows every impl in the program down to at most one candidate, and
+    /// unification then both *confirms* the candidate applies (an `extend [i32]`
+    /// must not answer for a `[f32]`) and recovers the type arguments the head
+    /// discarded. For a non-generic target unification degenerates to equality,
+    /// which is exactly the old `DefId` comparison.
+    pub fn member_for<'s>(&'s self, ty: &Type<'a>, name: &'s str)
+        -> Option<(&'s Member<'a>, Unified<'a>)>
+    {
+        let m = self.members.get(&(TyHead::of(ty)?, name))?;
+        let params = param_names(&m.generics);
+        let mut u = Unified::default();
+        unify(&m.self_ty, ty, &params, &mut u).then_some((m, u))
+    }
+
+    /// Whether `ty` implements `trait_`, by some `extend ...: Trait` block.
+    ///
+    /// A generic impl covers every type it unifies with, so one
+    /// `extend Vec<T>: Delete` answers for `Vec<i32>` and `Vec<Vec2>` alike.
+    pub fn implements(&self, ty: &Type<'a>, trait_: DefId) -> bool {
+        let Some(head) = TyHead::of(ty) else { return false };
+        self.impls.iter().any(|i| {
+            i.trait_ == trait_ && i.head == head && {
+                let mut u = Unified::default();
+                unify(&i.self_ty, ty, &param_names(&i.generics), &mut u)
+            }
+        })
     }
 
     /// Load the diagnostic name of every definition. Called once per pass.
