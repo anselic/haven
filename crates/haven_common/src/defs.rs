@@ -150,7 +150,8 @@ pub type Instances = HashMap<DefId, Instance>;
 
 pub struct ModInfo {
     pub file: FileId,
-    /// Canonical key: an absolute path, `std/...`, or `<prelude>`.
+    /// Canonical key: an absolute path, or `std/...` (the prelude included -
+    /// it is keyed `std/prelude` like any other embedded std module).
     pub key: String,
     /// Path-derived, load-order-independent symbol prefix, e.g. `std.math`.
     pub slug: String,
@@ -319,14 +320,12 @@ impl<'a> Defs<'a> {
 
 /// Path-derived symbol prefix for a module.
 ///
-/// * `<prelude>`      -> `std.prelude`
 /// * `std/dsp/osc`    -> `std.dsp.osc`
 /// * a file under the entry's directory -> that relative path, dotted
 /// * anything else (a path escaping the entry's tree, or a key that can't be
 ///   made relative) -> `m<hash>`, since there is no meaningful readable name and
 ///   an absolute path would leak the developer's home directory into the binary.
 fn module_slug(key: &str, entry_dir: Option<&Path>) -> String {
-    if key == "<prelude>" { return "std.prelude".to_string(); }
     if let Some(rest) = key.strip_prefix("std/") {
         return format!("std.{}", sanitize(rest));
     }

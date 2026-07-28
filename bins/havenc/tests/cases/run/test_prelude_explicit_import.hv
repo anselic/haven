@@ -1,0 +1,18 @@
+// The implicit prelude is an ordinary `std/prelude` module, so naming it
+// explicitly reuses the module that is already loaded rather than parsing a
+// second copy of it under a different key. Before that, the implicit and the
+// explicit prelude were two modules with two slugs, and the program carried two
+// full sets of prelude symbols (`std.prelude$println` *and*
+// `std.prelude_<hash>$println`).
+//
+// Both spellings therefore have to reach the same definition: the unqualified
+// one the implicit import provides, and the qualified one this import binds.
+
+import std/prelude
+
+@export
+proc main() i32 {
+    println("implicit");
+    prelude::println("explicit");
+    return 0;
+}

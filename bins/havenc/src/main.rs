@@ -15,10 +15,6 @@ mod args;
 
 const RUNTIME_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libruntime.a"));
 
-/// Prelude source, embedded at compile time. Parsed and injected ahead of every
-/// user program (see `main`). Backed by the C runtime in `crt/rt.c`.
-const PRELUDE_SRC: &str = include_str!("../../../std/prelude.hv");
-
 fn main() {
     let args = args::Args::parse();
     let input = &args.input;
@@ -32,14 +28,16 @@ fn main() {
     // load the entry file + every module it (transitively) imports, inject the
     // prelude unless disabled, merge into one flat name-mangled program with all
     // imports resolved away. see `crate::module`
-    // let prelude = if args.no_prelude { None } else { Some(PRELUDE_SRC) };
+    // the prelude comes from the embedded std tree under its own `std/prelude`
+    // key, so an explicit `import std/prelude` reuses it rather than loading a
+    // second copy.
     // `files` holds every loaded module's path + source, indexed by the `FileId`
     // its spans carry, so diagnostics below quote the span's owning module - not
     // just the entry file.
     // `defs` owns every top-level definition's identity: it produced the symbol
     // names now in `ast`, and it carries the member table both typecheck passes
     // use to resolve method calls.
-    let (ast, files, mut defs, impls) = match module::load_and_merge(input, Some(PRELUDE_SRC), &arena) {
+    let (ast, files, mut defs, impls) = match module::load_and_merge(input, !args.no_prelude, &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };
@@ -63,7 +61,7 @@ fn main() {
             });
 
             if main_fn.is_none() {
-                eprintln!("Error: No 'main' function exported");
+                eprintln!("Error: No 'main' function defined");
                 eprintln!("If you intended to compile a shared/static library, use the --shared or --static-lib flag.");
                 eprintln!("Otherwise, add a 'main' function to your program and an @export attribute to it.");
                 std::process::exit(1);

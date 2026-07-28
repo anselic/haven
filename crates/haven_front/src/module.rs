@@ -25,7 +25,12 @@
 //!   unqualified as `sinf`.
 //!
 //! the prelude is an implicit import into every user module, with its `pub`
-//! symbols visible unqualified (it has no qualifier spelling).
+//! symbols visible unqualified (it has no qualifier spelling). it is an
+//! *ordinary* std module, loaded from the embedded tree under the key
+//! `std/prelude` like any other - so writing `import std/prelude` explicitly (or
+//! pulling it in as part of a `import std` directory import) resolves to the
+//! same already-loaded module, rather than a second copy of every prelude type
+//! under its own identities.
 //!
 //! ## visibility
 //!
@@ -88,6 +93,12 @@ use haven_common::intrinsics::Intrinsic;
 static STD_DIR: include_dir::Dir<'static> =
     include_dir::include_dir!("$CARGO_MANIFEST_DIR/../../std");
 
+/// The implicit prelude's canonical key. It is a plain `std/...` module: this is
+/// exactly the key `resolve_target` produces for an explicit `import
+/// std/prelude`, so the two share one entry in `seen` and therefore one set of
+/// definitions.
+const PRELUDE_KEY: &str = "std/prelude";
+
 /// Source of an embedded stdlib module, by its `std/...` import path. The key is
 /// `imp.path.join("/")` (always forward slashes), so `std/<rel>` maps to the
 /// embedded file `<rel>.hv`.
@@ -103,8 +114,8 @@ fn std_source(key: &str) -> Option<&'static str> {
 /// mangle and rewrite it
 struct Module<'a> {
     /// this module's entry in the `Files` table: its spans point at this id, and
-    /// its canonical key (absolute path, or `std/...`, or `<prelude>`) and source
-    /// text are stored there rather than duplicated here.
+    /// its canonical key (absolute path, or `std/...`) and source text are
+    /// stored there rather than duplicated here.
     file: FileId,
     /// this module's entry in `Defs`, which owns its symbol slug.
     mid: ModId,
@@ -1167,7 +1178,12 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
     st
 }
 
-pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena: &'a Bump)
+/// Load `entry` and everything it transitively imports, then merge the lot into
+/// one flat program. `inject_prelude` makes `std/prelude`'s `pub` items visible
+/// unqualified in every other module; the module itself is loaded like any other
+/// std module either way, so an explicit `import std/prelude` is not a second
+/// copy of it.
+pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bump)
     -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl>), ()>
 {
     // a module we've decided to load but haven't parsed yet.
@@ -1180,11 +1196,14 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
 
     let mut worklist: VecDeque<Pending<'a>> = VecDeque::new();
 
-    // prelude first (id 0, if present) so it reads nicely in dumped output and
-    // becomes the implicit whole-module import of every user module.
-    let has_prelude = prelude_src.is_some();
-    if let Some(psrc) = prelude_src {
-        worklist.push_back(Pending { key: "<prelude>".into(), src: psrc, dir: None, is_entry: false });
+    // prelude first (id 0, if enabled) so it reads nicely in dumped output and
+    // becomes the implicit whole-module import of every user module. Seeding the
+    // worklist under its real `std/...` key is what makes a later explicit
+    // `import std/prelude` hit `seen` and reuse this module.
+    if inject_prelude {
+        let src = std_source(PRELUDE_KEY)
+            .expect("embedded std tree has no prelude.hv");
+        worklist.push_back(Pending { key: PRELUDE_KEY.into(), src, dir: None, is_entry: false });
     }
 
     // entry module. canonicalize *first* so its key matches how imports are
@@ -1307,7 +1326,10 @@ pub fn load_and_merge<'a>(entry: &FilePath, prelude_src: Option<&'a str>, arena:
     let symtabs: Vec<SymTab> = modules.iter()
         .map(|m| build_symtab(m, &mut defs, arena, &mut errs))
         .collect();
-    let prelude_id = if has_prelude { Some(0usize) } else { None };
+    // looked up rather than assumed to be 0: with `inject_prelude` off, a program
+    // may still `import std/prelude` by hand, and that must stay an ordinary
+    // qualified/selective import instead of silently going implicit everywhere.
+    let prelude_id = if inject_prelude { seen.get(PRELUDE_KEY).copied() } else { None };
 
     // re-exports: fold every `pub import`'s symbols into the importing module's
     // own export set, so a third module importing it sees them.

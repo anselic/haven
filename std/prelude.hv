@@ -7,6 +7,10 @@
 // plumbing, kept private; call the `pub` wrappers below instead.
 extern strlen(s: str) u64;
 
+// re-exports
+pub import std/string { String }
+pub import std/vec { Vec }
+
 // fixed to one format arg + one value.
 // TODO: a `Display`-style trait or a `format!`-style macro like Rust's.
 // NOTE: this generic path only works for integer/pointer/`str` args. A float
