@@ -1,0 +1,94 @@
+// Stage 3: `Delete` gives a type ownership, which makes it non-`Copy`. Moves
+// transfer it, and the compiler destroys whatever still owns something when its
+// scope ends, when it is overwritten, and on the way out of a `return`.
+//
+// Every destructor prints, so the output IS the ownership trace: each `make`
+// must be matched by exactly one `delete`, in the right place.
+//@ exit: 0
+
+import std/alloc { alloc, dealloc }
+import std/option { unwrap }
+
+struct Buf {
+    data: *i32,
+    tag: i32,
+
+    proc make(n: i32) Buf {
+        let p: *i32 = unwrap::<i32>(alloc::<i32>(1u64));
+        *p = n;
+        return Buf { data: p, tag: n };
+    }
+}
+
+extend Buf: Delete {
+    proc delete(*self) {
+        printf::<i32>("  delete %d\n", self.tag);
+        dealloc::<i32>(self.data);
+    }
+}
+
+// owns a `Buf` through a field, and declares no destructor of its own: still
+// not `Copy`, and its field is destroyed for it.
+struct Pair {
+    left: Buf,
+    n: i32,
+}
+
+// a by-value owner is moved into the call, so the callee destroys it.
+proc consume(b: Buf) i32 {
+    printf::<i32>("  consume %d\n", b.tag);
+    return b.tag;
+}
+
+// a pointer is a borrow: nothing is transferred and nothing is destroyed.
+proc peek(b: *Buf) i32 { return b.tag; }
+
+// the returned value reads the owned parameter, so it has to be computed
+// before that parameter is destroyed.
+proc weigh(b: Buf) i32 { return *b.data + b.tag; }
+
+// moved out by the `return`, so this function destroys nothing.
+proc relabel(b: Buf) Buf { return b; }
+
+proc make_pair(n: i32) Pair {
+    return Pair { left: Buf::make(n), n: n };
+}
+
+@export
+proc main() i32 {
+    let one: i32 = 1;
+
+    print("scope\n");
+    if (one > 0) {
+        let a: Buf = Buf::make(1);
+        printf::<i32>("  peek %d\n", peek(&a));
+    } // 1 dies here, at the end of the block that owns it
+
+    print("move\n");
+    let b: Buf = Buf::make(2);
+    let c: Buf = b;              // moved: `b` is dead, only `c` is destroyed
+    printf::<i32>("  peek %d\n", peek(&c));
+
+    print("consume\n");
+    let d: Buf = Buf::make(3);
+    consume(d);                  // moved into the callee, which destroys it
+
+    print("reassign\n");
+    let e: Buf = Buf::make(4);
+    e = Buf::make(5);            // 4 is destroyed before 5 replaces it
+
+    print("field\n");
+    let p: Pair = make_pair(6);
+    printf::<i32>("  pair %d\n", p.n);
+
+    print("weigh\n");
+    printf::<i32>("  = %d\n", weigh(Buf::make(7)));
+
+    print("relabel\n");
+    let m: Buf = relabel(Buf::make(8));
+    printf::<i32>("  = %d\n", m.tag);
+
+    print("end\n");
+    // everything still live is destroyed here, latest declaration first
+    return 0;
+}

@@ -8,7 +8,7 @@ use clap::Parser;
 //   haven_back   - ABI/layout, LLVM IR emission
 use haven_common::{ast, diag};
 use haven_front::module;
-use haven_mid::{typecheck, mono, safecheck, mil};
+use haven_mid::{typecheck, mono, own, safecheck, mil};
 use haven_back::llvm;
 
 mod args;
@@ -83,7 +83,11 @@ fn main() {
             // what lets the second typecheck pass below match a match-arm pattern
             // (which names the template) against a scrutinee whose type names the
             // instance.
-            let mono_ast = mono::monomorphize(&ast, &mut defs, &arena).unwrap_or_else(|e| {
+            // the `Delete` lang item, captured before mono drops every trait
+            // node: the post-mono pass below has no trait declarations left to
+            // find it in.
+            let delete_trait = cx.delete_trait;
+            let mut mono_ast = mono::monomorphize(&ast, &mut defs, &arena).unwrap_or_else(|e| {
                 diag::report_error("Monomorphization error", &e, &files);
                 std::process::exit(1);
             });
@@ -99,6 +103,19 @@ fn main() {
                     .for_each(|e| diag::report_error("Typecheck error", e, &files));
                 std::process::exit(1);
             }
+
+            // ownership: reject use-after-move and insert the `delete` calls
+            // that destroy every owner exactly once. Runs on the concrete
+            // program, where every type's `Copy`-ness is decidable, and before
+            // the alloc check, so a `@alloc(false)` function is judged on the
+            // destructors it actually ends up calling.
+            own::ownership_check(&mut mono_ast, &mut cx, delete_trait, &impls)
+                .unwrap_or_else(|errs| {
+                    for err in &errs {
+                        diag::report_error("Ownership error", err, &files);
+                    }
+                    std::process::exit(1);
+                });
 
             safecheck::alloc_check_program(&mono_ast, &defs).unwrap_or_else(|errs| {
                 for err in &errs {

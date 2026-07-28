@@ -127,6 +127,13 @@ pub struct Context<'a> {
     /// Declared traits, by name. Populated in the forward-declaration pass;
     /// consumed by conformance checking and bounded method-call resolution.
     pub traits: HashMap<DefId, TraitDef<'a>>,
+    /// The prelude's `Delete` trait - the one lang item the mid end knows by
+    /// name. Implementing it is what makes a type own a resource: it stops being
+    /// `Copy` (so it moves rather than aliases) and acquires a destructor the
+    /// ownership pass calls automatically. `None` when the prelude is disabled
+    /// (`--no-prelude`), in which case no type owns anything and the whole
+    /// ownership pass is a no-op.
+    pub delete_trait: Option<DefId>,
     /// Which `(type, trait)` conformances hold, from `extend T: Trait` blocks
     /// (verified during the forward pass). A `T: Trait` bound at a generic call
     /// site is satisfied iff the concrete argument type is present here.
@@ -197,6 +204,7 @@ impl<'a> Context<'a> {
             generic_enums: std::collections::HashMap::new(),
             method_calls: HashMap::new(),
             traits: HashMap::new(),
+            delete_trait: None,
             impls: std::collections::HashSet::new(),
             generic_bounds: HashMap::new(),
             members: MemberTable::new(),

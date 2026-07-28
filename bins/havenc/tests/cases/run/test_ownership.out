@@ -1,0 +1,22 @@
+scope
+  peek 1
+  delete 1
+move
+  peek 2
+consume
+  consume 3
+  delete 3
+reassign
+  delete 4
+field
+  pair 6
+weigh
+  delete 7
+  = 14
+relabel
+  = 8
+end
+  delete 8
+  delete 6
+  delete 5
+  delete 2

@@ -79,6 +79,18 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             let val = lower_expr(cx, value);
             let value_ty = cx.node_types[&value.id].clone();
             let ty = cx.node_types[&left.id].clone();
+            // a struct or data-enum aggregate is held by pointer, so both sides
+            // are addresses: assigning one is a field-by-field copy into the
+            // destination's existing storage, exactly as `Declare` does. A plain
+            // `Store` here wrote the source *pointer* into the first field.
+            if let Some(def) = aggregate_def(&ty, &cx.enums) {
+                let src = match val {
+                    Value::Reg(r) => r,
+                    _ => unreachable!("an aggregate value is always a pointer register"),
+                };
+                copy_struct(cx, def, src, ptr);
+                return;
+            }
             let val = coerce(cx, val, &value_ty, &ty);
             cx.emit(Inst::Store { ptr, val, ty, align: None });
         }

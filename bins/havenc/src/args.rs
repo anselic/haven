@@ -46,8 +46,8 @@ pub struct Args {
     )]
     pub emit_asm: bool,
 
-    // /// Do not inject the implicit prelude (print/println/... become undefined
-    // /// unless declared manually). Useful for freestanding builds.
-    // #[arg(long)]
-    // pub no_prelude: bool,
+    /// Do not inject the implicit prelude (print/println/... become undefined
+    /// unless declared manually). Useful for freestanding builds.
+    #[arg(long)]
+    pub no_prelude: bool,
 }

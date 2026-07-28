@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
-use haven_common::defs::{DefId, Defs};
+use haven_common::defs::{DefId, Defs, PRELUDE_KEY};
 use haven_common::layout::{self, TypeInfo, TypeTable, EnumRepr};
 
 mod context;
@@ -604,6 +604,16 @@ pub fn typecheck_program<'a>(
     // substituted per-impl / per-bound later.
     for node in program {
         if let TopLevelNode::Trait { def, name, methods, .. } = &node.value {
+            // the one trait the compiler itself knows about. Matched on the
+            // *source* spelling and the declaring module, so a user's own
+            // `trait Delete` stays an ordinary trait rather than quietly
+            // acquiring destructor semantics. Not on `name`: by this point the
+            // resolver has rewritten that to the emitted symbol
+            // (`std.prelude$Delete`).
+            let d = defs.get(*def);
+            if d.source_name == "Delete" && defs.module(d.module).key == PRELUDE_KEY {
+                cx.delete_trait = Some(*def);
+            }
             let mut ms: HashMap<&'a str, TraitMethodSig<'a>> = HashMap::new();
             let mut dup = false;
             for m in methods {

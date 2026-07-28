@@ -48,6 +48,14 @@ use bumpalo::Bump;
 
 use crate::ast::{FileId, Receiver, Span};
 
+/// The implicit prelude's canonical module key.
+///
+/// Shared rather than spelled twice because it is also how a *lang item* is
+/// identified: a trait the compiler itself knows about (`Delete`) is the one
+/// declared under this key, so a user's own `trait Delete` in their own module
+/// is an ordinary trait and does not silently acquire destructor semantics.
+pub const PRELUDE_KEY: &str = "std/prelude";
+
 /// Identity of one top-level definition.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct DefId(pub u32);

@@ -96,8 +96,8 @@ static STD_DIR: include_dir::Dir<'static> =
 /// The implicit prelude's canonical key. It is a plain `std/...` module: this is
 /// exactly the key `resolve_target` produces for an explicit `import
 /// std/prelude`, so the two share one entry in `seen` and therefore one set of
-/// definitions.
-const PRELUDE_KEY: &str = "std/prelude";
+/// definitions. Shared with the mid end, which identifies lang items by it.
+use haven_common::defs::PRELUDE_KEY;
 
 /// Source of an embedded stdlib module, by its `std/...` import path. The key is
 /// `imp.path.join("/")` (always forward slashes), so `std/<rel>` maps to the
