@@ -6,10 +6,11 @@
 /// `string_push_byte`/`string_push_str`, compare with `string_eq`, and hand a
 /// borrowable C string to `print`/`printf` via `string_as_str`.
 ///
-/// A `String` owns its heap allocation and does not free itself, call
-/// `string_free` when you are done with it. A fresh `string_new` allocates
-/// nothing, so an empty String is cheap and the first push performs the initial
-/// allocation. No UTF-8 validation is done: `string_push_byte` can build
+/// A `String` owns its heap allocation and frees it for you: it holds a `Vec<u8>`
+/// field, and `Vec` implements `Delete`, so a String is destroyed - buffer freed
+/// - when it goes out of scope, with no manual free to call. A fresh `string_new`
+/// allocates nothing, so an empty String is cheap and the first push performs the
+/// initial allocation. No UTF-8 validation is done: `string_push_byte` can build
 /// ill-formed sequences, so treat the contents as raw bytes unless you know they
 /// are valid text.
 
@@ -17,12 +18,16 @@
 // this module only adds string-flavored operations, built entirely on Vec's
 // public API. Bytes are stored WITHOUT a trailing NUL - `len` is the exact byte
 // count - and the NUL a C `str` needs is written on demand by `string_as_str`.
+//
+// destruction is inherited too: a `String` owns nothing of its own beyond the
+// `buf: Vec<u8>` field, so the compiler drops it by dropping `buf`, whose own
+// `Delete` frees the bytes. No `String`-level `Delete` impl is needed or wanted.
 // `str` is haven's own type (not a `*u8`), so it cannot be indexed or `ptr_cast`;
 // the two runtime shims below reinterpret between a `str` and its raw bytes (a
 // no-op at the machine level, both are a bare pointer), and libc `strlen`
 // recovers a `str`'s length.
 
-import std/vec { Vec, vec_new, vec_with_capacity, vec_reserve, vec_push, vec_get, vec_get_ptr, vec_set, vec_len, vec_cap, vec_clear, vec_free }
+import std/vec { Vec, vec_new, vec_with_capacity, vec_reserve, vec_push, vec_get, vec_get_ptr, vec_set, vec_len, vec_cap, vec_clear }
 
 extern strlen(s: str) u64;
 extern rt_str_as_bytes(s: str) *u8;
@@ -75,7 +80,8 @@ pub proc string_push_str(s: *String, text: str) {
     }
 }
 
-/// Logically empty the String without freeing or shrinking its buffer.
+/// Logically empty the String without shrinking its buffer. The bytes own
+/// nothing, so this just resets the length.
 pub proc string_clear(s: *String) { vec_clear::<u8>(&s.buf); }
 
 /// Whether two Strings hold exactly the same bytes.
@@ -99,6 +105,3 @@ pub proc string_as_str(s: *String) str {
     vec_set::<u8>(&s.buf, string_len(s), 0u8);
     return rt_bytes_as_str(vec_get_ptr::<u8>(&s.buf, 0u64));
 }
-
-/// Release the backing allocation and reset to the empty, unallocated state.
-pub proc string_free(s: *String) { vec_free::<u8>(&s.buf); }

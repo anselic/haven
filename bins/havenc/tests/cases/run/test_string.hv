@@ -1,9 +1,11 @@
 // std/string: build, borrow-as-`str`, compare, clear, and grow an owned String.
+// Every String here is dropped automatically at end of scope (it owns its bytes
+// through a `Vec<u8>` field), so there are no manual frees.
 
 import std/string {
     String, string_new, string_with_capacity, string_from_str,
     string_push_byte, string_push_str, string_len, string_cap,
-    string_is_empty, string_eq, string_as_str, string_clear, string_free,
+    string_is_empty, string_eq, string_as_str, string_clear,
 }
 
 // bool isn't numeric, so funnel truthiness through an i32 for `%d` printing.
@@ -48,11 +50,7 @@ proc main() i32 {
     printf::<u64>("%llu\n", string_len(&big));             // 100
     printf::<i32>("%d\n", yn(string_cap(&big) >= 100u64)); // 1
 
-    string_free(&s);
-    string_free(&greet);
-    string_free(&a);
-    string_free(&b);
-    string_free(&c);
-    string_free(&big);
+    // no frees: every String above owns its buffer through a `Vec<u8>` field and
+    // is destroyed automatically at the end of this scope.
     return 0;
 }

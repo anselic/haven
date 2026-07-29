@@ -1,0 +1,56 @@
+// `Display` and `Delete` compose on the same container.
+//
+// A `Vec<Res>` where `Res` owns a heap allocation *and* is displayable: the Vec
+// is rendered by borrowing each element (display takes `*self`, so nothing is
+// moved out), and then destroyed at end of scope, dropping each element. This
+// ties together the whole feature set - `ptr_write` to fill the Vec, the
+// conditional `Vec<T>: Display` and unconditional `Vec<T>: Delete`, and
+// `drop_in_place` running each `Res::delete`.
+//@ exit: 0
+
+import std/fmt { Display, display_println }
+import std/string { String, string_from_str, string_push_str, string_as_str }
+import std/vec { Vec, vec_new, vec_push }
+import std/alloc { alloc, dealloc }
+import std/option { unwrap }
+
+struct Res { data: *i32 }
+
+extend Res: Delete {
+    proc delete(*self) {
+        printf::<i32>("drop res %d\n", *self.data);
+        dealloc::<i32>(self.data);
+    }
+}
+
+extend Res: Display {
+    proc display(*self) String {
+        let s: String = string_from_str("Res(");
+        let n: String = (*self.data).display();
+        string_push_str(&s, string_as_str(&n));
+        string_push_str(&s, ")");
+        return s;
+    }
+}
+
+proc res(n: i32) Res {
+    let p: *i32 = unwrap::<i32>(alloc::<i32>(1u64));
+    ptr_write::<i32>(p, n);
+    return Res { data: p };
+}
+
+@export
+proc main() i32 {
+    let v: Vec<Res> = vec_new::<Res>();
+    vec_push::<Res>(&v, res(10));
+    vec_push::<Res>(&v, res(20));
+    vec_push::<Res>(&v, res(30));
+
+    // borrows each element to render it - no move, so the Vec still owns them.
+    display_println::<Vec<Res>>(&v);   // [Res(10), Res(20), Res(30)]
+    printf::<i32>("displayed %d\n", 0);
+
+    // `v` drops here: its three elements are destroyed in index order, then the
+    // buffer is freed.
+    return 0;
+}

@@ -6,18 +6,6 @@ use super::context::{Context, MethodCall, RecvAdjust};
 use super::generics::{bind_generics, bind_turbofish, check_bounds, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self};
 use super::enums::{enum_variant, split_enum_variant, enum_variant_ctor, check_variant_pattern};
 
-/// Whether `expr` denotes a place (an addressable location) rather than a
-/// temporary. Must stay in sync with what MIL's `lower_lvalue` can handle: a
-/// variable, a field access, an index, or a pointer dereference. Everything else
-/// (a call result, a literal, an arithmetic result, a struct/array literal) is a
-/// temporary with no storage to take the address of.
-fn is_place(expr: &Expr<'_>) -> bool {
-    matches!(&expr.value,
-        ExprNode::Var(_)
-        | ExprNode::Access { .. }
-        | ExprNode::Index { .. }
-        | ExprNode::Unary { op: UnaryOp::Deref, .. })
-}
 
 /// The `extend` method `field` a receiver of type `base_ty` dispatches to, with
 /// the bindings that specialize the impl to it.
@@ -609,19 +597,12 @@ fn infer<'a>(
             let operand_ty = infer(cx, operand)?;
             match op {
                 UnaryOp::AddrOf => {
-                    // `&` needs a place to point at. Taking the address of a
-                    // temporary (a call result, literal, arithmetic, ...) has no
-                    // storage; reject it here rather than panicking in lowering,
-                    // which only knows how to address real places.
-                    if !is_place(operand) {
-                        return Err(Error {
-                            msg: format!(
-                                "cannot take the address of a temporary value `{}`; \
-                                 bind it to a `let` first, then take a pointer to that",
-                                operand.value),
-                            span,
-                        });
-                    }
+                    // `&place` yields the place's address. `&<temporary>` (a call
+                    // result, literal, arithmetic, ...) has no storage of its own,
+                    // so MIL spills the value into a fresh slot and addresses that
+                    // (`spill_temporary`). An *owning* temporary is rejected in the
+                    // ownership pass, where the leak - a slot no scope destroys -
+                    // is caught alongside the same case for `*self` receivers.
                     Type::Pointer(Box::new(operand_ty))
                 },
                 UnaryOp::Deref => match operand_ty {
@@ -967,8 +948,6 @@ fn infer<'a>(
                     _ => None,
                 };
                 if let Some((target, params, return_type)) = resolved {
-                    let base_is_ptr = matches!(base_ty, Type::Pointer(_));
-
                     // params[0] is the receiver `self`; args match the rest.
                     let arg_params = &params[1..];
                     if args.len() != arg_params.len() {
@@ -982,12 +961,18 @@ fn infer<'a>(
                         check_expr(cx, param_ty, arg)?;
                     }
 
-                    // a `*self` method called on a value takes its address;
-                    // otherwise the base passes straight through (a `*self`
-                    // on a `*T`, or a value receiver whose aggregate is
-                    // already handled by pointer).
-                    let self_is_ptr = matches!(params[0], Type::Pointer(_));
-                    let adjust = if self_is_ptr && !base_is_ptr {
+                    // The base must become a `self` of type `params[0]`. If it
+                    // already has that type it passes straight through; if `self`
+                    // is one pointer deeper, take its address. Comparing the exact
+                    // types (rather than just "is either a pointer?") is what tells
+                    // an auto-`->` receiver - `extend Point`'s `*self` reached via a
+                    // `*Point` base, where base already *is* `*Point` - apart from
+                    // an `extend *T` receiver, where the base *is* the `*T` self and
+                    // the method's `*self` wants `**T`.
+                    let want = &params[0];
+                    let adjust = if &base_ty == want {
+                        RecvAdjust::AsIs
+                    } else if matches!(want, Type::Pointer(inner) if inner.as_ref() == &base_ty) {
                         RecvAdjust::AddrOf
                     } else {
                         RecvAdjust::AsIs

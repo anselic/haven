@@ -1876,7 +1876,13 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
             impls.push(ImplDecl {
                 self_ty,
                 head,
-                generics: imp.generics.clone(),
+                // a `where` clause's bound names are resolved here for the same
+                // reason the member table resolves them (pass 1.5): pass 1.25
+                // merged the clause in before pass 2 knew the trait's `def`, so
+                // the raw copy still carries `UNRESOLVED`. `implements` keys on
+                // that `def`, so without this a conditional impl (`Vec<T>: Display
+                // where T: Display`) never satisfies a bound on the whole `Vec<T>`.
+                generics: resolve_bound_defs(&imp.generics, scopes),
                 trait_: trait_.def,
                 span: imp.span.clone(),
             });

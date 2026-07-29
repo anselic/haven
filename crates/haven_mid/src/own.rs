@@ -275,6 +275,14 @@ impl<'a, 'c> Checker<'a, 'c> {
             }
             ExprNode::Access { base, .. } => self.visit(base),
             ExprNode::Index { slice, index } => { self.visit(slice); self.visit(index); }
+            // `&<temporary>` spills the value into a slot and borrows it - fine for
+            // a `Copy` value, but an owning temporary belongs to no scope and its
+            // `delete` would never run, the same leak `borrowed_temp` rejects for a
+            // `*self` receiver on a temporary.
+            ExprNode::Unary { op: UnaryOp::AddrOf, operand } => {
+                self.visit(operand);
+                self.borrowed_temp(operand);
+            }
             ExprNode::Unary { operand, .. } => self.visit(operand),
             ExprNode::Binary { left, right, .. } => { self.visit(left); self.visit(right); }
             // a literal takes ownership of whatever is put into it.
@@ -327,10 +335,9 @@ impl<'a, 'c> Checker<'a, 'c> {
         if self.model.is_copy(&ty) { return; }
         let shown = self.cx.show(&ty);
         self.error(base.span, format!(
-            "cannot call a method on this temporary: `{}` owns a resource, and a \
-             temporary belongs to no scope, so its '{}' would never run and the \
-             resource would leak. Bind it with a `let` first, then call the \
-             method on that",
+            "cannot borrow this temporary: `{}` owns a resource, and a temporary \
+             belongs to no scope, so its '{}' would never run and the resource \
+             would leak. Bind it with a `let` first, then borrow that",
             shown, DELETE_METHOD));
     }
 

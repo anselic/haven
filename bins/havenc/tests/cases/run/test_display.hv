@@ -1,0 +1,82 @@
+// std/fmt: `Display`, a trait that renders a value as an owned `String`.
+//
+// Implemented for the integer primitives, `bool`, `str`, `String`, and - the
+// interesting one - `Vec<T>` whenever `T: Display`. The last is a *conditional*
+// impl on a generic container, so it exercises the whole stack: the `where`
+// clause, calling a bounded method on the element type, and reaching all of that
+// through the generic `display_println` helper (whose own `T: Display` bound must
+// be satisfied by `Vec<i32>` as a whole).
+//
+// `display_println::<T>` exists because `string_as_str(&x.display())` cannot be
+// written directly - you can't take the address of the temporary `x.display()` -
+// so the helper binds it to a `let` for you.
+//@ exit: 0
+
+import std/fmt { Display, display_println }
+import std/string { String, string_from_str, string_push_str, string_as_str }
+import std/vec { Vec, vec_new, vec_push }
+
+// a user type is displayable by composing the displays of its parts.
+struct Point { x: i32, y: i32 }
+
+extend Point: Display {
+    proc display(*self) String {
+        let s: String = string_from_str("(");
+        let xs: String = self.x.display();
+        string_push_str(&s, string_as_str(&xs));
+        string_push_str(&s, ", ");
+        let ys: String = self.y.display();
+        string_push_str(&s, string_as_str(&ys));
+        string_push_str(&s, ")");
+        return s;
+    }
+}
+
+@export
+proc main() i32 {
+    // --- primitives
+    let a: i32 = 42;                        display_println::<i32>(&a);   // 42
+    let b: i32 = -7;                        display_println::<i32>(&b);   // -7
+    let z: u64 = 0u64;                      display_println::<u64>(&z);   // 0
+    let big: u64 = 18446744073709551615u64; display_println::<u64>(&big); // u64 max
+    let t: bool = true;                     display_println::<bool>(&t);  // true
+    let f: bool = false;                    display_println::<bool>(&f);  // false
+
+    // --- str and String
+    let hello: str = "hello";               display_println::<str>(&hello);   // hello
+    let owned: String = string_from_str("owned"); display_println::<String>(&owned); // owned
+
+    // --- a Vec of primitives, rendered as `[a, b, c]`, through the helper (its
+    // `T: Display` bound is `Vec<i32>: Display`, checked recursively).
+    let v: Vec<i32> = vec_new::<i32>();
+    vec_push::<i32>(&v, 1);
+    vec_push::<i32>(&v, 22);
+    vec_push::<i32>(&v, 333);
+    display_println::<Vec<i32>>(&v);        // [1, 22, 333]
+
+    // --- an empty Vec renders as `[]`
+    let empty: Vec<i32> = vec_new::<i32>();
+    display_println::<Vec<i32>>(&empty);    // []
+
+    // --- nested containers: `T` here is itself a generic instance, so dispatch
+    // has to put `Vec$i32` back into `Vec<i32>` form to find its impl.
+    let outer: Vec<Vec<i32>> = vec_new::<Vec<i32>>();
+    let row0: Vec<i32> = vec_new::<i32>();
+    vec_push::<i32>(&row0, 1);
+    vec_push::<i32>(&row0, 2);
+    vec_push::<Vec<i32>>(&outer, row0);
+    let row1: Vec<i32> = vec_new::<i32>();
+    vec_push::<i32>(&row1, 3);
+    vec_push::<Vec<i32>>(&outer, row1);
+    display_println::<Vec<Vec<i32>>>(&outer); // [[1, 2], [3]]
+
+    // --- a user type, and a Vec of it
+    let p: Point = Point { x: 7, y: 8 };
+    display_println::<Point>(&p);           // (7, 8)
+    let pts: Vec<Point> = vec_new::<Point>();
+    vec_push::<Point>(&pts, Point { x: 1, y: 2 });
+    vec_push::<Point>(&pts, Point { x: 3, y: 4 });
+    display_println::<Vec<Point>>(&pts);    // [(1, 2), (3, 4)]
+
+    return 0;
+}

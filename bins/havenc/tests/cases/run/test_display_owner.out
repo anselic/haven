@@ -1,0 +1,5 @@
+[Res(10), Res(20), Res(30)]
+displayed 0
+drop res 10
+drop res 20
+drop res 30

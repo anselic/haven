@@ -139,6 +139,11 @@ struct Mono<'p, 'a> {
     /// [`Self::impl_applies`]. Only destructors consult this: they are the one
     /// thing mono creates without a call site asking for it.
     impls: &'p [ImplDecl<'a>],
+    /// Each minted instance's template and concrete arguments, keyed by the
+    /// instance's own identity. `add_instance` on `Defs` records the template but
+    /// only a display *string* for the arguments; dispatch needs them as real
+    /// types, to turn `Vec$i32` back into `Vec<i32>` (see [`Self::deinstance`]).
+    instance_args: HashMap<DefId, (DefId, Vec<ConcreteArg<'a>>)>,
 }
 
 /// A bound const generic parameter: its concrete value plus declared type, so a
@@ -306,8 +311,14 @@ fn display_name<'a>(defs: &Defs<'a>, base: DefId, args: &[ConcreteArg<'a>]) -> S
 /// rather than shared because mono holds a plain [`MemberTable`] and no
 /// typecheck context. Both must agree on which impl a receiver picks — mono
 /// mints the instance the typechecker will later expect to exist.
+/// Returns the resolved member, its bindings, and whether it was reached through
+/// the one-level pointer fallback (`via_deref`) rather than on the receiver's own
+/// head. The receiver adjustment depends on the distinction: a `*self` method
+/// found directly on a `*T` receiver (an `extend *T` blanket) has `self: **T`, so
+/// the receiver must be address-taken, whereas the same method found by derefing
+/// (an `extend T` reached through a `*T`) has `self: *T` and passes as-is.
 fn member_of<'a>(members: &MemberTable<'a>, ty: &Type<'a>, name: &str)
-    -> Option<(Member<'a>, Unified<'a>)>
+    -> Option<(Member<'a>, Unified<'a>, bool)>
 {
     fn direct<'a>(members: &MemberTable<'a>, ty: &Type<'a>, name: &str)
         -> Option<(Member<'a>, Unified<'a>)>
@@ -321,8 +332,8 @@ fn member_of<'a>(members: &MemberTable<'a>, ty: &Type<'a>, name: &str)
         unify(&m.self_ty, ty, &params, &mut u).then(|| (m.clone(), u))
     }
     match (direct(members, ty, name), ty) {
-        (None, Type::Pointer(inner)) => direct(members, inner, name),
-        (found, _) => found,
+        (None, Type::Pointer(inner)) => direct(members, inner, name).map(|(m, u)| (m, u, true)),
+        (found, _) => found.map(|(m, u)| (m, u, false)),
     }
 }
 
@@ -364,7 +375,48 @@ impl<'p, 'a> Mono<'p, 'a> {
             module, kind, source_name, is_pub, linkage: Linkage::Fixed(mangled), span,
         });
         self.defs.add_instance(def, base, display);
+        self.instance_args.insert(def, (base, args.to_vec()));
         (def, mangled)
+    }
+
+    /// Put a monomorphized instance type back into template form: the flat
+    /// `Named` `Vec$i32` (no args) becomes `Vec<i32>` (`Def(Vec)` + `[i32]`).
+    ///
+    /// Dispatch keys on the *template* head and recovers an impl's parameters by
+    /// unifying against the arguments, so a receiver whose type is an instance -
+    /// which is what happens when a generic function's type parameter was bound to
+    /// a generic instance, `foo::<Vec<i32>>` reaching `x.display()` on `x: *T` -
+    /// has to be de-instanced first, or `member_of` keys on `Def(Vec$i32)`, which
+    /// no `extend Vec<T>` was registered against, and finds nothing. A
+    /// non-generic struct is a `Named` with no args too, but is absent from
+    /// `instance_args`, so it passes through unchanged.
+    fn deinstance(&self, ty: &Type<'a>) -> Type<'a> {
+        match ty {
+            Type::Named { def, args } if args.is_empty() => match self.instance_args.get(def) {
+                Some((base, cargs)) => Type::Named {
+                    def: *base,
+                    args: cargs.iter().map(|a| match a {
+                        ConcreteArg::Type(t) => GenericArg::Type(self.deinstance(t)),
+                        ConcreteArg::Const(n) => GenericArg::Const(ConstVal::Lit(*n)),
+                    }).collect(),
+                },
+                None => ty.clone(),
+            },
+            // a `Named` that still carries args is already template-form; recurse
+            // in case one of the args is itself an instance.
+            Type::Named { def, args } => Type::Named {
+                def: *def,
+                args: args.iter().map(|a| match a {
+                    GenericArg::Type(t) => GenericArg::Type(self.deinstance(t)),
+                    other => other.clone(),
+                }).collect(),
+            },
+            Type::Pointer(inner) => Type::Pointer(Box::new(self.deinstance(inner))),
+            Type::Slice(inner)   => Type::Slice(Box::new(self.deinstance(inner))),
+            Type::Array(inner, n) => Type::Array(Box::new(self.deinstance(inner)), n.clone()),
+            Type::Simd(inner, n)  => Type::Simd(Box::new(self.deinstance(inner)), n.clone()),
+            other => other.clone(),
+        }
     }
 
     /// Record a generic-struct instantiation request, return its mangled name
@@ -590,11 +642,15 @@ impl<'p, 'a> Mono<'p, 'a> {
         // instantiation's parameters bound but generic types left generic, since
         // that is the form an impl is written against.
         let recv_ty = self.node_types.get(&base.id)?.clone();
-        let recv_ty = self.subst_params(&recv_ty, b);
+        // `subst_params` may bind a parameter to a generic *instance* (`Vec$i32`)
+        // rather than to `Vec<i32>`, when the caller's turbofish was itself a
+        // generic type; `deinstance` restores template form so head dispatch can
+        // find the impl and unification can recover its parameters.
+        let recv_ty = self.deinstance(&self.subst_params(&recv_ty, b));
 
         // dispatch by head, then through one pointer level - the same two-step
         // the typechecker uses, so both agree on which impl a receiver picks.
-        let (m, u) = member_of(&self.members, &recv_ty, field)?;
+        let (m, u, via_deref) = member_of(&self.members, &recv_ty, field)?;
         if m.receiver == Receiver::Associated { return None; }
         // not a template: a method of a concrete `extend` that declares no
         // generics of its own needs no instance, and the post-mono typecheck
@@ -629,10 +685,14 @@ impl<'p, 'a> Mono<'p, 'a> {
         }
         let mangled = self.request(m.name, cargs, span.clone());
 
-        // a `*self` method called on a value takes its address; a value `self`,
-        // or a `*self` already reached through a pointer, passes straight through.
+        // form the `self` argument. A `*self` method found directly on the
+        // receiver's head takes `self: *recv_ty`, so the base is address-taken -
+        // whether that base is a value (`extend i32` on an `i32`) or is itself a
+        // pointer (`extend *T` on a `*i32`, whose `self` is `**i32`). Reached
+        // through the pointer fallback instead (`extend i32` on a `*i32`), the
+        // base already *is* the `*self`, so it passes straight through.
         let recv = self.rebuild_expr(base, b);
-        let recv = if m.receiver == Receiver::Pointer && !matches!(recv_ty, Type::Pointer(_)) {
+        let recv = if m.receiver == Receiver::Pointer && !via_deref {
             Metadata::new(
                 ExprNode::Unary { op: UnaryOp::AddrOf, operand: Box::new(recv) },
                 base.span.clone(),
@@ -991,6 +1051,7 @@ pub fn monomorphize<'a>(
         defs,
         node_types,
         impls,
+        instance_args: HashMap::new(),
     };
     let empty = Bindings::empty();
 

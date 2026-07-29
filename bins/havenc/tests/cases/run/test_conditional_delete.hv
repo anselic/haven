@@ -4,18 +4,17 @@
 // `extend Holder<T>: Delete where T: Delete` says a `Holder<Res>` owns something
 // and a `Holder<i32>` does not. That distinction has to hold in two places at
 // once: the instance's `Copy`-ness (a `Holder<i32>` may still be copied) and
-// whether monomorphization mints a destructor for it at all.
+// whether monomorphization mints a destructor for it at all - before this it
+// minted one for *every* instance.
 //
-// The second is what makes the clause load-bearing here rather than advisory.
-// Destructors are the one thing mono creates with no call site asking for it, so
-// before this it minted one for *every* instance - and specializing the body of
-// `Vec<T>::delete` at `T = u8` produces a call to `u8::delete`, which does not
-// exist. The `Vec<u8>` inside std's `String` meant that broke any program that
-// wrote the impl and also used a string, which the `String` below pins down.
+// std's own `Vec<T>: Delete` is *unconditional* (the allocation always needs
+// freeing), so a `Vec<Res>` here is dropped by that impl - dropping its elements
+// too - while the `Vec<u8>` inside `String` is left untouched. Both are exercised
+// below to show the conditional `Holder` and the unconditional `Vec` compose.
 //@ exit: 0
 
-import std/string { String, string_from_str, string_as_str, string_free }
-import std/vec { Vec, vec_new, vec_len, vec_free }
+import std/string { String, string_from_str, string_as_str }
+import std/vec { Vec, vec_new, vec_push, vec_len }
 
 struct Res { id: i32 }
 
@@ -29,13 +28,6 @@ extend Holder<T>: Delete where T: Delete {
     proc delete(*self) { printf::<i32>("drop holder %d\n", self.tag); }
 }
 
-extend Vec<T>: Delete where T: Delete {
-    proc delete(*self) {
-        printf::<u64>("drop vec of %llu\n", vec_len::<T>(self));
-        vec_free::<T>(self);
-    }
-}
-
 @export
 proc main() i32 {
     // the clause does not hold at `i32`, so this instance has no destructor and
@@ -44,20 +36,21 @@ proc main() i32 {
     let copied: Holder<i32> = plain;
     printf::<i32>("copied tag %d\n", copied.tag);
 
-    // `String` holds a `Vec<u8>`; u8 owns nothing, so the Vec impl must not
-    // cover it and `String` must stay exactly as it was.
+    // `String` holds a `Vec<u8>`; u8 owns nothing, so std's `Vec` destructor
+    // frees the bytes without dropping any element, and the String is untouched
+    // beyond that. Dropped automatically at end of scope.
     let s: String = string_from_str("hi");
     println(string_as_str(&s));
-    string_free(&s);
 
-    // covered, so dropped at end of scope - after the two below it, in reverse
-    // declaration order.
+    // a std `Vec` of owners: unconditionally `Delete`, and `drop_in_place` runs
+    // `Res::delete` for each of the two elements before the buffer is freed.
     let owned: Vec<Res> = vec_new::<Res>();
+    vec_push::<Res>(&owned, Res { id: 10 });
+    vec_push::<Res>(&owned, Res { id: 11 });
     printf::<u64>("owned %llu\n", vec_len::<Res>(&owned));
 
-    // note the golden shows no "drop res 5": a type with a `Delete` of its own
-    // is destroyed by that method alone, and its fields are that method's
-    // business. Long-standing, and not something the clause changes.
+    // note the golden shows no "drop res 5": a `Holder<Res>` implements `Delete`
+    // itself, so its `item` field is that method's business, not auto-dropped.
     let holder: Holder<Res> = Holder::<Res> { item: Res { id: 5 }, tag: 2 };
     printf::<i32>("holder tag %d\n", holder.tag);
 

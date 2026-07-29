@@ -24,6 +24,24 @@ void rt_printf(const char* fmt, ...) {
 // `printf` is a normal C-to-C variadic call the C compiler handles correctly.
 void rt_printf_f64(const char* fmt, double d) { printf(fmt, d); }
 
+char* rt_f32_to_str(float f, int32_t precision) {
+    static char buf[32];
+    if (precision < 0)
+        snprintf(buf, sizeof(buf), "%g", f);
+    else
+        snprintf(buf, sizeof(buf), "%.*g", precision, f);
+    return buf;
+}
+
+char* rt_f64_to_str(double d, int32_t precision) {
+    static char buf[32];
+    if (precision < 0)
+        snprintf(buf, sizeof(buf), "%g", d);
+    else
+        snprintf(buf, sizeof(buf), "%.*g", precision, d);
+    return buf;
+}
+
 // Heap allocation, exposed to the language via `std/alloc` (see crt/std/alloc.hv).
 // On failure these return NULL rather than aborting: `std/alloc` wraps the result
 // in `Option<*T>`, so out-of-memory surfaces as `none` for the caller to handle.

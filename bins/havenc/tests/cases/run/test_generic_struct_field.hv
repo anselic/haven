@@ -3,7 +3,7 @@
 // instance and emits it, so `String { buf: Vec<u8> }` and friends work without
 // making the outer struct generic. Also exercises `vec_pop`'s `Option<*T>`.
 
-import std/vec { Vec, vec_new, vec_push, vec_get, vec_len, vec_pop, vec_free }
+import std/vec { Vec, vec_new, vec_push, vec_get, vec_len, vec_pop }
 import std/option { Option, unwrap }
 
 struct Pair { xs: Vec<i32>, tag: i32 }
@@ -21,6 +21,7 @@ proc main() i32 {
     printf::<i32>("%d\n", *unwrap::<i32>(popped)); // 20
     printf::<u64>("%llu\n", vec_len::<i32>(&p.xs)); // 1
 
-    vec_free::<i32>(&p.xs);
+    // no free: `Pair` owns through its `xs: Vec<i32>` field, so it is destroyed
+    // - and the Vec's buffer released - when it goes out of scope here.
     return 0;
 }

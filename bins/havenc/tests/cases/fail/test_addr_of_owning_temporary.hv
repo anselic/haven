@@ -1,0 +1,26 @@
+// `&<temporary>` is allowed now, but not when the temporary *owns* a resource.
+//
+// The value is spilled into a slot to be pointed at, and that slot is not a
+// binding - no scope lists it, so its `delete` never runs and the resource leaks.
+// This is the exact counterpart of a `*self` method on an owning temporary
+// (fail/test_temp_owner_receiver); the fix is the same `let` the message asks for.
+//@ error: owns a resource
+
+import std/alloc { alloc, dealloc }
+import std/option { unwrap }
+
+struct Buf { data: *i32 }
+
+extend Buf: Delete {
+    proc delete(*self) { dealloc::<i32>(self.data); }
+}
+
+proc buf_new() Buf {
+    return Buf { data: unwrap::<i32>(alloc::<i32>(1u64)) };
+}
+
+@export
+proc main() i32 {
+    let p: *Buf = &buf_new();
+    return 0;
+}

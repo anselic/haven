@@ -1,6 +1,7 @@
 copied tag 1
 hi
-owned 0
+owned 2
 holder tag 2
 drop holder 2
-drop vec of 0
+drop res 10
+drop res 11

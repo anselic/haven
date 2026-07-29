@@ -1,0 +1,46 @@
+// Explicit `&<temporary>`: taking the address of something that is not a place.
+//
+// A temporary has no storage, so lowering spills its value into a slot and hands
+// back that slot's address - the same machinery a `*self` method uses on a
+// temporary receiver, now reachable through the `&` the user writes. This used to
+// be rejected outright in the typechecker ("cannot take the address of a
+// temporary value"); the only remaining restriction is that the temporary must
+// not *own* a resource (see fail/test_addr_of_owning_temporary), since its slot
+// belongs to no scope and its `delete` would never run.
+//
+// The operands below cover each shape: a literal, an operator result, a call
+// result, a string literal, a global (real storage, so its true address), a
+// struct temporary (produced in a slot already), and a field of one.
+//@ exit: 0
+
+struct Point { x: i32, y: i32 }
+
+const G: i32 = 9;
+
+proc five() i32 { return 5; }
+proc origin() Point { return Point { x: 3, y: 4 }; }
+
+@export
+proc main() i32 {
+    let a: *i32 = &42;            // literal
+    let b: *i32 = &(20 + 22);     // operator result
+    let c: *i32 = &five();        // call result
+    let s: *str = &"hello";       // string literal
+    let g: *i32 = &G;             // global: its symbol is the real address
+    printf::<i32>("%d\n", *a);    // 42
+    printf::<i32>("%d\n", *b);    // 42
+    printf::<i32>("%d\n", *c);    // 5
+    println(*s);                  // hello
+    printf::<i32>("%d\n", *g);    // 9
+
+    // a struct temporary is produced in storage already, so `&` is that storage.
+    let p: *Point = &origin();
+    printf::<i32>("%d\n", p.x);   // 3 (auto-deref field access)
+    printf::<i32>("%d\n", p.y);   // 4
+
+    // a field of a temporary is a place inside the temporary's slot.
+    let fx: *i32 = &origin().x;
+    printf::<i32>("%d\n", *fx);   // 3
+
+    return 0;
+}

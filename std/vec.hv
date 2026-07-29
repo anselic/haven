@@ -5,14 +5,23 @@
 /// `vec_with_capacity` to pre-size), append with `vec_push`, read with
 /// `vec_get`/`vec_get_ptr`, and walk it with `vec_for_each`/`vec_map`.
 ///
-/// A `Vec` owns a heap allocation and does not free itself, call `vec_free`
-/// when you are done with it. A fresh `vec_new` allocates nothing, so an empty
-/// Vec is cheap and the first push performs the initial allocation.
+/// A `Vec` owns its heap allocation and frees it for you: it implements `Delete`,
+/// so the buffer is released when the Vec goes out of scope, and each element is
+/// destroyed first (a no-op for elements that own nothing). There is no manual
+/// free to call. A fresh `vec_new` allocates nothing, so an empty Vec is cheap
+/// and the first push performs the initial allocation.
 
 // layout is a three-word triple (data/len/cap). growth doubles `cap` via
 // `realloc` once `len` would exceed it, so N pushes cost O(N) total. because
 // rt_realloc(null, n) behaves like malloc(n), a null `data` makes the first
 // reserve a plain allocation with no special-casing.
+//
+// element ownership: `vec_push`/`vec_set` initialize a slot with `ptr_write`
+// rather than `*p = value`, because the slot is fresh (or being overwritten in
+// place, which the ownership pass forbids for an owning `T`). Destruction goes
+// the other way: the `Delete` impl runs `drop_in_place` over the live prefix,
+// which the ownership pass expands into one `T::delete` per element - and into
+// nothing when `T` owns nothing, so a `Vec<i32>` pays for none of this.
 
 import std/alloc { alloc, realloc, dealloc }
 import std/option { Option, unwrap }
@@ -52,14 +61,20 @@ pub proc vec_reserve<T>(v: *Vec<T>, needed: u64) {
     }
 }
 
-/// Append `value` to the end, growing the buffer if it is full.
+/// Append `value` to the end, growing the buffer if it is full. `value` is moved
+/// into the Vec (for an owning `T`, the caller's copy is consumed).
 pub proc vec_push<T>(v: *Vec<T>, value: T) {
     vec_reserve::<T>(v, v.len + 1u64);
-    v.data[v.len] = value;
+    // the slot is fresh capacity, uninitialized, so this initializes it rather
+    // than overwriting a live value - which is exactly what `ptr_write` is for.
+    ptr_write::<T>(&v.data[v.len], value);
     v.len = v.len + 1u64;
 }
 
 /// Read the element at `i` by value. Out-of-bounds is undefined; guard with len.
+/// This copies the element out, so it is for a `Copy` `T` (an integer, a plain
+/// struct); for an owning `T` it would duplicate ownership, and instantiating it
+/// is a move error - reach the element by pointer with `vec_get_ptr` instead.
 pub proc vec_get<T>(v: *Vec<T>, i: u64) T {
     return v.data[i];
 }
@@ -69,9 +84,12 @@ pub proc vec_get_ptr<T>(v: *Vec<T>, i: u64) *T {
     return &v.data[i];
 }
 
-/// Overwrite the element at `i`. Out-of-bounds is undefined; guard with len.
+/// Write `value` into the slot at `i`, without destroying whatever was there.
+/// Out-of-bounds is undefined; guard with len. Because it does not drop the
+/// previous occupant, this is for a `Copy` `T` or a slot known to be
+/// uninitialized; overwriting a live owning value with it would leak that value.
 pub proc vec_set<T>(v: *Vec<T>, i: u64, value: T) {
-    v.data[i] = value;
+    ptr_write::<T>(&v.data[i], value);
 }
 
 /// Remove and return the last element. Returns `Option<*T>`: `some` pointing at
@@ -85,19 +103,25 @@ pub proc vec_pop<T>(v: *Vec<T>) Option<*T> {
     return Option::Some::<*T>(&v.data[v.len]);
 }
 
-/// Logically empty the Vec without touching its capacity or freeing memory.
+/// Empty the Vec, destroying its elements but keeping the buffer and capacity.
+/// For an owning `T` each element's `delete` runs; for a `Copy` `T` this just
+/// resets the length.
 pub proc vec_clear<T>(v: *Vec<T>) {
+    drop_in_place::<T>(v.data, v.len);
     v.len = 0u64;
 }
 
-/// Release the backing allocation and reset to the empty, unallocated state.
-pub proc vec_free<T>(v: *Vec<T>) {
-    if (v.cap != 0u64) {
-        dealloc::<T>(v.data);
+/// The destructor: destroy every element, then release the buffer. Called for
+/// you when the Vec goes out of scope - never by hand. `drop_in_place` expands to
+/// one `delete` per element (and to nothing when `T` owns nothing), and the
+/// `cap != 0` guard leaves an unallocated (freshly `vec_new`'d) Vec untouched.
+extend Vec<T>: Delete {
+    proc delete(*self) {
+        drop_in_place::<T>(self.data, self.len);
+        if (self.cap != 0u64) {
+            dealloc::<T>(self.data);
+        }
     }
-    v.data = null::<*T>();
-    v.len = 0u64;
-    v.cap = 0u64;
 }
 
 /// Iterate over the Vec, calling `f` on each element by pointer.

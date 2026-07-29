@@ -24,7 +24,7 @@
 
 import std/alloc { realloc, dealloc }
 import std/option { unwrap }
-import std/string { String, string_from_str, string_as_str, string_free }
+import std/string { String, string_from_str, string_as_str }
 
 struct Owner { data: *i32 }
 
@@ -92,10 +92,10 @@ proc main() i32 {
     printf::<i32>("nums %d", nums.data[0]);
     printf::<i32>(" %d\n", nums.data[1]);
 
-    // `String` holds a `Vec<u8>`; nothing here may perturb it.
+    // `String` holds a `Vec<u8>`; nothing here may perturb it. It owns its
+    // buffer and is dropped automatically at end of scope.
     let s: String = string_from_str("hi");
     println(string_as_str(&s));
-    string_free(&s);
 
     // `T` owns and drops itself: three elements, destroyed in index order.
     let owners: Bag<Owner> = bag_new::<Owner>();

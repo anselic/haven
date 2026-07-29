@@ -533,7 +533,21 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
         }
 
         ExprNode::Unary { op: UnaryOp::AddrOf, operand } => {
-            let ptr = lower_lvalue(cx, operand); // get the address of the operand
+            // `&place` addresses the place directly - a local or global var, a
+            // field, an index, a deref, everything `lower_lvalue` handles (a
+            // global yields its real address, not a copy). `&<temporary>` has no
+            // such storage, so its value is spilled into a fresh slot addressed in
+            // its place.
+            let ptr = if matches!(&operand.value,
+                ExprNode::Var(_)
+                | ExprNode::Access { .. }
+                | ExprNode::Index { .. }
+                | ExprNode::Unary { op: UnaryOp::Deref, .. })
+            {
+                lower_lvalue(cx, operand)
+            } else {
+                spill_temporary(cx, operand)
+            };
             Value::Reg(ptr)
         }
 
@@ -797,10 +811,19 @@ fn lower_receiver<'a>(cx: &mut LowerCtx<'a>, base: &Expr<'a>) -> Register {
     if is_place(cx, base) {
         return lower_lvalue(cx, base);
     }
-    let ty = cx.node_types[&base.id].clone();
-    let val = lower_expr(cx, base);
-    // a struct, a data enum and a fixed array are produced *in* storage, and the
-    // register lowering hands back is that storage - already what `self` wants.
+    spill_temporary(cx, base)
+}
+
+/// Give a temporary storage and return its address: evaluate the value and
+/// `Store` it into a fresh slot as long-lived as the enclosing function. Used by
+/// a `*self` receiver on a temporary and by an explicit `&<temporary>`, which
+/// have the same need - a value that must be pointed at but owns no place.
+///
+/// A struct, a data enum and a fixed array are produced *in* storage already, and
+/// the register lowering hands back is that storage, so no copy is made.
+fn spill_temporary<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Register {
+    let ty = cx.node_types[&expr.id].clone();
+    let val = lower_expr(cx, expr);
     if aggregate_def(&ty, &cx.enums).is_some() || matches!(ty, Type::Array(_, _)) {
         let Value::Reg(r) = val else {
             unreachable!("an aggregate lowers to the register holding its storage")
