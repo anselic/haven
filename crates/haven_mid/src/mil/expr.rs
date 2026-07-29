@@ -468,7 +468,18 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 });
 
                 let elem_val = lower_expr(cx, element);
-                cx.emit(Inst::Store { ptr, val: elem_val, ty: ty.clone(), align: None });
+                // an aggregate element lands in inline storage: the slot *is* the
+                // element, so copy the produced struct into it field by field. A
+                // plain `Store` would write the source pointer as one machine word
+                // (the old boxed `[N x ptr]` layout). Scalars store directly.
+                if let Some(def) = aggregate_def(&ty, &cx.enums) {
+                    let Value::Reg(src) = elem_val else {
+                        unreachable!("an aggregate value is always a pointer register")
+                    };
+                    copy_struct(cx, def, src, ptr);
+                } else {
+                    cx.emit(Inst::Store { ptr, val: elem_val, ty: ty.clone(), align: None });
+                }
             }
 
             if is_fixed {
@@ -725,6 +736,16 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             };
             let elem_ptr = cx.fresh_reg();
             cx.emit(Inst::Index { dst: elem_ptr, slice: data_ptr, index: index_val, index_ty: cx.node_types[&index.id].clone(), element_ty: element_ty.clone() });
+
+            // an aggregate element is inline storage, and an aggregate value *is*
+            // its address (the same convention `Access` and `Deref` follow), so
+            // the element pointer is the value - loading it would read the first
+            // word of the struct as if it were a handle. Only a scalar is loaded.
+            if aggregate_def(&element_ty, &cx.enums).is_some()
+                || matches!(element_ty, Type::Array(_, _))
+            {
+                return Value::Reg(elem_ptr);
+            }
 
             let dst = cx.fresh_reg();
             cx.emit(Inst::Load { dst, ptr: elem_ptr, ty: element_ty, align: None });

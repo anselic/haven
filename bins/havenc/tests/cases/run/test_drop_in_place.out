@@ -1,6 +1,15 @@
 nums 10 20
 hi
+wide0 1 wide1 4
 end of scope 0
+bag of 2
+  drop owner 20
+  drop owner 21
+bag of 2
+  drop wide 1
+  drop owner 10
+  drop wide 4
+  drop owner 11
 bag of 3
   drop owner 1
   drop owner 2

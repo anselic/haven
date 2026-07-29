@@ -373,7 +373,12 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             // %result = getelementptr <PointeeTy>, ptr <BasePtr> {, <IdxTy> <Idx> }*
             // The index type must match the operand's real width (e.g. a u64
             // index emits an i64 operand), not a hardcoded i32.
-            emitln!(cx, "    {dst} = getelementptr {}, ptr {slice}, {} {index}", emit_type(&element_ty, &cx.types), emit_type(&index_ty, &cx.types)),
+            //
+            // The stride is the element's *storage* type: a sequence of structs is
+            // contiguous inline `%Name` records (what `alloc`/`size_of` produce),
+            // not an array of `ptr` handles, so an aggregate element strides by its
+            // named type. For a scalar element this is identical to `emit_type`.
+            emitln!(cx, "    {dst} = getelementptr {}, ptr {slice}, {} {index}", emit_field_type(&element_ty, &cx.types, &cx.symbols), emit_type(&index_ty, &cx.types)),
         InsertValue { dst, elem, ty, val, index } =>
             emitln!(cx, "    {dst} = insertvalue {{ ptr, i32 }} {elem}, {} {}, {index}", emit_type(&ty, &cx.types), emit_value(val)),
         ExtractValue { dst, val, index } => emitln!(cx, "    {dst} = extractvalue {{ ptr, i32 }} {}, {index}", emit_value(val)),
@@ -382,9 +387,12 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
         Store { ptr, val, ty, align } => emitln!(cx, "    store {} {}, ptr {ptr}, align {}", emit_type(&ty, &cx.types), emit_value(val), align.unwrap_or(1)),
         Load { dst, ptr, ty, align } => emitln!(cx, "    {dst} = load {}, ptr {ptr}, align {}", emit_type(&ty, &cx.types), align.unwrap_or(1)),
 
-        AllocaArray { dst, ty, length } => emitln!(cx, "    {dst} = alloca [{} x {}]", length, emit_type(&ty, &cx.types)),
+        // an array's elements are inline storage, so an array of structs is
+        // `[N x %Name]` (matching a struct's array *field*, and `size_of`), not
+        // `[N x ptr]`. `emit_field_type` is identical to `emit_type` for scalars.
+        AllocaArray { dst, ty, length } => emitln!(cx, "    {dst} = alloca [{} x {}]", length, emit_field_type(&ty, &cx.types, &cx.symbols)),
         IndexArray { dst, ty, length, array, index } =>
-            emitln!(cx, "    {dst} = getelementptr [{length} x {}], ptr {array}, i32 0, i32 {index}", emit_type(&ty, &cx.types)),
+            emitln!(cx, "    {dst} = getelementptr [{length} x {}], ptr {array}, i32 0, i32 {index}", emit_field_type(&ty, &cx.types, &cx.symbols)),
 
         AllocaStruct { dst, def, align } =>
             emitln!(cx, "    {dst} = alloca %{}, align {}", cx.sym(def), align.unwrap_or(1)),

@@ -1,0 +1,9 @@
+arr 1 5 9
+copy 99 orig 4
+sum 24
+q0 1 q1 4 q2 7
+qdirect 2
+slice 4 8
+buf 0 30 300
+wrote 777
+arr wrote 42

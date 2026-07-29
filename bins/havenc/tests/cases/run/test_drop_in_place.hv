@@ -13,14 +13,13 @@
 //     makes `Bag<i32>` pay nothing. `T` owning nothing expands to no loop at all.
 //   * the elements are destroyed in index order, before the buffer is released.
 //
-// `Owner` is one pointer wide on purpose. Indexing a `*T` geps by `emit_type(T)`,
-// which is `ptr` for every struct, so a heap buffer strides its elements by a
-// pointer regardless of `sizeof::<T>()` - and separately, `p[i]` on a struct
-// element loads it as if the buffer held pointers, which is how a stack `[T; N]`
-// really is laid out but not how `alloc::<T>` lays one out. Both predate these
-// intrinsics (`p[i].field` segfaults on its own), and until they are fixed a
-// heap element type must be pointer-sized and must implement `Delete` itself
-// rather than owning through a field.
+// The element types are deliberately varied: `Owner` is pointer-sized and drops
+// itself, `Wide` is larger than a pointer (so a wrong stride would overlap
+// elements), and `Nested` owns *through a field* rather than implementing
+// `Delete`, so the expansion walks a field chain per element. A sequence of
+// structs is contiguous inline storage - `[N x %Name]`, sized by `size_of` - so
+// `&buf[i]` strides by the real element and `buf[i].field` addresses inline
+// bytes; none of these depend on the element being one word.
 //@ exit: 0
 
 import std/alloc { realloc, dealloc }
@@ -35,6 +34,21 @@ extend Owner: Delete {
         dealloc::<i32>(self.data);
     }
 }
+
+// wider than a pointer: a mis-strided buffer would read a neighbour's bytes.
+struct Wide { a: i32, b: i32, c: i32, owned: Owner }
+
+extend Wide: Delete {
+    proc delete(*self) {
+        printf::<i32>("  drop wide %d\n", self.a);
+        // its own field is this method's business, so destroy it by hand here.
+        drop_in_place::<Owner>(&self.owned, 1u64);
+    }
+}
+
+// owns through a field, with no `Delete` of its own: the element pass reaches
+// `.held` on its own.
+struct Nested { tag: i32, held: Owner }
 
 struct Bag<T> { data: *T, len: u64, cap: u64 }
 
@@ -83,11 +97,24 @@ proc main() i32 {
     println(string_as_str(&s));
     string_free(&s);
 
-    // `T` owns: three elements, destroyed in index order at end of scope.
+    // `T` owns and drops itself: three elements, destroyed in index order.
     let owners: Bag<Owner> = bag_new::<Owner>();
     bag_push::<Owner>(&owners, owner(1));
     bag_push::<Owner>(&owners, owner(2));
     bag_push::<Owner>(&owners, owner(3));
+
+    // `T` is wider than a pointer, and reading `wides.data[0].a` back proves the
+    // buffer strides by the real element rather than by a word.
+    let wides: Bag<Wide> = bag_new::<Wide>();
+    bag_push::<Wide>(&wides, Wide { a: 1, b: 2, c: 3, owned: owner(10) });
+    bag_push::<Wide>(&wides, Wide { a: 4, b: 5, c: 6, owned: owner(11) });
+    printf::<i32>("wide0 %d", wides.data[0].a);
+    printf::<i32>(" wide1 %d\n", wides.data[1].a);
+
+    // `T` owns through a field: the expansion walks to `.held` for each element.
+    let nested: Bag<Nested> = bag_new::<Nested>();
+    bag_push::<Nested>(&nested, Nested { tag: 7, held: owner(20) });
+    bag_push::<Nested>(&nested, Nested { tag: 8, held: owner(21) });
 
     printf::<i32>("end of scope %d\n", 0);
     return 0;
