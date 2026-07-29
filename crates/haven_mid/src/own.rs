@@ -281,7 +281,7 @@ impl<'a, 'c> Checker<'a, 'c> {
                     };
                     match mc.adjust {
                         // `&recv`: a borrow, the receiver keeps its value.
-                        RecvAdjust::AddrOf => self.visit(base),
+                        RecvAdjust::AddrOf => { self.visit(base); self.borrowed_temp(base); }
                         // a by-value `self` takes the receiver with it.
                         RecvAdjust::AsIs => self.consume(base),
                     }
@@ -298,6 +298,30 @@ impl<'a, 'c> Checker<'a, 'c> {
             }
             _ => {}
         }
+    }
+
+    /// A `*self` method called on a temporary: `make_buf().len()`.
+    ///
+    /// Lowering gives the temporary a slot to be borrowed from, which is all a
+    /// `Copy` receiver needs. An owning one is different: the slot is not a
+    /// binding, so no scope lists it and nothing ever calls its `delete` - the
+    /// resource would leak, silently and every time. That is the one thing this
+    /// pass exists to prevent, so require a `let` instead of accepting it.
+    fn borrowed_temp(&mut self, base: &Expr<'a>) {
+        // a bare name reaches `Temp` only when it is a module-level global.
+        // Lowering does copy one of those, but a constant's resource is static
+        // and was never acquired by this call, so there is nothing here to leak.
+        if matches!(base.value, ExprNode::Var(_)) { return; }
+        if !matches!(self.root(base), Root::Temp) { return; }
+        let Some(ty) = self.ty_of(base) else { return };
+        if self.model.is_copy(&ty) { return; }
+        let shown = self.cx.show(&ty);
+        self.error(base.span, format!(
+            "cannot call a method on this temporary: `{}` owns a resource, and a \
+             temporary belongs to no scope, so its '{}' would never run and the \
+             resource would leak. Bind it with a `let` first, then call the \
+             method on that",
+            shown, DELETE_METHOD));
     }
 
     /// An expression in a position that takes its value: a `let` initializer, an

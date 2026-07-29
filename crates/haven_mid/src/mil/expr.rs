@@ -570,7 +570,7 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             cx.emit(Inst::Comment(format!("method call {}(...)", mc.target)));
 
             let recv_val = match mc.adjust {
-                RecvAdjust::AddrOf => Value::Reg(lower_lvalue(cx, base)),
+                RecvAdjust::AddrOf => Value::Reg(lower_receiver(cx, base)),
                 RecvAdjust::AsIs => lower_expr(cx, base),
             };
             let mut lowered_args: Vec<(Value, Type<'a>)> = Vec::with_capacity(args.len() + 1);
@@ -700,9 +700,76 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
     }
 }
 
+/// Whether `expr` names storage that already exists, and so has an address
+/// `lower_lvalue` can hand back without making one.
+///
+/// This is deliberately the *lowering's* notion of a place rather than the
+/// ownership pass's: a field of a temporary (`make().inner`) is a place here,
+/// because the temporary's own lowering already put it in a slot.
+fn is_place<'a>(cx: &LowerCtx<'a>, expr: &Expr<'a>) -> bool {
+    match &expr.value {
+        // a local or parameter is an alloca. A module-level global deliberately
+        // is *not* a place: every one is emitted as an LLVM `constant`, and
+        // `*self` carries no distinction between reading and writing, so
+        // borrowing one directly would hand a writable pointer into read-only
+        // memory - undefined behaviour for a `bump()` that the reader of
+        // `G.display()` never asked to be different. Copying is well defined and
+        // is what a constant *is*: a value, not storage. `&G` is another matter
+        // and still yields the real address; the user wrote that one.
+        ExprNode::Var(_) =>
+            cx.resolved.get(&expr.id).is_some_and(|b| cx.env.contains_key(b)),
+        ExprNode::Access { .. }
+        | ExprNode::Index { .. }
+        | ExprNode::Unary { op: UnaryOp::Deref, .. } => true,
+        _ => false,
+    }
+}
+
+/// The address to pass as `self` for a method whose receiver is `*self`.
+///
+/// A place has one already. Anything else is a *temporary* - `7.display()`,
+/// `(a + b).show()`, `make().len()`, and a `const` global, which is a value
+/// rather than storage - and `self` still has to point somewhere, so the value
+/// is spilled into a slot of its own. That slot is exactly as long-lived as the
+/// call, which is all a borrowing `*self` needs; a receiver that *owns*
+/// something is rejected earlier, in the ownership pass, because nothing would
+/// ever destroy it.
+///
+/// Before this existed the whole family reached `lower_lvalue` and panicked
+/// there, so a method on a builtin - the very thing `extend i32` is for - could
+/// not be called on anything but a variable.
+fn lower_receiver<'a>(cx: &mut LowerCtx<'a>, base: &Expr<'a>) -> Register {
+    if is_place(cx, base) {
+        return lower_lvalue(cx, base);
+    }
+    let ty = cx.node_types[&base.id].clone();
+    let val = lower_expr(cx, base);
+    // a struct, a data enum and a fixed array are produced *in* storage, and the
+    // register lowering hands back is that storage - already what `self` wants.
+    if aggregate_def(&ty, &cx.enums).is_some() || matches!(ty, Type::Array(_, _)) {
+        let Value::Reg(r) = val else {
+            unreachable!("an aggregate lowers to the register holding its storage")
+        };
+        return r;
+    }
+    let slot = cx.fresh_reg();
+    cx.emit(Inst::Alloca { dst: slot, ty: ty.clone(), align: None });
+    cx.emit(Inst::Store { ptr: slot, val, ty, align: None });
+    slot
+}
+
 pub(crate) fn lower_lvalue<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Register {
     match &expr.value {
-        ExprNode::Var(_) => cx.env[&cx.resolved[&expr.id]].0,
+        ExprNode::Var(name) => match cx.resolved.get(&expr.id).and_then(|b| cx.env.get(b)) {
+            Some((reg, _)) => *reg,
+            // a module-level global: its symbol is already a pointer to the
+            // storage, so materializing the address is the whole job.
+            None => {
+                let dst = cx.fresh_reg();
+                cx.emit(Inst::GlobalPtr { dst, name });
+                dst
+            }
+        },
 
         ExprNode::Access { base, field } => {
             let base_val = lower_expr(cx, base);

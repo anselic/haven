@@ -1,0 +1,32 @@
+// A temporary receiver gets a slot to be borrowed from - but a slot is not a
+// binding, so no scope lists it and nothing ever calls its `delete`.
+//
+// For a `Copy` receiver that is fine and is exactly what makes `7.display()`
+// work. For an owner it would leak the allocation on every call, silently, which
+// is the one thing the ownership pass exists to prevent. So it is an error, and
+// the fix is the `let` the message asks for.
+//@ error: owns a resource
+
+import std/alloc { alloc, dealloc }
+import std/option { unwrap }
+
+struct Buf {
+    data: *i32,
+    cap: u64,
+
+    proc size(*self) u64 { return self.cap; }
+}
+
+extend Buf: Delete {
+    proc delete(*self) { dealloc::<i32>(self.data); }
+}
+
+proc buf_new(n: u64) Buf {
+    return Buf { data: unwrap::<i32>(alloc::<i32>(n)), cap: n };
+}
+
+@export
+proc main() i32 {
+    printf::<u64>("%llu\n", buf_new(4u64).size());
+    return 0;
+}

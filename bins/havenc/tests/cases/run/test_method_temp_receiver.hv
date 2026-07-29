@@ -1,0 +1,72 @@
+// A `*self` method called on something that is not a variable.
+//
+// `self` needs an address and a temporary has none, so lowering spills the value
+// into a slot and borrows that. This is not an exotic case: it is what `extend
+// i32` is *for*. `7.display()` and `(a + b).display()` are the ordinary way to
+// call a method on a builtin, and every one of these used to panic the compiler
+// in MIL lowering ("invalid lvalue").
+//
+// The receivers below cover each shape that reaches the spill: a literal, an
+// operator result, a call result, a global (real storage, so no spill), a struct
+// temporary (produced *in* storage, so also no spill), a field of one, and a
+// chained call whose own receiver is a temporary.
+//@ exit: 0
+
+trait Display {
+    proc display(*self) str;
+}
+
+extend i32: Display {
+    proc display(*self) str { return "int"; }
+}
+
+extend f64: Display {
+    proc display(*self) str { return "float"; }
+}
+
+const G: i32 = 9;
+
+struct Point {
+    x: i32,
+    y: i32,
+
+    proc sum(*self) i32 { return self.x + self.y; }
+    /// returns another temporary, to be the receiver of a further call.
+    proc doubled(*self) Point { return Point { x: self.x * 2, y: self.y * 2 }; }
+    proc bump(*self) void { self.x = self.x + 100; }
+}
+
+const GP: Point = Point { x: 1, y: 2 };
+
+proc five() i32 { return 5; }
+proc origin() Point { return Point { x: 3, y: 4 }; }
+
+@export
+proc main() i32 {
+    // literal, operator result, call result, float literal
+    println(7.display());
+    println((1 + 2).display());
+    println(five().display());
+    println(2.5f64.display());
+
+    // a global has storage of its own; its symbol is the address.
+    println(G.display());
+
+    // a struct temporary is produced in a slot already, so the receiver is that
+    // slot rather than a fresh one.
+    printf::<i32>("%d\n", origin().sum());
+    // ...including when the receiver is itself a method call's result.
+    printf::<i32>("%d\n", origin().doubled().sum());
+    // a field of a temporary is a place: it lives in the temporary's slot.
+    println(origin().x.display());
+
+    // a global is a *constant*, so it is copied rather than borrowed in place.
+    // `*self` says nothing about whether a method writes, and every global is
+    // emitted read-only, so borrowing one directly would make `bump()` undefined
+    // behaviour. Mutating the copy is well defined - and the constant it was
+    // copied from is still 1 afterwards, which is what this pins down.
+    GP.bump();
+    printf::<i32>("%d\n", GP.x);
+
+    return 0;
+}
