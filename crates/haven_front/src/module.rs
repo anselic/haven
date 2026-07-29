@@ -337,6 +337,9 @@ struct RawMethod<'a> {
     /// The target's inferred type parameters, which are also the leading
     /// generics of `fn_name`.
     generics: Vec<GenericParam<'a>>,
+    /// The block's `where` clause, as written. Merged onto `generics` in
+    /// `load_and_merge`, once inference has said what the parameters are.
+    where_bounds: Vec<GenericParam<'a>>,
     name: &'a str,
     fn_name: &'a str,
     receiver: Receiver,
@@ -349,6 +352,7 @@ struct RawMethod<'a> {
 struct RawImpl<'a> {
     target: Type<'a>,
     generics: Vec<GenericParam<'a>>,
+    where_bounds: Vec<GenericParam<'a>>,
     trait_: &'a str,
     span: Span,
 }
@@ -373,6 +377,77 @@ struct RawImpl<'a> {
 /// A `ConstVal::Param` in an array or SIMD length is a const parameter by the
 /// same reasoning; there is no scope to check it against, since a length is
 /// never a type name.
+/// Resolve the trait names in an impl's generic parameters, for the copy of them
+/// stored in the member table.
+///
+/// The member record is built in pass 1.5, which runs *before* the rewriting
+/// pass that resolves bounds on ordinary items — so a straight clone would carry
+/// `DefId::UNRESOLVED` in every bound, and a dispatch-site bound check would then
+/// reject the very impls it should admit. This does the same lookup
+/// [`Rewriter::bounds`] does, at the point the copy is taken.
+///
+/// An unknown trait is left unresolved rather than reported: the desugared
+/// function carries the same bound and pass 2 diagnoses it there, once.
+fn resolve_bound_defs<'a>(generics: &[GenericParam<'a>], scopes: &Scopes<'a>) -> Vec<GenericParam<'a>> {
+    generics.iter().map(|g| match g {
+        GenericParam::Type { name, bounds } => GenericParam::Type {
+            name,
+            bounds: bounds.iter().map(|b| {
+                let mut b = b.clone();
+                if let Some(sym) = scopes.types.get(b.path.last()) { b.def = sym.def; }
+                b
+            }).collect(),
+        },
+        other => other.clone(),
+    }).collect()
+}
+
+/// Merge an `extend` block's `where` clause onto the parameters inferred from
+/// its target, so `extend Vec<T>: Display where T: Display` leaves `T` carrying
+/// the bound that lets the body call `self.a.display()`.
+///
+/// A clause naming something the target does not bind is an error rather than a
+/// silent no-op: `where U: Display` on `extend Vec<T>` binds nothing, and the
+/// method body would then fail much later with "no method on type parameter",
+/// pointing at the call instead of at the typo. The check also catches the
+/// tempting `where Vec: Display` - a *bound on the target itself*, which is not
+/// a thing an impl can state.
+///
+/// `reported` deduplicates: the clause is copied onto every method of its block,
+/// so without it a one-line typo would produce one error per method.
+fn apply_where_bounds<'a>(
+    generics: &mut [GenericParam<'a>],
+    where_bounds: &[GenericParam<'a>],
+    target: &Type<'a>,
+    span: &Span,
+    reported: &mut HashSet<(usize, &'a str)>,
+    errs: &mut Vec<Error>,
+) {
+    for wb in where_bounds {
+        let GenericParam::Type { name: wname, bounds } = wb else { continue };
+        let found = generics.iter_mut().find(|g| matches!(g,
+            GenericParam::Type { name, .. } if name == wname));
+        match found {
+            // the same parameter may be named by more than one clause; the
+            // bounds accumulate, exactly as `T: A + B` would.
+            Some(GenericParam::Type { bounds: existing, .. }) => {
+                for b in bounds {
+                    if !existing.iter().any(|e| e.path == b.path) { existing.push(b.clone()); }
+                }
+            }
+            _ => {
+                if reported.insert((span.start, wname)) {
+                    errs.push(Error::new(span.clone(), format!(
+                        "`where {}: ...` names '{}', which `extend {}` does not bind. \
+                         An `extend` block's type parameters are inferred from its \
+                         target, so only a name appearing inside `{}` can be bounded here",
+                        wname, wname, target, target)));
+                }
+            }
+        }
+    }
+}
+
 fn impl_generics<'a>(target: &Type<'a>, known: &dyn Fn(&str) -> bool) -> Vec<GenericParam<'a>> {
     fn push_ty<'a>(n: &'a str, out: &mut Vec<GenericParam<'a>>) {
         if !out.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if *name == n)) {
@@ -490,7 +565,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
     // symbols apart long enough to get there.
     let mut used_names: HashSet<String> = HashSet::new();
     for tl in items.drain(..) {
-        let TopLevelNode::Extend { target, trait_, methods } = &tl.value else {
+        let TopLevelNode::Extend { target, trait_, where_bounds, methods } = &tl.value else {
             kept.push(tl);
             continue;
         };
@@ -502,6 +577,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
             impls.push(RawImpl {
                 target: target.clone(),
                 generics: Vec::new(),
+                where_bounds: where_bounds.clone(),
                 trait_: tr,
                 span: tl.span.clone(),
             });
@@ -534,6 +610,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 target: target.clone(),
                 // filled in by `load_and_merge` once a type scope exists.
                 generics: Vec::new(),
+                where_bounds: where_bounds.clone(),
                 name: mnode.name,
                 fn_name: fname,
                 receiver: mnode.receiver,
@@ -1683,8 +1760,21 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
     for (id, m) in modules.iter_mut().enumerate() {
         let types = &all_scopes[id].types;
         let known = |n: &str| types.contains_key(n);
-        for rm in m.methods.iter_mut() { rm.generics = impl_generics(&rm.target, &known); }
-        for ri in m.impls.iter_mut() { ri.generics = impl_generics(&ri.target, &known); }
+        // one `where` clause is copied onto every method of its block, so an
+        // error in it would otherwise be reported once per method.
+        let mut reported: HashSet<(usize, &'a str)> = HashSet::new();
+        for rm in m.methods.iter_mut() {
+            rm.generics = impl_generics(&rm.target, &known);
+            apply_where_bounds(
+                &mut rm.generics, &rm.where_bounds, &rm.target, &rm.span,
+                &mut reported, &mut errs);
+        }
+        for ri in m.impls.iter_mut() {
+            ri.generics = impl_generics(&ri.target, &known);
+            apply_where_bounds(
+                &mut ri.generics, &ri.where_bounds, &ri.target, &ri.span,
+                &mut reported, &mut errs);
+        }
 
         // the impl's parameters lead the method's own, so `self`'s type resolves
         // against them and a turbofish on the desugared function stays in source
@@ -1748,7 +1838,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
                 name: f,
                 receiver: rm.receiver,
                 self_ty,
-                generics: rm.generics.clone(),
+                generics: resolve_bound_defs(&rm.generics, scopes),
             });
             // one impl per `(head, method)`: see `MemberTable`. Two `extend`
             // blocks reaching the same slot are ambiguous at every call site, so

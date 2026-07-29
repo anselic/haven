@@ -254,39 +254,57 @@ pub(crate) fn bind_turbofish<'a>(
         }
     }
 
-    // verify trait bounds: each bounded type param's concrete argument must
-    // implement the required traits (nominal, via an `extend T: Trait` impl). A
-    // forwarded type param satisfies a bound iff it carries the same bound in the
-    // enclosing generic (bound propagation); a concrete struct/enum must have a
-    // matching recorded impl; anything else can't satisfy a bound.
+    check_bounds(cx, name, generics, &type_bindings, span)?;
+    Ok((type_bindings, const_bindings))
+}
+
+/// Verify that each bounded type parameter's binding implements the traits it was
+/// declared to. Nominal: satisfaction means an `extend T: Trait` impl exists.
+///
+/// Shared by the two ways a parameter acquires a binding. A turbofish binds one
+/// positionally (`show::<f64>()`), and unifying an `extend` target against a
+/// receiver binds one by matching (`p.display()` on a `Pair<f64>`, where
+/// `extend Pair<T>: Display where T: Display`). Both have to be checked, and
+/// checking them in the same place is what makes the second produce an error
+/// about the call rather than one about the template body it would otherwise
+/// fail inside - "`f64` does not implement `Display`" instead of "cannot access
+/// field 'display' on type f64", pointing at a line the caller never wrote.
+///
+/// `who` names whatever imposed the bound, for the message: a function, a method,
+/// or an `extend` target.
+pub(crate) fn check_bounds<'a>(
+    cx: &Context<'a>,
+    who: &str,
+    generics: &[GenericParam<'a>],
+    bindings: &HashMap<&'a str, Type<'a>>,
+    span: &Span,
+) -> Result<(), Error> {
     for gp in generics {
-        if let GenericParam::Type { name: pname, bounds } = gp {
-            if bounds.is_empty() { continue; }
-            let Some(arg_ty) = type_bindings.get(pname) else { continue };
-            for bound in bounds {
-                let ok = match arg_ty {
-                    // a forwarded type param satisfies a bound only by carrying
-                    // it; there is no impl to consult until it is substituted.
-                    Type::Param(fp) =>
-                        cx.generic_bounds.get(fp).is_some_and(|bs| bs.contains(&bound.def)),
-                    // anything with a head can be covered by an impl - which now
-                    // includes primitives and structural types, so `[T]` may
-                    // satisfy a `Display` bound just as a struct does.
-                    concrete => cx.implements(concrete, bound.def),
-                };
-                if !ok {
-                    return Err(Error {
-                        msg: format!(
-                            "type `{}` does not implement trait `{}`, required by `{}`'s bound `{}: {}`",
-                            cx.show(arg_ty), bound, name, pname, bound),
-                        span: span.clone(),
-                    });
-                }
+        let GenericParam::Type { name: pname, bounds } = gp else { continue };
+        if bounds.is_empty() { continue; }
+        let Some(arg_ty) = bindings.get(pname) else { continue };
+        for bound in bounds {
+            let ok = match arg_ty {
+                // a forwarded type param satisfies a bound only by carrying
+                // it; there is no impl to consult until it is substituted.
+                Type::Param(fp) =>
+                    cx.generic_bounds.get(fp).is_some_and(|bs| bs.contains(&bound.def)),
+                // anything with a head can be covered by an impl - which now
+                // includes primitives and structural types, so `[T]` may
+                // satisfy a `Display` bound just as a struct does.
+                concrete => cx.implements(concrete, bound.def),
+            };
+            if !ok {
+                return Err(Error {
+                    msg: format!(
+                        "type `{}` does not implement trait `{}`, required by `{}`'s bound `{}: {}`",
+                        cx.show(arg_ty), bound, who, pname, bound),
+                    span: span.clone(),
+                });
             }
         }
     }
-
-    Ok((type_bindings, const_bindings))
+    Ok(())
 }
 
 /// Typecheck a call to a user generic function: bind the turbofish type args to

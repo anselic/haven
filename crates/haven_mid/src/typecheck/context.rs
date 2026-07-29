@@ -248,16 +248,12 @@ impl<'a> Context<'a> {
 
     /// Whether `ty` implements `trait_`, by some `extend ...: Trait` block.
     ///
-    /// A generic impl covers every type it unifies with, so one
-    /// `extend Vec<T>: Delete` answers for `Vec<i32>` and `Vec<Vec2>` alike.
+    /// A generic impl covers every type it unifies with *and* whose `where`
+    /// clause it satisfies, so one `extend Vec<T>: Delete where T: Delete`
+    /// answers yes for `Vec<Res>` and no for `Vec<u8>`. See
+    /// [`ast::implements`](haven_common::ast::implements), which mono shares.
     pub fn implements(&self, ty: &Type<'a>, trait_: DefId) -> bool {
-        let Some(head) = TyHead::of(ty) else { return false };
-        self.impls.iter().any(|i| {
-            i.trait_ == trait_ && i.head == head && {
-                let mut u = Unified::default();
-                unify(&i.self_ty, ty, &param_names(&i.generics), &mut u)
-            }
-        })
+        haven_common::ast::implements(&self.impls, ty, trait_)
     }
 
     /// Load the diagnostic name of every definition. Called once per pass.

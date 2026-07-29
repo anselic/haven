@@ -952,6 +952,52 @@ pub struct ImplDecl<'a> {
     pub span: Span,
 }
 
+/// Whether the bounds on `generics` hold under the bindings `u`, given every
+/// impl in the program.
+///
+/// A parameter `u` did not bind is treated as satisfied: unification would only
+/// leave one unbound for a malformed impl, which is reported on its own.
+pub fn bounds_hold<'a>(
+    impls: &[ImplDecl<'a>],
+    generics: &[GenericParam<'a>],
+    u: &Unified<'a>,
+) -> bool {
+    generics.iter().all(|g| match g {
+        GenericParam::Type { name, bounds } => match u.types.get(name) {
+            Some(arg) => bounds.iter().all(|b| implements(impls, arg, b.def)),
+            None => true,
+        },
+        GenericParam::Const(_, _) => true,
+    })
+}
+
+/// Whether `ty` implements `trait_`: some impl's target unifies with it *and*
+/// that impl's own `where` clause holds.
+///
+/// The clause is what makes conformance **conditional**, which is the whole
+/// point of bounding an inferred impl parameter. `extend Vec<T>: Delete where T:
+/// Delete` says a `Vec<Res>` owns something and a `Vec<u8>` does not — and
+/// deciding that requires asking the same question of `T`, hence the recursion.
+/// It terminates because each step asks about a strict subterm of the type it
+/// was handed, and a type is finite.
+///
+/// Ignoring the clause here is not a conservative approximation but a wrong
+/// answer in both directions: it would give `Vec<u8>` a destructor whose body
+/// calls `u8::delete`, and would let `Pair<f64>` satisfy a `Display` bound its
+/// impl cannot actually provide.
+pub fn implements<'a>(impls: &[ImplDecl<'a>], ty: &Type<'a>, trait_: DefId) -> bool {
+    let Some(head) = TyHead::of(ty) else { return false };
+    impls.iter().any(|i| {
+        if i.trait_ != trait_ || i.head != head { return false; }
+        let params: Vec<&'a str> = i.generics.iter().map(|g| match g {
+            GenericParam::Type { name, .. } => *name,
+            GenericParam::Const(name, _) => *name,
+        }).collect();
+        let mut u = Unified::default();
+        unify(&i.self_ty, ty, &params, &mut u) && bounds_hold(impls, &i.generics, &u)
+    })
+}
+
 #[derive(Clone, Debug)]
 pub enum TopLevelNode<'a> {
     Function {
@@ -1052,6 +1098,15 @@ pub enum TopLevelNode<'a> {
     Extend {
         target: Type<'a>,
         trait_: Option<&'a str>,
+        /// The `where T: Display, U: Clone` clause, if written. Since the target
+        /// binds its parameters implicitly there is no binder to hang a bound
+        /// on, so this is where one goes. Every entry is a
+        /// `GenericParam::Type` and every one carries at least one bound; the
+        /// grammar admits nothing else, an unbounded `where T` having nothing to
+        /// say. `load_and_merge` merges these onto the parameters inferred from
+        /// `target`, so by the time anything typechecks they are ordinary
+        /// bounds on the desugared function's generics.
+        where_bounds: Vec<GenericParam<'a>>,
         methods: Vec<Method<'a>>,
     },
 
@@ -1146,10 +1201,16 @@ impl<'a> Display for TopLevelNode<'a> {
 
                 write!(f, "{}{}enum {}{} {{\n{}}}", attrs_str, pub_str, name, generics_str, variants_str)
             },
-            TopLevelNode::Extend { target, trait_, methods } => {
+            TopLevelNode::Extend { target, trait_, where_bounds, methods } => {
                 let trait_str = match trait_ {
                     Some(t) => format!(": {}", t),
                     None => String::new(),
+                };
+                let where_str = if where_bounds.is_empty() {
+                    String::new()
+                } else {
+                    format!(" where {}", where_bounds.iter()
+                        .map(|b| b.to_string()).collect::<Vec<_>>().join(", "))
                 };
                 let methods_str = methods.iter().map(|m| {
                     let m = &m.value;
@@ -1163,7 +1224,7 @@ impl<'a> Display for TopLevelNode<'a> {
                         .map(|(n, ty)| format!("{}: {}", n, ty)).collect::<Vec<_>>().join(", ");
                     format!("    proc {}({}{}{}) {} {{ ... }}\n", m.name, recv, sep, params_str, m.return_type)
                 }).collect::<String>();
-                write!(f, "extend {}{} {{\n{}}}", target, trait_str, methods_str)
+                write!(f, "extend {}{}{} {{\n{}}}", target, trait_str, where_str, methods_str)
             },
             TopLevelNode::Trait { name, is_pub, methods, .. } => {
                 let pub_str = if *is_pub { "pub " } else { "" };

@@ -3,7 +3,7 @@ use haven_common::ast::*;
 use crate::intrinsics::Intrinsic;
 use haven_common::defs::{DefId, Member};
 use super::context::{Context, MethodCall, RecvAdjust};
-use super::generics::{bind_generics, bind_turbofish, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self};
+use super::generics::{bind_generics, bind_turbofish, check_bounds, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self};
 use super::enums::{enum_variant, split_enum_variant, enum_variant_ctor, check_variant_pattern};
 
 /// Whether `expr` denotes a place (an addressable location) rather than a
@@ -60,6 +60,11 @@ fn method_signature<'a>(
     type_args: &[GenericArg<'a>],
     span: &Span,
 ) -> Result<Option<(&'a str, Vec<Type<'a>>, Type<'a>)>, Error> {
+    // the impl's parameters were bound by unifying its target against the
+    // receiver, so its `where` clause is checked here rather than by
+    // `bind_turbofish` - nothing was written at the call site for that to look at.
+    check_bounds(cx, &cx.show(&m.self_ty), &m.generics, &u.types, span)?;
+
     // a method of a *concrete* `extend` that declares no generics of its own is
     // an ordinary function, already in final form in the value scope.
     let Some(sig) = cx.generic_fns.get(m.name) else {

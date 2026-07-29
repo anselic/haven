@@ -1,0 +1,27 @@
+// The clause is checked where the parameter is actually bound: unifying the
+// impl's target against the receiver. `f64` has no `Display`, so `Pair<f64>`
+// never reaches this method.
+//
+// Without the check the call would be accepted and the failure would surface
+// inside the *instantiated body* instead - "cannot access field 'display' on
+// type f64", pointing at a line in the impl that the caller never wrote.
+//@ error: type `f64` does not implement trait `Display`
+
+trait Display {
+    proc display(*self) str;
+}
+
+extend i32: Display { proc display(*self) str { return "i"; } }
+
+struct Pair<T> { a: T, b: T }
+
+extend Pair<T>: Display where T: Display {
+    proc display(*self) str { return self.a.display(); }
+}
+
+@export
+proc main() i32 {
+    let p: Pair<f64> = Pair::<f64> { a: 1.0f64, b: 2.0f64 };
+    println(p.display());
+    return 0;
+}

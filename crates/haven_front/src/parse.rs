@@ -1229,16 +1229,42 @@ fn parse_toplevel<'tks, 'src: 'tks>()
     // `[T]` and `Vec<T>` alongside `Point`. The type grammar stops before the
     // `:` and the `{`, so neither the trait nor the body needs a delimiter to
     // separate it from the target.
+    //
+    // The target binds its type parameters implicitly, so there is no binder to
+    // write a bound on and a `where` clause is the only place one can go:
+    // `extend Vec<T>: Display where T: Display { ... }`. Like `extend` itself,
+    // `where` lexes as a `Var` and is matched by text. Only the bounded form
+    // parses - a bare `where T` would say nothing - which is also why the clause
+    // reuses `GenericParam::Type` rather than earning a node of its own.
+    let where_bounds = select_ref! { Token::Var(s) if *s == "where" => () }
+        .ignore_then(
+            var.map(|s| *s)
+                .then_ignore(just(Token::Colon))
+                .then(
+                    var.map(|s| NameRef::new(Path::single(*s)))
+                        .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
+                        .at_least(1)
+                        .collect::<Vec<_>>())
+                .map(|(name, bounds)| GenericParam::Type { name, bounds })
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .at_least(1)
+                .collect::<Vec<_>>())
+        .or_not()
+        .map(|w| w.unwrap_or_default());
+
     let extend_ = select_ref! { Token::Var(s) if *s == "extend" => () }
         .ignore_then(parse_type())
         .then(just(Token::Colon).ignore_then(var.map(|s| *s)).or_not())
+        .then(where_bounds)
         .then(
             parse_method()
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|((target, trait_), methods)| (TopLevelNode::Extend { target, trait_, methods }, Vec::new()));
+        .map(|(((target, trait_), where_bounds), methods)|
+            (TopLevelNode::Extend { target, trait_, where_bounds, methods }, Vec::new()));
 
     // `[pub] trait Name { proc m(...) Ret; ... }`. Like `extend`, `trait` lexes as
     // a `Var` (not a reserved keyword), so match it by text - which is why this
@@ -1297,7 +1323,20 @@ fn parse_toplevel<'tks, 'src: 'tks>()
                     }).collect(),
                 };
                 out.push(Metadata::new(
-                    TopLevelNode::Extend { target, trait_: None, methods },
+                    TopLevelNode::Extend {
+                        target,
+                        trait_: None,
+                        // a bound on the type's own parameter (`struct Pair<T:
+                        // Display>`) binds its inherent methods too - it is the
+                        // same clause an out-of-line `extend Pair<T> where T:
+                        // Display` would have to spell out.
+                        where_bounds: generics.iter()
+                            .filter(|g| matches!(g,
+                                GenericParam::Type { bounds, .. } if !bounds.is_empty()))
+                            .cloned()
+                            .collect(),
+                        methods,
+                    },
                     span,
                 ));
             }

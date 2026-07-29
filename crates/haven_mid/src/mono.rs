@@ -134,6 +134,11 @@ struct Mono<'p, 'a> {
     /// so `subst_ty` with the current bindings turns one into the concrete
     /// receiver at this instantiation.
     node_types: &'p HashMap<usize, Type<'a>>,
+    /// Every `extend T: Trait` in the program, for deciding whether a
+    /// *conditional* impl covers the instance being minted — see
+    /// [`Self::impl_applies`]. Only destructors consult this: they are the one
+    /// thing mono creates without a call site asking for it.
+    impls: &'p [ImplDecl<'a>],
 }
 
 /// A bound const generic parameter: its concrete value plus declared type, so a
@@ -379,6 +384,33 @@ impl<'p, 'a> Mono<'p, 'a> {
         def
     }
 
+    /// Whether the `extend` block `m` came from actually covers the instance
+    /// `base<args>` — that is, whether its `where` clause holds there.
+    ///
+    /// Unifies rather than zipping `m.generics` against `args` positionally,
+    /// because the two need not line up: `extend Vec<Box<T>>`'s single parameter
+    /// is `T`, while the instance's single argument is `Box<i32>`.
+    fn impl_applies(&self, m: &Member<'a>, base: DefId, args: &[ConcreteArg<'a>]) -> bool {
+        if !m.generics.iter().any(|g| matches!(g,
+            GenericParam::Type { bounds, .. } if !bounds.is_empty())) {
+            return true;
+        }
+        let concrete = Type::Named {
+            def: base,
+            args: args.iter().map(|a| match a {
+                ConcreteArg::Type(t) => GenericArg::Type(t.clone()),
+                ConcreteArg::Const(n) => GenericArg::Const(ConstVal::Lit(*n)),
+            }).collect(),
+        };
+        let params: Vec<&'a str> = m.generics.iter().map(|g| match g {
+            GenericParam::Type { name, .. } => *name,
+            GenericParam::Const(name, _) => *name,
+        }).collect();
+        let mut u = Unified::default();
+        unify(&m.self_ty, &concrete, &params, &mut u)
+            && bounds_hold(self.impls, &m.generics, &u)
+    }
+
     /// Mint the destructor for a freshly created generic-type instance.
     ///
     /// Every other method of a generic `extend` is instantiated on demand, from
@@ -397,6 +429,10 @@ impl<'p, 'a> Mono<'p, 'a> {
         // parameters are the type's), but a template that never made it into the
         // function table can - a conformance error, already reported.
         if m.generics.is_empty() || !self.templates.contains_key(m.name) { return; }
+        // a conditional impl - `extend Vec<T>: Delete where T: Delete` - does not
+        // cover every instance. `Vec<u8>` gets no destructor, and so stays `Copy`;
+        // minting one anyway would specialize a body that calls `u8::delete`.
+        if !self.impl_applies(m, base, args) { return; }
         let (name, receiver) = (m.name, m.receiver);
         let mangled = self.request(name, args.to_vec(), self.cur_span.clone());
         self.defs.add_member(TyHead::Def(inst), DELETE_METHOD, Member {
@@ -917,6 +953,7 @@ pub fn monomorphize<'a>(
     defs: &mut Defs<'a>,
     arena: &'a Bump,
     node_types: &HashMap<usize, Type<'a>>,
+    impls: &[ImplDecl<'a>],
 ) -> Result<Vec<TopLevel<'a>>, Error> {
     // functions stay keyed by emitted name: a call site names its callee, and
     // there is no `Type` involved to carry an identity. Types key by identity.
@@ -953,6 +990,7 @@ pub fn monomorphize<'a>(
         members: defs.members().clone(),
         defs,
         node_types,
+        impls,
     };
     let empty = Bindings::empty();
 
