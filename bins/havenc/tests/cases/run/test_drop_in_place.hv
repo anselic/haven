@@ -1,0 +1,94 @@
+// `drop_in_place::<T>(ptr, count)` destroys `count` values starting at `ptr`.
+//
+// This is the loop a container's own destructor cannot write by hand: calling
+// `delete` explicitly is an error, and the ownership pass only ever destroys a
+// *statically* known chain of fields, so "N of them, N known at runtime" had no
+// spelling. Together with `ptr_write` it makes a heap container that owns its
+// elements expressible - the `Bag` below is `Vec` with the parts that matter.
+//
+// Two properties beyond "the elements get destroyed":
+//
+//   * `Bag` is `Delete` *unconditionally* - the allocation always needs freeing,
+//     whatever `T` is - and it is the intrinsic, not a `where` clause, that
+//     makes `Bag<i32>` pay nothing. `T` owning nothing expands to no loop at all.
+//   * the elements are destroyed in index order, before the buffer is released.
+//
+// `Owner` is one pointer wide on purpose. Indexing a `*T` geps by `emit_type(T)`,
+// which is `ptr` for every struct, so a heap buffer strides its elements by a
+// pointer regardless of `sizeof::<T>()` - and separately, `p[i]` on a struct
+// element loads it as if the buffer held pointers, which is how a stack `[T; N]`
+// really is laid out but not how `alloc::<T>` lays one out. Both predate these
+// intrinsics (`p[i].field` segfaults on its own), and until they are fixed a
+// heap element type must be pointer-sized and must implement `Delete` itself
+// rather than owning through a field.
+//@ exit: 0
+
+import std/alloc { realloc, dealloc }
+import std/option { unwrap }
+import std/string { String, string_from_str, string_as_str, string_free }
+
+struct Owner { data: *i32 }
+
+extend Owner: Delete {
+    proc delete(*self) {
+        printf::<i32>("  drop owner %d\n", *self.data);
+        dealloc::<i32>(self.data);
+    }
+}
+
+struct Bag<T> { data: *T, len: u64, cap: u64 }
+
+extend Bag<T>: Delete {
+    proc delete(*self) {
+        printf::<u64>("bag of %llu\n", self.len);
+        drop_in_place::<T>(self.data, self.len);
+        if (self.cap != 0u64) { dealloc::<T>(self.data); }
+    }
+}
+
+proc bag_new<T>() Bag<T> {
+    return Bag::<T> { data: null::<*T>(), len: 0u64, cap: 0u64 };
+}
+
+proc bag_push<T>(b: *Bag<T>, value: T) {
+    if (b.cap < b.len + 1u64) {
+        let grown: u64 = b.cap * 2u64;
+        if (grown == 0u64) { grown = 4u64; }
+        b.data = unwrap::<T>(realloc::<T>(b.data, grown));
+        b.cap = grown;
+    }
+    // the slot is fresh capacity, so this initializes rather than overwrites
+    ptr_write::<T>(&b.data[b.len], value);
+    b.len = b.len + 1u64;
+}
+
+proc owner(n: i32) Owner {
+    let p: *i32 = unwrap::<i32>(realloc::<i32>(null::<*i32>(), 1u64));
+    ptr_write::<i32>(p, n);
+    return Owner { data: p };
+}
+
+@export
+proc main() i32 {
+    // `T` owns nothing: the element pass expands to nothing, and the bag still
+    // frees its buffer.
+    let nums: Bag<i32> = bag_new::<i32>();
+    bag_push::<i32>(&nums, 10);
+    bag_push::<i32>(&nums, 20);
+    printf::<i32>("nums %d", nums.data[0]);
+    printf::<i32>(" %d\n", nums.data[1]);
+
+    // `String` holds a `Vec<u8>`; nothing here may perturb it.
+    let s: String = string_from_str("hi");
+    println(string_as_str(&s));
+    string_free(&s);
+
+    // `T` owns: three elements, destroyed in index order at end of scope.
+    let owners: Bag<Owner> = bag_new::<Owner>();
+    bag_push::<Owner>(&owners, owner(1));
+    bag_push::<Owner>(&owners, owner(2));
+    bag_push::<Owner>(&owners, owner(3));
+
+    printf::<i32>("end of scope %d\n", 0);
+    return 0;
+}

@@ -47,6 +47,8 @@ use haven_common::ast::*;
 use haven_common::defs::{DefId, TyHead};
 use haven_common::layout::TypeTable;
 
+use crate::intrinsics::Intrinsic;
+
 use crate::typecheck::{Context, EnumDef, RecvAdjust};
 
 /// The one method a `Delete` impl provides.
@@ -56,6 +58,14 @@ const DELETE_METHOD: &str = "delete";
 /// scope's owners are destroyed. Not a legal source identifier, so it cannot
 /// collide with a user's local.
 const RET_TEMP: &str = "$ret";
+
+/// Locals introduced by the `drop_in_place` expansion: the base pointer, the
+/// element count and the loop counter. Like `RET_TEMP` these are not legal
+/// source identifiers, and each gets a fresh `Binding::Local` from its own
+/// `Declare`, so nesting two expansions is fine despite the shared names.
+const DIP_BASE: &str = "$dip_base";
+const DIP_COUNT: &str = "$dip_count";
+const DIP_INDEX: &str = "$dip_i";
 
 /// One `delete` call needed to destroy a value in place: the chain of fields to
 /// walk from the owner (empty when the owner implements `Delete` itself), and
@@ -449,14 +459,61 @@ impl<'a, 'c> Checker<'a, 'c> {
         e
     }
 
+    /// A `Var` reference to a local, wired to its binding so lowering finds the
+    /// slot. Every synthesized variable use goes through here.
+    fn var(&mut self, name: &'a str, ty: &Type<'a>, binding: Binding<'a>, span: Span) -> Expr<'a> {
+        let e = self.expr(ExprNode::Var(name), ty.clone(), span);
+        self.cx.resolved.insert(e.id, binding);
+        e
+    }
+
+    /// `let <name>: <ty> = <value>;`, plus the binding identity that names it.
+    /// A local is identified by its `Declare`'s node id, which is what makes the
+    /// three locals of one expansion distinct from those of any other.
+    fn declare_stmt(&mut self, name: &'a str, ty: Type<'a>, value: Expr<'a>, span: Span)
+        -> (Stmt<'a>, Binding<'a>)
+    {
+        let stmt = Metadata::new(StmtNode::Declare { name, ty, value }, span);
+        let binding = Binding::Local(stmt.id);
+        (stmt, binding)
+    }
+
+    /// An integer literal of exactly `ty`. `None` for a non-integer type, which
+    /// typechecking has already ruled out for every caller here.
+    fn int_lit(&mut self, ty: &Type<'a>, v: u64, span: Span) -> Option<Expr<'a>> {
+        let node = match ty {
+            Type::Int8 => ExprNode::Int8(v as i8),
+            Type::Int32 => ExprNode::Int32(v as i32),
+            Type::Int64 => ExprNode::Int64(v as i64),
+            Type::Uint8 => ExprNode::Uint8(v as u8),
+            Type::Uint32 => ExprNode::Uint32(v as u32),
+            Type::Uint64 => ExprNode::Uint64(v),
+            _ => return None,
+        };
+        Some(self.expr(node, ty.clone(), span))
+    }
+
+    fn binary(&mut self, op: BinaryOp, left: Expr<'a>, right: Expr<'a>, ty: Type<'a>, span: Span)
+        -> Expr<'a>
+    {
+        self.expr(ExprNode::Binary { op, left: Box::new(left), right: Box::new(right) }, ty, span)
+    }
+
     /// `delete(&owner.field...)` as a statement.
     fn delete_call(&mut self, binding: Binding<'a>, name: &'a str, ty: &Type<'a>,
                    path: &DropPath<'a>, span: Span) -> Stmt<'a> {
-        let root = self.expr(ExprNode::Var(name), ty.clone(), span);
-        self.cx.resolved.insert(root.id, binding);
+        let root = self.var(name, ty, binding, span);
+        self.delete_at(root, ty.clone(), path, span)
+    }
 
-        let mut place = root;
-        let mut place_ty = ty.clone();
+    /// `delete(&place.field...)` for an arbitrary place expression. Split out of
+    /// `delete_call` because the `drop_in_place` expansion destroys `base[i]`
+    /// rather than a named binding, but walks the same field chain to get there.
+    fn delete_at(&mut self, place: Expr<'a>, ty: Type<'a>, path: &DropPath<'a>, span: Span)
+        -> Stmt<'a>
+    {
+        let mut place = place;
+        let mut place_ty = ty;
         for (field, fty) in path.steps.iter() {
             place = self.expr(
                 ExprNode::Access { base: Box::new(place), field: *field },
@@ -480,6 +537,94 @@ impl<'a, 'c> Checker<'a, 'c> {
         Metadata::new(StmtNode::Expr(call), span)
     }
 
+    /// The element type of a `drop_in_place::<T>(ptr, count)` call, or `None` if
+    /// `expr` is some other call.
+    fn drop_in_place_target(&self, expr: &Expr<'a>) -> Option<Type<'a>> {
+        let ExprNode::Call { func, type_args, args } = &expr.value else { return None };
+        let ExprNode::Var(name) = &func.value else { return None };
+        if Intrinsic::lookup(name) != Some(Intrinsic::DropInPlace) { return None }
+        // arity and kinds were settled by typechecking; a malformed call never
+        // reaches this pass.
+        debug_assert_eq!(args.len(), 2);
+        match type_args.first() {
+            Some(GenericArg::Type(t)) => Some(t.clone()),
+            _ => None,
+        }
+    }
+
+    /// Rewrite `drop_in_place::<T>(ptr, count)` into the loop that destroys
+    /// `ptr[0 .. count]`:
+    ///
+    /// ```text
+    /// { let $dip_base = ptr; let $dip_count = count; let $dip_i = 0;
+    ///   while ($dip_i < $dip_count) { delete(&$dip_base[$dip_i]...); $dip_i = $dip_i + 1; } }
+    /// ```
+    ///
+    /// Producing an ordinary AST loop rather than emitting one in MIL is what
+    /// keeps the alloc check honest: it runs after this pass and reads the call
+    /// graph off the AST, so a `@alloc(false)` function that drops elements which
+    /// free memory is caught by the machinery that already exists.
+    ///
+    /// `ptr` and `count` are bound first so each is evaluated exactly once, which
+    /// matters when they are `self.data` and `self.len` and the loop is what
+    /// mutates neither - but also simply because a call argument may have effects.
+    ///
+    /// `drops` is `T`'s non-empty drop paths; the caller keeps the call as-is
+    /// when there are none, which is the `Vec<u8>` case and is why a destructor
+    /// written once over `T` costs nothing for elements that need no destruction.
+    fn expand_drop_in_place(&mut self, call: Expr<'a>, elem_ty: Type<'a>,
+                            drops: &[DropPath<'a>], span: Span, out: &mut Vec<Stmt<'a>>) {
+        let ExprNode::Call { args, .. } = call.value else { unreachable!("checked by the caller") };
+        let mut args = args.into_iter();
+        let (ptr_arg, count_arg) = (args.next().unwrap(), args.next().unwrap());
+
+        let ptr_ty = Type::Pointer(Box::new(elem_ty.clone()));
+        let Some(count_ty) = self.ty_of(&count_arg) else {
+            unreachable!("typechecking recorded the count argument's type")
+        };
+        let (Some(zero), Some(one)) = (
+            self.int_lit(&count_ty, 0, span),
+            self.int_lit(&count_ty, 1, span),
+        ) else {
+            unreachable!("typechecking accepted only integer counts")
+        };
+
+        let (base_decl, base) = self.declare_stmt(DIP_BASE, ptr_ty.clone(), ptr_arg, span);
+        let (count_decl, count) = self.declare_stmt(DIP_COUNT, count_ty.clone(), count_arg, span);
+        let (index_decl, index) = self.declare_stmt(DIP_INDEX, count_ty.clone(), zero, span);
+
+        // while ($dip_i < $dip_count)
+        let i_read = self.var(DIP_INDEX, &count_ty, index, span);
+        let n_read = self.var(DIP_COUNT, &count_ty, count, span);
+        let cond = self.binary(BinaryOp::Lt, i_read, n_read, Type::Bool, span);
+
+        // delete(&$dip_base[$dip_i]...), one per path through the element type
+        let mut body: Vec<Stmt<'a>> = Vec::with_capacity(drops.len() + 1);
+        for path in drops {
+            let base_read = self.var(DIP_BASE, &ptr_ty, base, span);
+            let i_read = self.var(DIP_INDEX, &count_ty, index, span);
+            let elem = self.expr(
+                ExprNode::Index { slice: Box::new(base_read), index: Box::new(i_read) },
+                elem_ty.clone(), span);
+            let stmt = self.delete_at(elem, elem_ty.clone(), path, span);
+            body.push(stmt);
+        }
+
+        // $dip_i = $dip_i + 1
+        let i_read = self.var(DIP_INDEX, &count_ty, index, span);
+        let next = self.binary(BinaryOp::Add, i_read, one, count_ty.clone(), span);
+        let i_write = self.var(DIP_INDEX, &count_ty, index, span);
+        body.push(Metadata::new(StmtNode::Assign { left: i_write, value: next }, span));
+
+        let body = Metadata::new(StmtNode::Block(body), span);
+        let while_ = Metadata::new(
+            StmtNode::While { condition: cond, body: Box::new(body) }, span);
+
+        // one block, so the three locals are scoped to the expansion
+        out.push(Metadata::new(
+            StmtNode::Block(vec![base_decl, count_decl, index_decl, while_]), span));
+    }
+
     // --- statements
 
     /// Process one statement, appending it (and any destruction around it) to
@@ -490,6 +635,19 @@ impl<'a, 'c> Checker<'a, 'c> {
         match value {
             StmtNode::Expr(e) => {
                 self.visit(&e);
+                // `drop_in_place` is the one call this pass rewrites rather than
+                // just checks: it names work only this pass knows how to emit.
+                if let Some(elem_ty) = self.drop_in_place_target(&e) {
+                    let drops = self.model.drops_for(&elem_ty);
+                    // when `T` owns nothing there is no loop to write: keep the
+                    // call, which lowers to nothing but its arguments' effects.
+                    if !drops.is_empty() {
+                        self.expand_drop_in_place(e, elem_ty, &drops, span, out);
+                        return false;
+                    }
+                    out.push(Metadata { span, id, value: StmtNode::Expr(e) });
+                    return false;
+                }
                 // a produced owner that is never bound has no owner to destroy it.
                 if let Some(ty) = self.ty_of(&e) {
                     if !self.model.is_copy(&ty) && matches!(self.root(&e), Root::Temp) {

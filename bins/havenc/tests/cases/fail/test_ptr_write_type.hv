@@ -1,0 +1,16 @@
+// The turbofish names the *pointee*, so both argument types follow from it and
+// neither is written twice. A destination of the wrong pointer type is the
+// mistake worth catching: `ptr_write` initializes raw memory, so a mismatch here
+// would be a silent reinterpretation rather than a coercion.
+//@ error: first argument must be `*i32`
+
+import std/alloc { alloc, dealloc }
+import std/option { unwrap }
+
+@export
+proc main() i32 {
+    let p: *u8 = unwrap::<u8>(alloc::<u8>(4u64));
+    ptr_write::<i32>(p, 7);
+    dealloc::<u8>(p);
+    return 0;
+}

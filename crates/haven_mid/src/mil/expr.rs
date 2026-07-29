@@ -70,6 +70,40 @@ fn lower_intrinsic<'a>(
             // through; the result's type is tracked in node_types by typecheck.
             lower_expr(cx, &args[0])
         }
+        Intrinsic::PtrWrite => {
+            // ptr_write::<T>(dst, value): the store half of `*dst = value`,
+            // without the destroy-the-old-value half. Identical to how `Assign`
+            // lowers, except the destination is a pointer *value* rather than a
+            // place, so it is lowered rather than addressed.
+            let ty = ta_type(type_args, 0);
+            let dst = lower_expr(cx, &args[0]);
+            let val = lower_expr(cx, &args[1]);
+            let ptr = as_register(cx, dst, &Type::Pointer(Box::new(ty.clone())));
+            // an aggregate is held by pointer on both sides, so this is the same
+            // field-by-field copy `Assign` does; a plain `Store` would write the
+            // source pointer into the first field.
+            if let Some(def) = aggregate_def(&ty, &cx.enums) {
+                let Value::Reg(src) = val else {
+                    unreachable!("an aggregate value is always a pointer register")
+                };
+                copy_struct(cx, def, src, ptr);
+                return Value::Const(Const::Undef);
+            }
+            let value_ty = cx.node_types[&args[1].id].clone();
+            let val = coerce(cx, val, &value_ty, &ty);
+            cx.emit(Inst::Store { ptr, val, ty, align: None });
+            Value::Const(Const::Undef)
+        }
+        Intrinsic::DropInPlace => {
+            // reaching lowering means the ownership pass did *not* rewrite this
+            // into a destructor loop, i.e. `T` owns nothing (or the program has
+            // no `Delete` impl at all), so there is nothing to destroy. The
+            // arguments are still lowered: they are ordinary expressions and may
+            // have side effects.
+            lower_expr(cx, &args[0]);
+            lower_expr(cx, &args[1]);
+            Value::Const(Const::Undef)
+        }
         Intrinsic::SimdSplat => {
             let ty = ta_type(type_args, 0);
             let size = ta_const(type_args, 1);
@@ -756,6 +790,25 @@ fn lower_receiver<'a>(cx: &mut LowerCtx<'a>, base: &Expr<'a>) -> Register {
     cx.emit(Inst::Alloca { dst: slot, ty: ty.clone(), align: None });
     cx.emit(Inst::Store { ptr: slot, val, ty, align: None });
     slot
+}
+
+/// A value forced into a register, for the instructions that can only address
+/// memory through one (`Store`, `Index`, `FieldPtr`).
+///
+/// Nearly every pointer-typed expression already lowers to a register; the
+/// exception is a constant, `null` being the only one that exists. Round-tripping
+/// it through a slot keeps those instructions total instead of panicking on
+/// `ptr_write::<i32>(null::<*i32>(), 1)` - which is a segfault waiting to happen
+/// either way, but should be the program's, not the compiler's. LLVM folds the
+/// pair away immediately.
+fn as_register<'a>(cx: &mut LowerCtx<'a>, val: Value, ty: &Type<'a>) -> Register {
+    if let Value::Reg(r) = val { return r; }
+    let slot = cx.fresh_reg();
+    cx.emit(Inst::Alloca { dst: slot, ty: ty.clone(), align: None });
+    cx.emit(Inst::Store { ptr: slot, val, ty: ty.clone(), align: None });
+    let dst = cx.fresh_reg();
+    cx.emit(Inst::Load { dst, ptr: slot, ty: ty.clone(), align: None });
+    dst
 }
 
 pub(crate) fn lower_lvalue<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Register {

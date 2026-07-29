@@ -1,0 +1,8 @@
+nums 10 20
+hi
+end of scope 0
+bag of 3
+  drop owner 1
+  drop owner 2
+  drop owner 3
+bag of 2

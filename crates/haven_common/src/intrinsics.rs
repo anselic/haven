@@ -14,6 +14,29 @@ pub enum Intrinsic {
     /// pointers are opaque); it only changes the static pointee type. Used to
     /// turn the untyped `*void` from the allocator into a typed `*T`.
     PtrCast,
+    /// Initialize the slot at `dst` with `value`, without destroying whatever
+    /// bytes were there before.
+    /// `ptr_write::<T>(dst: *T, value: T) -> void`
+    ///
+    /// This is the counterpart to `*dst = value`, which the ownership pass
+    /// rejects for an owning `T` because the value being replaced would never be
+    /// destroyed. Here that is the point: the slot is *uninitialized*, so there
+    /// is nothing to destroy, and `value` is moved into it. Writing over a slot
+    /// that does hold a live value leaks it - the caller carries that obligation,
+    /// exactly as with Rust's `ptr::write`.
+    PtrWrite,
+    /// Destroy `count` initialized values of type `T` starting at `ptr`, leaving
+    /// the memory itself alone.
+    /// `drop_in_place::<T>(ptr: *T, count: u64) -> void`
+    ///
+    /// The elementwise `delete` loop a container's own destructor cannot write
+    /// by hand: calling `delete` explicitly is an error, and the ownership pass
+    /// only ever destroys a *statically* known chain of fields, so "N of them,
+    /// N known at runtime" has no spelling. The ownership pass expands this into
+    /// that loop once `T` is concrete; when `T` owns nothing it expands to
+    /// nothing at all, which is what lets a `Vec<u8>` pay zero for a destructor
+    /// written generically over `T`.
+    DropInPlace,
 
     /// `__simd_splat::<T, N>(value) -> T where T = simd<T, N>`
     /// e.g. `value = __simd_splat::<f32, 4>(1.0) -> simd<f32, 4> (1.0, 1.0, 1.0, 1.0)`
@@ -40,6 +63,8 @@ impl Intrinsic {
             "numerical_cast" => Some(Self::NumericalCast),
             "sizeof" => Some(Self::Sizeof),
             "ptr_cast" => Some(Self::PtrCast),
+            "ptr_write" => Some(Self::PtrWrite),
+            "drop_in_place" => Some(Self::DropInPlace),
             "__simd_splat" => Some(Self::SimdSplat),
             "__simd_load" => Some(Self::SimdLoad),
             "__simd_store" => Some(Self::SimdStore),
@@ -58,6 +83,8 @@ impl std::fmt::Display for Intrinsic {
             Self::NumericalCast => "numerical_cast",
             Self::Sizeof => "sizeof",
             Self::PtrCast => "ptr_cast",
+            Self::PtrWrite => "ptr_write",
+            Self::DropInPlace => "drop_in_place",
             Self::SimdSplat => "__simd_splat",
             Self::SimdLoad => "__simd_load",
             Self::SimdStore => "__simd_store",
@@ -126,6 +153,10 @@ impl Intrinsic {
             Self::NumericalCast => (&[Numeric], &[],           1),
             Self::Sizeof        => (&[Any],     &[],           0),
             Self::PtrCast       => (&[Pointer], &[],           1),
+            // the turbofish names the *pointee*, not the pointer, so that the
+            // element type is written once and the argument types follow from it.
+            Self::PtrWrite      => (&[Any],     &[],           2),
+            Self::DropInPlace   => (&[Any],     &[],           2),
             Self::SimdSplat     => (&[Numeric], &[LANES],      1),
             Self::SimdLoad      => (&[Numeric], &[LANES],      2),
             Self::SimdStore     => (&[Numeric], &[LANES],      3),

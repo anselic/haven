@@ -165,6 +165,29 @@ fn resolve_bounded_method<'a>(
     Ok(Some(subst_self(&return_type, &self_ty)))
 }
 
+/// Check that `arg` is a `*T` for the turbofished element type `T`. Shared by
+/// the two intrinsics that address a slot rather than take one by value; both
+/// name the pointee in the turbofish, so the pointer type is derived, never
+/// written, and a mismatch is worth spelling out in full.
+fn expect_pointer_to<'a>(
+    cx: &mut Context<'a>,
+    intrinsic: Intrinsic,
+    pointee: &Type<'a>,
+    arg: &Expr<'a>,
+    which: &str,
+) -> Result<(), Error> {
+    let want = Type::Pointer(Box::new(pointee.clone()));
+    let got = infer(cx, arg)?;
+    if got != want {
+        return Err(Error {
+            msg: format!("{}() {} argument must be `{}`, got `{}`",
+                         intrinsic, which, cx.show(&want), cx.show(&got)),
+            span: arg.span,
+        });
+    }
+    Ok(())
+}
+
 fn typecheck_intrinsic<'a>(
     cx: &mut Context<'a>,
     intrinsic: Intrinsic,
@@ -229,6 +252,33 @@ fn typecheck_intrinsic<'a>(
             }
             cx.node_types.insert(expr_id, target_ty.clone());
             Ok(target_ty)
+        }
+        Intrinsic::PtrWrite => {
+            // ptr_write::<T>(dst: *T, value: T) -> void
+            let ty = tys[0].clone();
+            expect_pointer_to(cx, intrinsic, &ty, &args[0], "first")?;
+            // checked rather than inferred, so an untyped literal takes `T`.
+            check_expr(cx, &ty, &args[1])?;
+            cx.node_types.insert(expr_id, Type::Void);
+            Ok(Type::Void)
+        }
+        Intrinsic::DropInPlace => {
+            // drop_in_place::<T>(ptr: *T, count) -> void
+            let ty = tys[0].clone();
+            expect_pointer_to(cx, intrinsic, &ty, &args[0], "first")?;
+            let count_ty = infer(cx, &args[1])?;
+            // any integer width: the expansion counts in whatever type it is
+            // given, so a `u64` length and a `u32` one both work unconverted.
+            if !matches!(count_ty, Type::Int8 | Type::Int32 | Type::Int64
+                                 | Type::Uint8 | Type::Uint32 | Type::Uint64) {
+                return Err(Error {
+                    msg: format!("{}() second argument must be an integer count, got `{}`",
+                                 intrinsic, cx.show(&count_ty)),
+                    span,
+                });
+            }
+            cx.node_types.insert(expr_id, Type::Void);
+            Ok(Type::Void)
         }
         Intrinsic::SimdSplat => {
             let ty = tys[0].clone();

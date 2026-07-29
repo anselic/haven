@@ -1,0 +1,59 @@
+// `ptr_write::<T>(dst, value)` initializes a slot instead of overwriting one.
+//
+// `*dst = value` is rejected for an owning `T` (own.rs: "cannot overwrite in
+// place"), and rightly so: the ownership pass cannot see through a pointer, so
+// it cannot know the old value was destroyed first. A container filling fresh
+// capacity is the case where there *is* no old value, and this is how it says
+// so. The obligation moves to the caller, exactly as with Rust's `ptr::write`.
+//
+// The value is moved in, so an owner written here is not also destroyed by the
+// scope it came from - which is what makes `push` express-ible at all.
+//@ exit: 0
+
+import std/alloc { alloc, dealloc }
+import std/option { unwrap }
+
+struct Owner { data: *i32 }
+
+extend Owner: Delete {
+    proc delete(*self) {
+        printf::<i32>("drop owner %d\n", *self.data);
+        dealloc::<i32>(self.data);
+    }
+}
+
+proc make(n: i32) Owner {
+    let p: *i32 = unwrap::<i32>(alloc::<i32>(1u64));
+    ptr_write::<i32>(p, n);
+    return Owner { data: p };
+}
+
+@export
+proc main() i32 {
+    // a scalar slot, through a bare pointer and through an element pointer
+    let xs: *i32 = unwrap::<i32>(alloc::<i32>(2u64));
+    ptr_write::<i32>(xs, 7);
+    ptr_write::<i32>(&xs[1], 8);
+    printf::<i32>("scalars %d", xs[0]);
+    printf::<i32>(" %d\n", xs[1]);
+    dealloc::<i32>(xs);
+
+    // an aggregate slot: a field-by-field copy into the destination, the same
+    // thing an ordinary assignment does, minus destroying what was there.
+    let slot: *Owner = unwrap::<Owner>(alloc::<Owner>(1u64));
+    ptr_write::<Owner>(slot, make(1));
+
+    // writing an owner *moves* it, so `held` is dead afterwards and the scope
+    // does not also destroy it - only the explicit drop below runs.
+    let held: Owner = make(2);
+    let slot2: *Owner = unwrap::<Owner>(alloc::<Owner>(1u64));
+    ptr_write::<Owner>(slot2, held);
+
+    printf::<i32>("written %d\n", 2);
+    drop_in_place::<Owner>(slot, 1u64);
+    drop_in_place::<Owner>(slot2, 1u64);
+    dealloc::<Owner>(slot);
+    dealloc::<Owner>(slot2);
+
+    return 0;
+}
