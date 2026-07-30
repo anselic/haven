@@ -1,0 +1,14 @@
+// A `!`-returning proc promises never to return, so its body must diverge on
+// every path. This one can fall off its end (the `if` has no else and the tail
+// is a plain declaration), which is rejected.
+//@ error: fall off its end
+
+proc bad() ! {
+    let x: i32 = 3;
+}
+
+@export
+proc main() i32 {
+    bad();
+    return 0;
+}

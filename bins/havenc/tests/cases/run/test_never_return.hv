@@ -1,0 +1,28 @@
+// A user-written `!` return type: `proc panic() !` promises never to return.
+// Its result has the bottom type, so it coerces to any type (used here in a
+// value `return` position), and a call to it diverges - control never continues
+// past `panic()`, so the `return 0` after it is dead but legal.
+//@ exit: 5
+
+proc panic() ! {
+    abort("boom");
+}
+
+// `panic()` in value position: `!` coerces to the `i32` return type.
+proc get_or_die(x: i32) i32 {
+    if (x > 0) { return x; }
+    return panic();
+}
+
+@export
+proc main() i32 {
+    let ok: i32 = get_or_die(5);   // 5, never panics
+    panic_if_zero(ok);             // no-op here
+    return ok;
+}
+
+// `panic()` as a bare diverging statement (no `return`), accepted by the
+// all-paths-return analysis because a `!`-typed call cannot fall through.
+proc panic_if_zero(x: i32) {
+    if (x == 0) { panic(); }
+}

@@ -1,0 +1,16 @@
+// `abort(msg)` terminates the process at runtime: the runtime `rt_abort` prints
+// `msg` to stderr and exits 101 (mirroring Rust's panic exit code). Here the
+// aborting arm is actually taken, so the program never reaches `return 0`.
+// Only the exit code is asserted; the message goes to stderr, not the `.out`
+// stdout golden.
+//@ exit: 101
+
+proc checked(x: i32) i32 {
+    if (x >= 0) { return x; }
+    return abort("checked got a negative value");
+}
+
+@export
+proc main() i32 {
+    return checked(-1);
+}

@@ -146,6 +146,15 @@ impl<'a> LowerCtx<'a> {
         let block = self.blocks.iter_mut().find(|b| b.id == self.current_block).unwrap();
         block.terminator = Some(term);
     }
+
+    /// Whether the current block already has a terminator. A diverging expression
+    /// (`abort(...)`) terminates its block with `unreachable` mid-statement; the
+    /// statement lowerer checks this afterwards to skip the now-dead tail (e.g.
+    /// the `return`'s own terminator, or an aggregate copy of a value that was
+    /// never produced).
+    pub fn is_terminated(&self) -> bool {
+        self.blocks.iter().find(|b| b.id == self.current_block).unwrap().terminator.is_some()
+    }
 }
 
 /// Resolve the escape sequences in a string literal's raw source text into the

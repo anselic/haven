@@ -7,6 +7,12 @@ use super::ctx::{LowerCtx, LoopTargets, int_const, pattern_variant_const, aggreg
 use super::expr::{lower_expr, lower_lvalue, copy_struct};
 
 fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
+    // a preceding statement may have diverged (`abort(...)`), terminating this
+    // block with `unreachable`; anything after it is dead. Don't emit into a
+    // terminated block.
+    if cx.is_terminated() {
+        return;
+    }
     match &stmt.value {
         StmtNode::Expr(expr) => {
             lower_expr(cx, expr); // side effects only, discard result
@@ -35,6 +41,11 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
                 return;
             }
             let val = lower_expr(cx, value);
+            // a diverging initializer (`let x = abort(...)`) produced no value and
+            // terminated the block; skip binding it.
+            if cx.is_terminated() {
+                return;
+            }
             let value_ty = cx.node_types[&value.id].clone();
             match ty {
                 Type::Array(_, _) => {
@@ -77,6 +88,11 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
         StmtNode::Assign { left, value } => {
             let ptr = lower_lvalue(cx, left);  // see below
             let val = lower_expr(cx, value);
+            // a diverging RHS (`x = abort(...)`) terminated the block and yielded
+            // no value; nothing to store.
+            if cx.is_terminated() {
+                return;
+            }
             let value_ty = cx.node_types[&value.id].clone();
             let ty = cx.node_types[&left.id].clone();
             // a struct or data-enum aggregate is held by pointer, so both sides
@@ -286,6 +302,11 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
 
         StmtNode::Return(expr) => {
             let val = lower_expr(cx, expr);
+            // `return abort(...)`: the operand already terminated the block with
+            // `unreachable` and produced no real value. Nothing left to return.
+            if cx.is_terminated() {
+                return;
+            }
             let value_ty = cx.node_types[&expr.id].clone();
             let ret_ty = cx.current_return_type.clone();
             let struct_ret = aggregate_def(&ret_ty, &cx.enums);
@@ -313,6 +334,13 @@ fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<DefId, EnumDef<'a>>, out:
     match &stmt.value {
         StmtNode::Declare { name, ty, value } => {
             let ty = ty.clone();
+            // A `let x: !` local has no storage: its only valid initializer is a
+            // diverging expression, which terminates the block before the binding
+            // is reached (the Declare arm bails on `is_terminated`). Never alloca a
+            // bottom-typed slot - `size_of(!)` panics and no value ever fills it.
+            if ty == Type::Never {
+                return;
+            }
             // key by the Declare stmt's node id (its binding identity)
             match ty {
                 // A struct/array/data-enum *literal* used to alloca at its own

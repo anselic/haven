@@ -268,6 +268,14 @@ fn typecheck_intrinsic<'a>(
             cx.node_types.insert(expr_id, Type::Void);
             Ok(Type::Void)
         }
+        Intrinsic::Abort => {
+            // abort(msg: str) -> !. Checked (not inferred) so a bare string
+            // literal takes `str`. The result is the bottom type, which
+            // `check_expr` lets coerce to whatever the context expects.
+            check_expr(cx, &Type::Str, &args[0])?;
+            cx.node_types.insert(expr_id, Type::Never);
+            Ok(Type::Never)
+        }
         Intrinsic::SimdSplat => {
             let ty = tys[0].clone();
             let size = consts[0].clone();
@@ -451,6 +459,10 @@ pub(crate) fn check_expr<'a>(
     };
 
     let compatible = actual == *expected ||
+        // `!` (the type of a diverging expression like `abort(...)`) coerces to
+        // any expected type: control never reaches the surrounding context, so
+        // there is no value to be type-incompatible.
+        actual == Type::Never ||
         matches!((&actual, expected),
             (Type::Array(inner_actual, _), Type::Slice(inner_expected))
                 if inner_actual == inner_expected
@@ -1112,21 +1124,29 @@ fn infer<'a>(
 /// Conservative on loops: a `while` is assumed to possibly run zero times, so it
 /// never guarantees a return (not even `while (true)`, since there's no
 /// break analysis), and `break`/`continue` count as fall-through.
-pub(crate) fn always_returns(stmt: &Stmt) -> bool {
+///
+/// `node_types` lets a diverging expression statement count as a return: a bare
+/// `abort(...);` has type `!`, so control cannot fall past it - the same reason
+/// `return abort(...)` works. This is why a `match` arm may end in a plain
+/// `abort(...)` without a `return`.
+pub(crate) fn always_returns(stmt: &Stmt, node_types: &HashMap<usize, Type>) -> bool {
     match &stmt.value {
         StmtNode::Return(_) => true,
+        // a bare expression of type `!` (currently only `abort(...)`) diverges, so
+        // nothing after it in the block is reachable - it counts as a return.
+        StmtNode::Expr(e) => matches!(node_types.get(&e.id), Some(Type::Never)),
         // a block returns if any statement in it returns (anything after the
         // first returning statement is dead, which is fine for this check)
-        StmtNode::Block(stmts) => stmts.iter().any(always_returns),
+        StmtNode::Block(stmts) => stmts.iter().any(|s| always_returns(s, node_types)),
         // an `if` guarantees a return only with an `else` where BOTH branches
         // return; a bare `if` falls through when the condition is false.
         StmtNode::If { then_branch, else_branch, .. } => match else_branch {
-            Some(else_branch) => always_returns(then_branch) && always_returns(else_branch),
+            Some(else_branch) => always_returns(then_branch, node_types) && always_returns(else_branch, node_types),
             None => false,
         },
         // a match is exhaustive (typecheck guarantees it), so it returns on every
         // path iff every arm body does.
-        StmtNode::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|(_, body)| always_returns(body)),
+        StmtNode::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|(_, body)| always_returns(body, node_types)),
         _ => false,
     }
 }

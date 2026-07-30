@@ -256,6 +256,9 @@ fn mangle_ty<'a>(defs: &Defs<'a>, arena: &'a Bump, ty: &Type<'a>) -> String {
         // Neither should appear in a fully-concrete instantiation; encode them
         // defensively rather than panicking so a bug surfaces as a bad symbol.
         Type::Param(name) => format!(".param.{}", name),
+        // `!` is only ever an expression's inferred type, never part of a
+        // monomorphized signature - encode defensively rather than panic.
+        Type::Never => ".never".into(),
         Type::Function { params, return_type } => {
             let ps = params.iter().map(mangle_ty).collect::<Vec<_>>().join(".");
             format!(".fn{}.{}.ret{}", params.len(), ps, mangle_ty(return_type))

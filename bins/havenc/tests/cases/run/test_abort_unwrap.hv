@@ -1,0 +1,42 @@
+// `abort(msg)` has type `!` (the bottom type), so it coerces to whatever the
+// surrounding context expects - which is exactly what lets a fallible accessor
+// bail on the impossible case without inventing a value of the return type. This
+// is the shape `Option::unwrap` wants. Three positions are exercised here:
+//   * a scalar return  (`pick` -> i32)
+//   * an aggregate return (`first` -> Pair), which stresses the struct-return
+//     lowering path: the diverging arm must NOT try to copy a value into the
+//     sret slot, since none was produced
+//   * a bare `abort(...)` statement in a match arm (no `return`), accepted by
+//     the all-paths-return analysis because a `!`-typed statement diverges
+//@ exit: 7
+
+struct Pair { a: i32, b: i32 }
+
+enum Opt { Nope, Yep(i32) }
+
+// scalar: the non-positive path has no sensible value, so it aborts
+proc pick(x: i32) i32 {
+    if (x > 0) { return x; }
+    return abort("pick got a non-positive value");
+}
+
+// aggregate return: the diverging branch returns `!`, coerced to `Pair`
+proc first(x: i32) Pair {
+    if (x > 0) { return Pair { a: x, b: x + 1 }; }
+    return abort("first got a non-positive value");
+}
+
+// unwrap-by-value with a bare abort (no `return`) in the empty arm
+proc get(o: Opt) i32 {
+    match (o) {
+        Opt::Yep(v) -> { return v; }
+        Opt::Nope   -> { abort("unwrapped a Nope"); }
+    }
+}
+
+@export
+proc main() i32 {
+    let p: Pair = first(3);      // Pair { a: 3, b: 4 }
+    let o: Opt = Opt::Yep(0);
+    return pick(p.a) + get(o) + p.b;   // 3 + 0 + 4 = 7
+}

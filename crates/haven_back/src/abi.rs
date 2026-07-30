@@ -318,6 +318,7 @@ fn leaf_class(ty: &Type) -> Class {
             unreachable!("aggregates are handled by classify_into, not leaf_class")
         }
         Type::Param(n) => panic!("type parameter `{n}` survived to ABI classification"),
+        Type::Never => panic!("the bottom type `!` reached ABI classification - it has no values"),
     }
 }
 

@@ -95,6 +95,7 @@ pub fn size_of<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> usize {
 
         Path { path, .. } => Type::unresolved(path),
         Param(name) => panic!("type parameter `{name}` survived to layout"),
+        Never => panic!("the bottom type `!` has no layout - it has no values"),
     }
 }
 
@@ -128,6 +129,7 @@ pub fn align_of<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> usize {
 
         Path { path, .. } => Type::unresolved(path),
         Param(name) => panic!("type parameter `{name}` survived to layout"),
+        Never => panic!("the bottom type `!` has no alignment - it has no values"),
     }
 }
 

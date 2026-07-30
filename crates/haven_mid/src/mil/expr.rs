@@ -104,6 +104,23 @@ fn lower_intrinsic<'a>(
             lower_expr(cx, &args[1]);
             Value::Const(Const::Undef)
         }
+        Intrinsic::Abort => {
+            // call the runtime `rt_abort(msg)` (declared as an extern in the
+            // prelude), then terminate the block with `unreachable`: control
+            // never leaves the call. The statement lowerer sees the block is
+            // terminated and drops whatever tail followed (e.g. the enclosing
+            // `return`). The returned value is never observed.
+            let msg = lower_expr(cx, &args[0]);
+            cx.emit(Inst::Call {
+                dst: None,
+                callee: Callee::Direct("rt_abort"),
+                args: vec![(msg, Type::Str)],
+                return_type: Type::Void,
+                sret: None,
+            });
+            cx.terminate(Terminator::Unreachable);
+            Value::Const(Const::Undef)
+        }
         Intrinsic::SimdSplat => {
             let ty = ta_type(type_args, 0);
             let size = ta_const(type_args, 1);
@@ -641,8 +658,19 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 lowered_args.push((coerce(cx, val, &arg_ty, &param_ty), param_ty));
             }
 
+            // a diverging receiver or argument already terminated the block.
+            if cx.is_terminated() {
+                return Value::Const(Const::Undef);
+            }
+
             let callee = Callee::Direct(mc.target);
             let return_type = mc.return_type.clone();
+            // a `!`-returning method never comes back - void call + unreachable.
+            if return_type == Type::Never {
+                cx.emit(Inst::Call { dst: None, callee, args: lowered_args, return_type: Type::Void, sret: None });
+                cx.terminate(Terminator::Unreachable);
+                return Value::Const(Const::Undef);
+            }
             if let Some(sname) = aggregate_def(&return_type, &cx.enums) {
                 let slot = cx.fresh_reg();
                 cx.emit(Inst::AllocaStruct { dst: slot, def: sname, align: None });
@@ -698,7 +726,20 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 (coerced_val, param_ty)
             }).collect();
 
+            // a diverging argument (`f(abort())`) already terminated the block;
+            // the call itself is unreachable, so drop it.
+            if cx.is_terminated() {
+                return Value::Const(Const::Undef);
+            }
+
             let return_type = cx.node_types[&expr.id].clone();
+            // a call to a `!`-returning proc never comes back: emit it as a void
+            // call and mark the block unreachable, exactly like `abort`.
+            if return_type == Type::Never {
+                cx.emit(Inst::Call { dst: None, callee, args: lowered_args, return_type: Type::Void, sret: None });
+                cx.terminate(Terminator::Unreachable);
+                return Value::Const(Const::Undef);
+            }
             let struct_ret = aggregate_def(&return_type, &cx.enums);
             if let Some(sname) = struct_ret {
                 // if sret, allocate the result slot here and hand the callee a

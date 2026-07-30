@@ -339,6 +339,14 @@ pub enum Type<'a> {
     Simd(Box<Self>, ConstVal<'a>),
     /// Static string slice (like `&'static str` in Rust)
     Str,
+    /// The empty/bottom type `!`: the type of an expression that never yields a
+    /// value because control does not return from it (currently only `abort()`).
+    /// It has no values and no runtime representation. The typechecker lets it
+    /// coerce to any expected type, so `return abort(msg)` type-checks in a
+    /// function of any return type. Synthesized only - there is no source syntax
+    /// for it, so name resolution never produces one, and it never reaches
+    /// codegen as the type of a live value.
+    Never,
     /// PRE-RESOLUTION ONLY: a named type as the parser saw it, before anything
     /// knows whether it denotes a struct, an enum or a type parameter — or even
     /// whether it exists. Name resolution rewrites every one of these into
@@ -432,6 +440,7 @@ impl<'a> Display for Type<'a> {
             Slice(inner) => write!(f, "[{}]", inner),
             Simd(inner, size) => write!(f, "simd[{}, {}]", inner, size),
             Str => write!(f, "str"),
+            Never => write!(f, "!"),
             Path { path, args } if args.is_empty() => write!(f, "{}", path),
             Path { path, args } => {
                 let args_str = args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");

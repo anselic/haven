@@ -160,7 +160,9 @@ impl TyHead {
             Type::Array(..) => TyHead::Array,
             Type::Simd(..) => TyHead::Simd,
             Type::Function { .. } => TyHead::Function,
-            Type::Param(_) | Type::Path { .. } => return None,
+            // `!` has no values, so it never dispatches a method and never
+            // carries one - like a bare type parameter.
+            Type::Param(_) | Type::Path { .. } | Type::Never => return None,
         })
     }
 

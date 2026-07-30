@@ -1,0 +1,8 @@
+// `abort` takes a single `str` message. Its bottom-type result coerces to any
+// context, but the argument is still type-checked - a non-`str` is rejected.
+//@ error: Expected str
+
+@export
+proc main() i32 {
+    return abort(42);
+}

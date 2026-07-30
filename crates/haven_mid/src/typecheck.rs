@@ -56,6 +56,11 @@ fn check_export_type<'a>(
             Err("function pointer types are not supported in @export functions".into()),
         Type::Param(_) =>
             Err("generic type parameters are not allowed in @export functions".into()),
+        // `!` is not source-spellable and only ever an expression's inferred type,
+        // so it cannot appear in a written signature - but reject it explicitly
+        // rather than fall through.
+        Type::Never =>
+            Err("the bottom type '!' is not allowed in @export functions".into()),
         // A named type. A by-value struct is ABI-lowered (SysV eightbyte
         // classification), so it may cross the FFI boundary as long as every
         // field is itself export-safe - recurse, so a struct hiding a
@@ -275,18 +280,19 @@ fn check_toplevel<'a>(
             // a non-void function must return on every path, or control can fall
             // off the end with no value. structural over the body, so it also
             // covers generic templates (return_type may still hold `Param`s).
-            if return_ty != Type::Void && !body.iter().any(always_returns) {
+            if return_ty != Type::Void && !body.iter().any(|s| always_returns(s, &cx.node_types)) {
                 cx.pop_scope();
                 cx.generics = Vec::new();
                 cx.const_generics = Vec::new();
                 cx.generic_bounds = HashMap::new();
-                return Err(Error {
-                    msg: format!(
-                        "function '{}' has return type '{}' but not all paths return a value",
-                        name, return_type
-                    ),
-                    span: node.span.clone(),
-                });
+                // a `!` function promises never to return; the failure is that
+                // control can fall off its end, not that a value is missing.
+                let msg = if return_ty == Type::Never {
+                    format!("function '{}' has return type '!' but can fall off its end without diverging (end it with `abort(...)` or a call that never returns)", name)
+                } else {
+                    format!("function '{}' has return type '{}' but not all paths return a value", name, return_type)
+                };
+                return Err(Error { msg, span: node.span.clone() });
             }
 
             cx.pop_scope();

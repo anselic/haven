@@ -541,6 +541,10 @@ fn parse_type<'tks, 'src: 'tks>()
         let var = select_ref! { Token::Var(ident) => ident };
 
         choice((
+            // `!` - the never/bottom type, as a return type of a diverging proc
+            // (`proc panic() ! { abort(...) }`). The `!` token starts no other
+            // type, so this alternative is unambiguous.
+            just(Token::UnaryOp(UnaryOp::Not)).to(Type::Never),
             // proc(T1, T2) R
             // starts no other type, so this alternative is unambiguous
             just(Token::Proc)

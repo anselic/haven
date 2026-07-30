@@ -10,6 +10,11 @@ struct Slice {
 
 uint64_t rt_slice_len(struct Slice* slice) { return (uint64_t)slice->length; }
 
+[[noreturn]] void rt_abort(const char* msg) {
+    fprintf(stderr, "abort: %s\n", msg);
+    exit(101);
+}
+
 void rt_printf(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);

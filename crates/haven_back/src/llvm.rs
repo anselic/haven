@@ -57,6 +57,10 @@ fn emit_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> String {
         // generic functions are skipped during MIL lowering, so a type param
         // should never reach codegen.
         Param(name) => unreachable!("generic type parameter `{name}` survived to LLVM codegen"),
+        // `abort()` is the only source of `!`, and it lowers to a call + an
+        // `unreachable` terminator, never to a value or a slot - so no live value
+        // ever has this type at codegen.
+        Never => unreachable!("the bottom type `!` reached LLVM codegen - it has no values"),
     }
 }
 
@@ -662,7 +666,12 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
         },
         None => {
             cx.sret_direct = None;
-            emit_type(&func.return_type, &cx.types)
+            // a `!`-returning proc never returns; LLVM has no bottom type, so its
+            // signature return type is `void` (the body ends in `unreachable`).
+            match func.return_type {
+                Type::Never => "void".to_string(),
+                ref ty => emit_type(ty, &cx.types),
+            }
         }
     };
 
@@ -717,6 +726,7 @@ fn emit_extern<'a>(cx: &mut EmitCtx<'a>, ext: ExternDecl<'a>) {
                 "void".to_string()
             }
         },
+        Type::Never => "void".to_string(),
         _ => emit_type(&ext.return_type, &cx.types),
     };
     emitln!(cx, "declare {ret_str} @{}({}){attrs_str}", ext.name, params.join(", "));
