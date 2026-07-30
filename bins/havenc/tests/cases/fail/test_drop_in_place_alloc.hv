@@ -9,7 +9,6 @@
 //@ error: calls 'Res$delete', which may allocate
 
 import std/alloc { alloc, dealloc }
-import std/option { unwrap }
 
 struct Res { data: *i32 }
 
@@ -24,7 +23,7 @@ proc sweep(p: *Res, n: u64) {
 
 @export
 proc main() i32 {
-    let r: *Res = unwrap::<Res>(alloc::<Res>(1u64));
+    let r: *Res = alloc::<Res>(1u64).unwrap();
     sweep(r, 0u64);
     dealloc::<Res>(r);
     return 0;

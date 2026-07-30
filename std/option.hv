@@ -1,44 +1,76 @@
 /// std/option: an optional value, backed by a real (data-carrying) enum.
 ///
-/// `Option<T>` holds either nothing (`None`) or a value (`Some(T)`) - the same
-/// generic ADT usable for any `T`. This library's own helpers only traffic in
-/// pointers (`Option<*T>`), since that's what haven's callers (`alloc`,
-/// `Vec::pop`, ...) need, but any `Option<T>` can be built and `match`ed directly.
-/// Test with `is_some`/`is_none`, then retrieve with `unwrap`/`unwrap_or`.
+/// `Option<T>` holds either nothing (`None`) or a value (`Some(T)`), for any `T` -
+/// a pointer, an integer, an owning `Vec`, anything. Test it with `is_some`/
+/// `is_none` (which borrow), then take the value out with `unwrap`/`expect`/
+/// `unwrap_or` (which consume the `Option`), or transform it with `map`/`and_then`.
+///
+/// Taking the value out is a by-value move: for an owning `T` the contained value
+/// is handed to the caller and the `Option` is spent. `unwrap` and `expect` have
+/// no value to return on `None`, so they `abort` - guard with `is_some` (or use
+/// `unwrap_or`) when `None` is a real possibility.
 
 pub enum Option<T> {
     None,
     Some(T),
-}
 
-/// Whether the `Option` holds a value.
-pub proc is_some<T>(o: Option<*T>) bool {
-    match (o) {
-        Option::Some(_) -> { return true; }
-        Option::None -> { return false; }
-    }
-}
-/// Whether the `Option` is empty.
-pub proc is_none<T>(o: Option<*T>) bool {
-    return !is_some::<T>(o);
-}
-
-/// The contained pointer. On `none` this prints an error and returns the null
-/// pointer rather than aborting, so guard with `is_some` when `none` is possible.
-pub proc unwrap<T>(o: Option<*T>) *T {
-    match (o) {
-        Option::Some(v) -> { return v; }
-        Option::None -> {
-            print("Error: Attempted to unwrap a None value\n");
-            return null::<*T>();
+    /// Whether the `Option` holds a value. Borrows, so the `Option` is untouched.
+    proc is_some(*self) bool {
+        match (*self) {
+            Option::Some(_) -> { return true; }
+            Option::None    -> { return false; }
         }
     }
-}
 
-/// The contained pointer, or `default` when the `Option` is empty.
-pub proc unwrap_or<T>(o: Option<*T>, default: *T) *T {
-    match (o) {
-        Option::Some(v) -> { return v; }
-        Option::None -> { return default; }
+    /// Whether the `Option` is empty. Borrows, so the `Option` is untouched.
+    proc is_none(*self) bool {
+        return !self.is_some();
+    }
+
+    /// The contained value, consuming the `Option`. Aborts if it is `None`, so
+    /// only call it where `None` is impossible (or guard with `is_some` first).
+    proc unwrap(self) T {
+        match (self) {
+            Option::Some(v) -> { return v; }
+            Option::None    -> { abort("called `unwrap` on a `None` value"); }
+        }
+    }
+
+    /// The contained value, consuming the `Option`. Aborts with `msg` if it is
+    /// `None` - like `unwrap`, but with a message that says what was expected.
+    proc expect(self, msg: str) T {
+        match (self) {
+            Option::Some(v) -> { return v; }
+            Option::None    -> { abort(msg); }
+        }
+    }
+
+    /// The contained value, or `default` when the `Option` is empty. Consumes the
+    /// `Option` and, on the `Some` path, destroys the unused `default`.
+    proc unwrap_or(self, default: T) T {
+        match (self) {
+            Option::Some(v) -> { return v; }
+            Option::None    -> { return default; }
+        }
+    }
+
+    /// Map `Some(v)` to `Some(f(v))` and `None` to `None`, consuming the `Option`
+    /// and moving the value into `f`. `U` is the method's own parameter (the
+    /// receiver fixes `T`), so write it as a turbofish: `o.map::<U>(f)`.
+    proc map<U>(self, f: proc(T) U) Option<U> {
+        match (self) {
+            Option::Some(v) -> { return Option::Some::<U>(f(v)); }
+            Option::None    -> { return Option::None::<U>(); }
+        }
+    }
+
+    /// Chain another fallible step: `Some(v)` becomes `f(v)` (itself an `Option`)
+    /// and `None` stays `None`. Consumes the `Option` and moves the value into
+    /// `f`. Written with a turbofish like `map`: `o.and_then::<U>(f)`.
+    proc and_then<U>(self, f: proc(T) Option<U>) Option<U> {
+        match (self) {
+            Option::Some(v) -> { return f(v); }
+            Option::None    -> { return Option::None::<U>(); }
+        }
     }
 }

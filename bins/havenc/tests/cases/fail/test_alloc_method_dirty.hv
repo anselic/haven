@@ -6,14 +6,13 @@
 //@ error: may allocate
 
 import std/alloc { alloc }
-import std/option { unwrap }
 
 struct Thing {
     p: *i32,
 
     // concrete, allocating, and NOT @alloc(false)
     proc grow(*self) {
-        self.p = unwrap::<i32>(alloc::<i32>(4u64));
+        self.p = alloc::<i32>(4u64).unwrap();
     }
 
     @alloc(false)

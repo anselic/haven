@@ -1,5 +1,4 @@
 import std/alloc { alloc }
-import std/option { unwrap }
 
 struct Vec2 {
     x: f32,
@@ -7,14 +6,14 @@ struct Vec2 {
 }
 
 proc new_vec2_heap(x: f32, y: f32) *Vec2 {
-    let ptr: *Vec2 = unwrap::<Vec2>(alloc::<Vec2>(1u64));
+    let ptr: *Vec2 = alloc::<Vec2>(1u64).unwrap();
     ptr.x = x;
     ptr.y = y;
     return ptr;
 }
 
 proc vec2_add(a: *Vec2, b: *Vec2) *Vec2 {
-    let ptr: *Vec2 = unwrap::<Vec2>(alloc::<Vec2>(1u64));
+    let ptr: *Vec2 = alloc::<Vec2>(1u64).unwrap();
     ptr.x = a.x + b.x;
     ptr.y = a.y + b.y;
     return ptr;

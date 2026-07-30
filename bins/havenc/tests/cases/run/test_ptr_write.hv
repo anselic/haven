@@ -11,7 +11,6 @@
 //@ exit: 0
 
 import std/alloc { alloc, dealloc }
-import std/option { unwrap }
 
 struct Owner { data: *i32 }
 
@@ -23,7 +22,7 @@ extend Owner: Delete {
 }
 
 proc make(n: i32) Owner {
-    let p: *i32 = unwrap::<i32>(alloc::<i32>(1u64));
+    let p: *i32 = alloc::<i32>(1u64).unwrap();
     ptr_write::<i32>(p, n);
     return Owner { data: p };
 }
@@ -31,7 +30,7 @@ proc make(n: i32) Owner {
 @export
 proc main() i32 {
     // a scalar slot, through a bare pointer and through an element pointer
-    let xs: *i32 = unwrap::<i32>(alloc::<i32>(2u64));
+    let xs: *i32 = alloc::<i32>(2u64).unwrap();
     ptr_write::<i32>(xs, 7);
     ptr_write::<i32>(&xs[1], 8);
     printf::<i32>("scalars %d", xs[0]);
@@ -40,13 +39,13 @@ proc main() i32 {
 
     // an aggregate slot: a field-by-field copy into the destination, the same
     // thing an ordinary assignment does, minus destroying what was there.
-    let slot: *Owner = unwrap::<Owner>(alloc::<Owner>(1u64));
+    let slot: *Owner = alloc::<Owner>(1u64).unwrap();
     ptr_write::<Owner>(slot, make(1));
 
     // writing an owner *moves* it, so `held` is dead afterwards and the scope
     // does not also destroy it - only the explicit drop below runs.
     let held: Owner = make(2);
-    let slot2: *Owner = unwrap::<Owner>(alloc::<Owner>(1u64));
+    let slot2: *Owner = alloc::<Owner>(1u64).unwrap();
     ptr_write::<Owner>(slot2, held);
 
     printf::<i32>("written %d\n", 2);

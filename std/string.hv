@@ -79,6 +79,17 @@ pub struct String {
         }
     }
 
+    proc push_string(*self, other: *String) {
+        let n: u64 = other.len();
+        let src: *u8 = other.buf.get_ptr(0u64);
+        self.buf.reserve(self.len() + n);
+        let i: u64 = 0u64;
+        while (i < n) {
+            self.buf.push(src[i]);
+            i = i + 1u64;
+        }
+    }
+
     /// Logically empty the String without shrinking its buffer. The bytes own
     /// nothing, so this just resets the length.
     proc clear(*self) { self.buf.clear(); }

@@ -12,7 +12,7 @@
 import std/dsp/filters
 import std/dsp/osc
 import std/alloc { alloc, dealloc }
-import std/option { Option, unwrap }
+import std/option { Option }
 import std/simd { simd_copy_ptr }
 
 struct Vector2 { x: f32, y: f32 }
@@ -94,10 +94,10 @@ proc main() i32 {
     let num_samples: i32 = 512;
     let count: u64 = numerical_cast::<u64>(num_samples);
 
-    let orig_l: *f32 = unwrap::<f32>(alloc::<f32>(count)); // fresh source
-    let orig_r: *f32 = unwrap::<f32>(alloc::<f32>(count));
-    let work_l: *f32 = unwrap::<f32>(alloc::<f32>(count)); // biquad-filtered copy
-    let work_r: *f32 = unwrap::<f32>(alloc::<f32>(count));
+    let orig_l: *f32 = alloc::<f32>(count).unwrap(); // fresh source
+    let orig_r: *f32 = alloc::<f32>(count).unwrap();
+    let work_l: *f32 = alloc::<f32>(count).unwrap(); // biquad-filtered copy
+    let work_r: *f32 = alloc::<f32>(count).unwrap();
 
     let phase: f32 = 0.0;
     gen_square_wave(orig_l, orig_r, num_samples, phase);

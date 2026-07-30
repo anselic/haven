@@ -1,0 +1,32 @@
+// Moving a generic owned payload out of a `Just` arm is a whole move of the
+// payload binding, so moving it a second time is a use-after-move - and the
+// diagnostic names the binding (`v`), not `<local>`: a payload binding carries a
+// resource but no drop slot, so its name comes from the pattern, not a slot.
+//@ error: use of 'v' after its value was moved out of it
+
+import std/alloc { dealloc }
+
+enum Maybe<T> { Nothing, Just(T) }
+
+struct Owner { cell: *i32 }
+extend Owner: Delete { proc delete(*self) { dealloc::<i32>((*self).cell); } }
+
+extend Maybe<T> {
+    proc bad(self) T {
+        match (self) {
+            Maybe::Just(v) -> {
+                let a: T = v;   // move the payload out
+                let b: T = v;   // ERROR: v's value is already gone
+                return a;
+            }
+            Maybe::Nothing -> { abort("none"); }
+        }
+    }
+}
+
+@export
+proc main() i32 {
+    let o: Maybe<Owner> = Maybe::Nothing::<Owner>();
+    let x: Owner = o.bad();
+    return 0;
+}

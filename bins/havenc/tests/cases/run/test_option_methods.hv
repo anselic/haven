@@ -1,0 +1,47 @@
+// The methodized `Option<T>` API (std/option.hv): `is_some`/`is_none` borrow and
+// leave the option usable; `unwrap`/`expect`/`unwrap_or` consume it; `map` and
+// `and_then` transform it. Every branch of every method is exercised, and the
+// exit code is their running sum (99) so a wrong answer anywhere shifts it.
+//@ exit: 99
+
+import std/option { Option }
+
+proc dbl(x: i32) i32 { return x + x; }
+// halve, but fail on zero - a fallible step for `and_then`.
+proc half_opt(x: i32) Option<i32> {
+    if (x == 0) { return Option::None::<i32>(); }
+    return Option::Some::<i32>(x / 2);
+}
+
+@export
+proc main() i32 {
+    let acc: i32 = 0;
+
+    let some20: Option<i32> = Option::Some::<i32>(20);
+    let none:   Option<i32> = Option::None::<i32>();
+
+    // borrow-based predicates: `some20`/`none` are still live afterward
+    if (some20.is_some()) { acc = acc + 1; }      // 1
+    if (some20.is_none()) { acc = acc + 100; }    // not taken
+    if (none.is_none())   { acc = acc + 2; }      // 3
+    if (none.is_some())   { acc = acc + 100; }    // not taken
+
+    // unwrap / expect: consume, yield the value
+    acc = acc + some20.unwrap();                              // 23
+    acc = acc + Option::Some::<i32>(5).expect("present");     // 28
+
+    // unwrap_or on each variant
+    acc = acc + Option::None::<i32>().unwrap_or(7);           // 35
+    acc = acc + Option::Some::<i32>(3).unwrap_or(99);         // 38
+
+    // map: Some(v) -> Some(f v), None -> None
+    acc = acc + Option::Some::<i32>(20).map::<i32>(dbl).unwrap();          // 78
+    if (Option::None::<i32>().map::<i32>(dbl).is_none()) { acc = acc + 4; } // 82
+
+    // and_then: chain fallible steps, threading None through
+    acc = acc + Option::Some::<i32>(8).and_then::<i32>(half_opt).unwrap();  // 86
+    if (Option::Some::<i32>(0).and_then::<i32>(half_opt).is_none()) { acc = acc + 5; } // 91
+    if (Option::None::<i32>().and_then::<i32>(half_opt).is_none())  { acc = acc + 8; } // 99
+
+    return acc;   // 99
+}

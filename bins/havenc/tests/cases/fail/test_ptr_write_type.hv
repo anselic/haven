@@ -5,11 +5,10 @@
 //@ error: first argument must be `*i32`
 
 import std/alloc { alloc, dealloc }
-import std/option { unwrap }
 
 @export
 proc main() i32 {
-    let p: *u8 = unwrap::<u8>(alloc::<u8>(4u64));
+    let p: *u8 = alloc::<u8>(4u64).unwrap();
     ptr_write::<i32>(p, 7);
     dealloc::<u8>(p);
     return 0;

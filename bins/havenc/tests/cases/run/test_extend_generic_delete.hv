@@ -10,7 +10,6 @@
 //@ exit: 0
 
 import std/alloc { alloc, dealloc }
-import std/option { unwrap }
 
 struct Buf<T> {
     data: *T,
@@ -20,7 +19,7 @@ struct Buf<T> {
 }
 
 proc buf_new<T>(n: u64) Buf<T> {
-    return Buf::<T> { data: unwrap::<T>(alloc::<T>(n)), cap: n };
+    return Buf::<T> { data: alloc::<T>(n).unwrap(), cap: n };
 }
 
 extend Buf<T>: Delete {

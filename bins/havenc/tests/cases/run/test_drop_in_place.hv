@@ -23,7 +23,6 @@
 //@ exit: 0
 
 import std/alloc { realloc, dealloc }
-import std/option { unwrap }
 import std/string { String }
 
 struct Owner { data: *i32 }
@@ -68,7 +67,7 @@ proc bag_push<T>(b: *Bag<T>, value: T) {
     if (b.cap < b.len + 1u64) {
         let grown: u64 = b.cap * 2u64;
         if (grown == 0u64) { grown = 4u64; }
-        b.data = unwrap::<T>(realloc::<T>(b.data, grown));
+        b.data = realloc::<T>(b.data, grown).unwrap();
         b.cap = grown;
     }
     // the slot is fresh capacity, so this initializes rather than overwrites
@@ -77,7 +76,7 @@ proc bag_push<T>(b: *Bag<T>, value: T) {
 }
 
 proc owner(n: i32) Owner {
-    let p: *i32 = unwrap::<i32>(realloc::<i32>(null::<*i32>(), 1u64));
+    let p: *i32 = realloc::<i32>(null::<*i32>(), 1u64).unwrap();
     ptr_write::<i32>(p, n);
     return Owner { data: p };
 }

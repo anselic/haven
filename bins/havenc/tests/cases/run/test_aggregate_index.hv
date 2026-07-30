@@ -12,7 +12,6 @@
 //@ exit: 0
 
 import std/alloc { realloc, dealloc }
-import std/option { unwrap }
 
 // wider than a pointer, so a word-sized stride would overlap elements
 struct V3 { x: i32, y: i32, z: i32 }
@@ -55,7 +54,7 @@ proc main() i32 {
     printf::<i32>(" %d\n", s[2].y);
 
     // --- a raw heap buffer: inline elements, same as the stack ones
-    let buf: *V3 = unwrap::<V3>(realloc::<V3>(null::<*V3>(), 4u64));
+    let buf: *V3 = realloc::<V3>(null::<*V3>(), 4u64).unwrap();
     let i: u64 = 0u64;
     while (i < 4u64) {
         let n: i32 = numerical_cast::<i32>(i);

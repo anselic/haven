@@ -8,7 +8,6 @@
 //@ error: owns a resource
 
 import std/alloc { alloc, dealloc }
-import std/option { unwrap }
 
 struct Buf {
     data: *i32,
@@ -22,7 +21,7 @@ extend Buf: Delete {
 }
 
 proc buf_new(n: u64) Buf {
-    return Buf { data: unwrap::<i32>(alloc::<i32>(n)), cap: n };
+    return Buf { data: alloc::<i32>(n).unwrap(), cap: n };
 }
 
 @export

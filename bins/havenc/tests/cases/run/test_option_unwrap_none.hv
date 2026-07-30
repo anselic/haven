@@ -1,0 +1,12 @@
+// `unwrap` on `None` has no value to return, so it aborts: the `None` arm calls
+// `abort(...)`, whose `!` result satisfies the `T` return type. Abort exits 101
+// (and prints to stderr, which the harness does not check).
+//@ exit: 101
+
+import std/option { Option }
+
+@export
+proc main() i32 {
+    let empty: Option<i32> = Option::None::<i32>();
+    return empty.unwrap();   // aborts
+}

@@ -24,7 +24,7 @@
 // nothing when `T` owns nothing, so a `Vec<i32>` pays for none of this.
 
 import std/alloc { alloc, realloc, dealloc }
-import std/option { Option, unwrap }
+import std/option { Option }
 
 pub struct Vec<T> {
     data: *T,  /// heap buffer, or null when cap == 0
@@ -55,7 +55,7 @@ pub struct Vec<T> {
             if (new_cap == 0u64) { new_cap = 4u64; }
             while (new_cap < needed) { new_cap = new_cap * 2u64; }
             // realloc copies the old elements over; a null `data` makes this a malloc.
-            self.data = unwrap::<T>(realloc::<T>(self.data, new_cap));
+            self.data = realloc::<T>(self.data, new_cap).unwrap();
             self.cap = new_cap;
         }
     }

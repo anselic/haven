@@ -4,7 +4,7 @@
 // making the outer struct generic. Also exercises `pop`'s `Option<*T>`.
 
 import std/vec { Vec }
-import std/option { Option, unwrap }
+import std/option { Option }
 
 struct Pair { xs: Vec<i32>, tag: i32 }
 
@@ -18,7 +18,7 @@ proc main() i32 {
 
     // pop yields Option<*T>: unwrap to the slot pointer, deref for the value
     let popped: Option<*i32> = p.xs.pop();
-    printf::<i32>("%d\n", *unwrap::<i32>(popped)); // 20
+    printf::<i32>("%d\n", *popped.unwrap()); // 20
     printf::<u64>("%llu\n", p.xs.len()); // 1
 
     // no free: `Pair` owns through its `xs: Vec<i32>` field, so it is destroyed

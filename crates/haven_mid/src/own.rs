@@ -195,6 +195,12 @@ struct Checker<'a, 'c> {
     loops: Vec<usize>,
     moved: Flow<'a>,
     ret_ty: Type<'a>,
+    /// The source name of every `Local` binding, for diagnostics. A `Slot` also
+    /// carries a name, but only droppable values get a slot: a value moved out of
+    /// an enum payload, or an owning enum local (an enum has no drop glue), has
+    /// none, and its move errors would otherwise read `<local>`. Keyed for every
+    /// `Declare` and every match payload binding, whether or not it is droppable.
+    names: HashMap<Binding<'a>, &'a str>,
 }
 
 impl<'a, 'c> Checker<'a, 'c> {
@@ -216,11 +222,15 @@ impl<'a, 'c> Checker<'a, 'c> {
         })
     }
 
-    /// How a binding reads in a diagnostic.
+    /// How a binding reads in a diagnostic. `names` covers every source local,
+    /// including the slot-less ones (payload move-outs, owning enum locals); the
+    /// slot is a fallback and `<local>` a last resort for a synthetic binding.
     fn binding_name(&self, b: Binding<'a>) -> &'a str {
         match b {
             Binding::Param(name) => name,
-            Binding::Local(_) => self.slot(b).map_or("<local>", |s| s.name),
+            Binding::Local(_) => self.names.get(&b).copied()
+                .or_else(|| self.slot(b).map(|s| s.name))
+                .unwrap_or("<local>"),
         }
     }
 
@@ -409,9 +419,29 @@ impl<'a, 'c> Checker<'a, 'c> {
     fn declare(&mut self, binding: Binding<'a>, name: &'a str, ty: Type<'a>) {
         // re-entering a scope re-declares; the binding is live again.
         self.moved.remove(&binding);
+        // record the name for diagnostics even when the value needs no slot, so a
+        // move out of an owning-but-drop-glue-less local still reads by name.
+        if let Binding::Local(_) = binding { self.names.insert(binding, name); }
         let drops = self.model.drops_for(&ty);
         if drops.is_empty() { return; }
         self.scopes.last_mut().unwrap().push(Slot { binding, name, ty, drops });
+    }
+
+    /// Record the source names of a match arm's payload bindings, so a move out
+    /// of one (`Some(v) -> return v`) names `v` rather than `<local>`. The binding
+    /// identity is the sub-pattern's node id, matching what name resolution wired
+    /// every use of it to.
+    fn note_pattern_binds(&mut self, pat: &Pattern<'a>) {
+        match &pat.value {
+            PatternNode::Bind(name) => { self.names.insert(Binding::Local(pat.id), name); }
+            PatternNode::Variant { fields, .. } => {
+                for f in fields { self.note_pattern_binds(f); }
+            }
+            PatternNode::StructVariant { fields, .. } => {
+                for (_, f) in fields { self.note_pattern_binds(f); }
+            }
+            _ => {}
+        }
     }
 
     /// The `delete` calls destroying one slot, or nothing if its value has been
@@ -773,6 +803,9 @@ impl<'a, 'c> Checker<'a, 'c> {
                 let mut new_arms = Vec::with_capacity(arms.len());
                 for (pat, body) in arms {
                     self.moved = entry.clone();
+                    // a payload binding is a view into the scrutinee's storage;
+                    // moving it out is a move of that binding, so name it.
+                    self.note_pattern_binds(&pat);
                     let (body, div) = self.branch(body);
                     let state = std::mem::take(&mut self.moved);
                     merged = Some(match merged {
@@ -974,6 +1007,7 @@ pub fn ownership_check<'a>(
             loops: Vec::new(),
             moved: Flow::new(),
             ret_ty: return_type.clone(),
+            names: HashMap::new(),
         };
         // a by-value parameter of an owning type was moved into this call, so
         // this function destroys it. That is what makes passing one a transfer

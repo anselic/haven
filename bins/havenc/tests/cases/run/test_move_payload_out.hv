@@ -1,0 +1,62 @@
+// By-value move-out of a generic OWNED payload. `Maybe<T>::unwrap(self) T` moves
+// the `T` out of the `Just` variant and hands it to the caller; `unwrap_or` moves
+// it out on `Just` and destroys the unused `fallback`, or moves `fallback` out on
+// `Nothing`. With an owning `T` (`Owner`, which frees a heap cell on `delete`) the
+// drop trace proves each resource is released exactly once - the capability that
+// lets an `Option`-style accessor be generic over any `T`, not just pointers.
+//
+// This is the enum-payload case (`Some(v) => v`), which is a whole move of the
+// payload binding - distinct from moving out of a `Vec` index or a pointer, which
+// stays rejected because the other elements would be left without an owner.
+//@ exit: 0
+
+import std/alloc { alloc, dealloc }
+
+enum Maybe<T> { Nothing, Just(T) }
+
+extend Maybe<T> {
+    // by-value self: the payload is moved out of `Just`, and `Nothing` bails on
+    // the bottom type rather than inventing a `T`.
+    proc unwrap(self) T {
+        match (self) {
+            Maybe::Just(v)  -> { return v; }
+            Maybe::Nothing  -> { abort("unwrap on Nothing"); }
+        }
+    }
+    // by-value self and an owning by-value `fallback`: on `Just` the fallback is
+    // unused and must be destroyed here; on `Nothing` it is moved out instead.
+    proc unwrap_or(self, fallback: T) T {
+        match (self) {
+            Maybe::Just(v)  -> { return v; }
+            Maybe::Nothing  -> { return fallback; }
+        }
+    }
+}
+
+struct Owner { id: i32, cell: *i32 }
+extend Owner: Delete {
+    proc delete(*self) {
+        printf::<i32>("drop %d\n", (*self).id);
+        dealloc::<i32>((*self).cell);
+    }
+}
+proc owner(id: i32) Owner {
+    return Owner { id: id, cell: alloc::<i32>(1u64).unwrap() };
+}
+
+@export
+proc main() i32 {
+    // move an owner into `Just`, then unwrap it back out: one owner, one drop.
+    print("A\n");
+    let a: Maybe<Owner> = Maybe::Just::<Owner>(owner(1));
+    let got_a: Owner = a.unwrap();               // owner 1 now owned by got_a
+    print("B\n");                                 // still alive here
+
+    // unwrap_or on `Just`: the fallback (owner 3) is destroyed inside, the result
+    // is owner 2.
+    let b: Maybe<Owner> = Maybe::Just::<Owner>(owner(2));
+    let got_b: Owner = b.unwrap_or(owner(3));    // prints "drop 3"
+    print("C\n");
+
+    return 0;   // got_b (2) then got_a (1) destroyed here, latest-declared first
+}
