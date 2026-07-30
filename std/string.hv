@@ -53,6 +53,13 @@ pub struct String {
         return s;
     }
 
+    /// A String that takes ownership of an existing `Vec<u8>` of bytes, with no
+    /// copy. No UTF-8 validation is done: the bytes are adopted as-is. Used to
+    /// wrap a buffer read from the outside world (e.g. `fs::read`).
+    proc from_bytes(bytes: Vec<u8>) String {
+        return String { buf: bytes };
+    }
+
     /// The number of bytes in the String (not counting any scratch NUL).
     proc len(*self) u64 { return self.buf.len(); }
     /// The number of bytes the buffer can hold before it must grow.
@@ -104,6 +111,14 @@ pub struct String {
             i = i + 1u64;
         }
         return true;
+    }
+
+    /// A read-only pointer to the raw bytes, with no trailing NUL guaranteed -
+    /// exactly `len` bytes are valid. Points into the buffer, so it is invalidated
+    /// by the next mutation or free; for an empty String it is null. Pair it with
+    /// `len` to hand the bytes to a byte-oriented sink like `fs::write`.
+    proc as_bytes(*self) *u8 {
+        return self.buf.get_ptr(0u64);
     }
 
     /// A borrowable, NUL-terminated `str` view of the bytes, valid until the next

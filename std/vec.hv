@@ -43,6 +43,15 @@ pub struct Vec<T> {
         return v;
     }
 
+    /// Adopt an existing heap buffer as a Vec, taking ownership of it. `data`
+    /// must have been produced by the same allocator std/alloc uses (`rt_alloc`/
+    /// libc `malloc`, which is what backs runtime buffers like `fs::read`'s),
+    /// hold `len` initialized elements, and have room for `cap` of them. The Vec
+    /// frees `data` via `dealloc` on drop, so it must not be freed elsewhere.
+    proc from_raw_parts(data: *T, len: u64, cap: u64) Vec<T> {
+        return Vec::<T> { data: data, len: len, cap: cap };
+    }
+
     proc len(*self) u64 { return self.len; }
     proc cap(*self) u64 { return self.cap; }
     proc is_empty(*self) bool { return self.len == 0u64; }

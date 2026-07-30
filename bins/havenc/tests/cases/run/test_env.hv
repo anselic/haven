@@ -1,0 +1,46 @@
+// std/env end-to-end: set a variable and read it back, confirm an unset one is
+// None, list the arguments (argv[0] is always present), query the working
+// directory, then end via env::exit - which diverges, so the line after it is
+// never reached and the process exits with the given code. Exercises the
+// rt_env_* shims, EnvError, and the no-copy adoption path in `var`/`current_dir`.
+//@ exit: 3
+
+import std/env
+import std/option { Option }
+import std/result { Result }
+import std/string { String }
+import std/vec { Vec }
+
+@export
+proc main() i32 {
+    match (env::set_var("HV_ENV_PROBE", "payload")) {
+        Result::Ok(_)  -> { println("set"); }
+        Result::Err(e) -> { printf::<str>("set err: %s\n", e.message()); }
+    }
+
+    match (env::var("HV_ENV_PROBE")) {
+        Option::Some(v) -> { printf::<str>("got %s\n", v.as_str()); }
+        Option::None    -> { println("missing"); }
+    }
+
+    // an unset variable is None, not an error.
+    match (env::var("HV_ENV_DEFINITELY_UNSET")) {
+        Option::Some(_) -> { println("unexpected some"); }
+        Option::None    -> { println("unset -> none"); }
+    }
+
+    // args always has argv[0].
+    let a: Vec<str> = env::args();
+    if (a.len() >= 1u64) { println("has argv0"); } else { println("no args"); }
+
+    // current_dir succeeds in an ordinary process.
+    match (env::current_dir()) {
+        Result::Ok(_)  -> { println("cwd ok"); }
+        Result::Err(e) -> { printf::<str>("cwd err: %s\n", e.message()); }
+    }
+
+    // exit diverges: "before exit" prints, the process ends with code 3, and the
+    // unreachable line below never runs (the `!` return also satisfies main's i32).
+    println("before exit");
+    env::exit(3i32);
+}

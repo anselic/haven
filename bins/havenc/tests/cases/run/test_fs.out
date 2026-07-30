@@ -1,0 +1,9 @@
+wrote 16
+exists
+read 16
+match
+copied 16
+mkdir
+isdir
+read missing -> err
+cleaned

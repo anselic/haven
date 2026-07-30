@@ -1,0 +1,6 @@
+set
+got payload
+unset -> none
+has argv0
+cwd ok
+before exit

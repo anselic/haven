@@ -1,0 +1,126 @@
+/// std/process: spawn a child program and wait for it, for build scripts and tooling.
+///
+/// Two ways to run a program (found on `PATH`) with a list of arguments:
+///
+///   - `run` lets the child inherit this process's stdout/stderr - its output
+///     streams straight to the terminal - and hands back the exit code. Use it
+///     to shell out to `havenc` and watch it work.
+///   - `capture` redirects the child's stdout and stderr into owned `String`s and
+///     hands them back alongside the exit code, bundled in an `Output`. Use it
+///     when you want to inspect or post-process what the child printed.
+///
+/// Both take the program name and its arguments *separately* - `args` holds only
+/// the arguments, not the program itself (that is prepended for you), so no shell
+/// is involved and no quoting is needed.
+///
+/// A nonzero exit code is NOT an error: a child that runs to completion yields
+/// `Ok` regardless of what it returns, and you inspect `code`/`success()`. The
+/// `Err(ProcError)` case is reserved for the launch itself failing - program not
+/// found, out of memory - carrying the underlying C `errno`.
+///
+///     import std/process { run, capture, Output }
+///     import std/result { Result }
+///     import std/vec { Vec }
+///
+///     let args: Vec<str> = Vec::<str>::new();
+///     args.push("build");
+///     args.push("main.hv");
+///     match (run("havenc", args)) {
+///         Result::Ok(code) -> { printf::<i32>("havenc exited %d\n", code); }
+///         Result::Err(e)   -> { printf::<str>("could not launch: %s\n", e.message()); }
+///     }
+
+// Both wrappers hand C a `char**` argv built from the `Vec<str>` (its buffer is
+// already a contiguous array of `str`, i.e. C `char*`, so `get_ptr(0)` is the
+// argv pointer) plus a length; the C shim prepends the program and NUL-terminates.
+// `capture` adopts the shim's two malloc'd, NUL-terminated buffers straight into
+// `String`s via `from_raw_parts`/`from_bytes` (no copy), exactly as `fs::read` does.
+
+import std/result { Result }
+import std/string { String }
+import std/vec { Vec }
+
+extern rt_proc_run(program: str, args: *str, nargs: u64, out_code: *i32) i32;
+extern rt_proc_capture(program: str, args: *str, nargs: u64,
+                       out_code: *i32,
+                       out_stdout: **u8, out_stdout_len: *u64,
+                       out_stderr: **u8, out_stderr_len: *u64) i32;
+extern rt_proc_strerror(code: i32) str;
+
+/// A failure to *launch* a child process (not a child that ran and exited
+/// nonzero), wrapping the C `errno` captured at the spawn.
+pub struct ProcError {
+    code: i32,
+
+    /// The raw C `errno` for this error (e.g. `2` for "no such file or directory",
+    /// which is what a missing program looks like).
+    proc errno(*self) i32 { return self.code; }
+
+    /// A borrowable, human-readable description of the error, from `strerror`.
+    /// Valid until the next `strerror` call; copy it into a `String` to keep it.
+    proc message(*self) str { return rt_proc_strerror(self.code); }
+}
+
+/// The result of a captured run: the child's exit `code`, plus everything it
+/// wrote to `stdout` and `stderr` as owned `String`s. Owns its two buffers and
+/// frees them for you when it goes out of scope (its `String` fields do the work).
+pub struct Output {
+    code:   i32,
+    stdout: String,
+    stderr: String,
+
+    /// The child's exit code.
+    proc code(*self) i32 { return self.code; }
+    /// Whether the child exited successfully (code 0).
+    proc success(*self) bool { return self.code == 0i32; }
+}
+
+/// Run `program` (searched on `PATH`) with `args`, inheriting this process's
+/// stdout/stderr, and wait for it. Yields the child's exit code on `Ok`, or
+/// `Err(ProcError)` if the program could not be launched. Consumes `args`.
+pub proc run(program: str, args: Vec<str>) Result<i32, ProcError> {
+    let code: i32 = 0i32;
+    let n: u64 = args.len();
+    let argv: *str = args.get_ptr(0u64);
+    let e: i32 = rt_proc_run(program, argv, n, &code);
+    if (e != 0i32) {
+        return Result::Err::<i32, ProcError>(ProcError { code: e });
+    }
+    return Result::Ok::<i32, ProcError>(code);
+}
+
+/// Run `program` (searched on `PATH`) with `args`, capturing its stdout and
+/// stderr, and wait for it. Yields an `Output` on `Ok`, or `Err(ProcError)` if
+/// the program could not be launched. Consumes `args`.
+pub proc capture(program: str, args: Vec<str>) Result<Output, ProcError> {
+    let code: i32 = 0i32;
+    let out_ptr: *u8 = null::<*u8>();
+    let out_len: u64 = 0u64;
+    let err_ptr: *u8 = null::<*u8>();
+    let err_len: u64 = 0u64;
+
+    let n: u64 = args.len();
+    let argv: *str = args.get_ptr(0u64);
+    let e: i32 = rt_proc_capture(program, argv, n, &code,
+                                 &out_ptr, &out_len, &err_ptr, &err_len);
+    if (e != 0i32) {
+        return Result::Err::<Output, ProcError>(ProcError { code: e });
+    }
+    return Result::Ok::<Output, ProcError>(Output {
+        code:   code,
+        stdout: adopt(out_ptr, out_len),
+        stderr: adopt(err_ptr, err_len),
+    });
+}
+
+// Adopt a shim's malloc'd, NUL-terminated buffer of `len` bytes into an owned
+// String with no copy - the shim over-allocates one byte for the NUL, so the true
+// capacity is at least `len + 1`. A null buffer (a slurp that failed) becomes an
+// empty String rather than an invalid adoption.
+proc adopt(buf: *u8, len: u64) String {
+    if (buf == null::<*u8>()) {
+        return String::new();
+    }
+    let bytes: Vec<u8> = Vec::<u8>::from_raw_parts(buf, len, len + 1u64);
+    return String::from_bytes(bytes);
+}

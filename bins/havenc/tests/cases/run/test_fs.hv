@@ -1,0 +1,59 @@
+// std/fs end-to-end: write a file, query it, read it back, copy it, make and
+// probe a directory, then remove everything and confirm it's gone. Exercises the
+// rt_fs_* shims, the Result-returning wrappers, FsError, and the no-copy
+// `from_raw_parts`/`from_bytes` adoption path in `read`. Runs in the process's
+// cwd and cleans up after itself, so it leaves no droppings behind.
+
+import std/fs
+import std/result { Result }
+import std/string { String }
+
+@export
+proc main() i32 {
+    let path: str = "hv_fs_probe.tmp";
+    let dst:  str = "hv_fs_probe_copy.tmp";
+    let dir:  str = "hv_fs_probe_dir";
+
+    let content: String = String::from_str("fs probe payload");
+
+    match (fs::write(path, &content)) {
+        Result::Ok(n)  -> { printf::<i32>("wrote %d\n", numerical_cast::<i32>(n)); }
+        Result::Err(e) -> { printf::<str>("write err: %s\n", e.message()); }
+    }
+
+    if (fs::exists(path)) { println("exists"); } else { println("missing"); }
+
+    match (fs::read(path)) {
+        Result::Ok(s)  -> {
+            printf::<i32>("read %d\n", numerical_cast::<i32>(s.len()));
+            if (s.eq(&content)) { println("match"); } else { println("differ"); }
+        }
+        Result::Err(e) -> { printf::<str>("read err: %s\n", e.message()); }
+    }
+
+    match (fs::copy(path, dst)) {
+        Result::Ok(n)  -> { printf::<i32>("copied %d\n", numerical_cast::<i32>(n)); }
+        Result::Err(e) -> { printf::<str>("copy err: %s\n", e.message()); }
+    }
+
+    match (fs::mkdir(dir)) {
+        Result::Ok(_)  -> { println("mkdir"); }
+        Result::Err(e) -> { printf::<str>("mkdir err: %s\n", e.message()); }
+    }
+    if (fs::is_dir(dir)) { println("isdir"); } else { println("notdir"); }
+
+    // reading a path that does not exist surfaces as Err, not a crash.
+    match (fs::read("hv_fs_does_not_exist.tmp")) {
+        Result::Ok(_)  -> { println("unexpected ok"); }
+        Result::Err(_) -> { println("read missing -> err"); }
+    }
+
+    // cleanup: remove is fallible, but we don't care about the Result here.
+    fs::remove(path);
+    fs::remove(dst);
+    fs::remove(dir);
+
+    if (fs::exists(path)) { println("leftover"); } else { println("cleaned"); }
+
+    return 0;
+}
