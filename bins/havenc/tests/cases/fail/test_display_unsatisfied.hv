@@ -9,14 +9,14 @@
 //@ error: does not implement trait `Display`
 
 import std/fmt { Display, display_println }
-import std/vec { Vec, vec_new, vec_push }
+import std/vec { Vec }
 
 struct Blob { n: i32 }
 
 @export
 proc main() i32 {
-    let v: Vec<Blob> = vec_new::<Blob>();
-    vec_push::<Blob>(&v, Blob { n: 1 });
+    let v: Vec<Blob> = Vec::<Blob>::new();
+    v.push(Blob { n: 1 });
     display_println::<Vec<Blob>>(&v);
     return 0;
 }

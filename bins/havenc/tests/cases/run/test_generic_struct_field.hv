@@ -1,25 +1,25 @@
 // A non-generic struct may hold a concrete generic instance as a field
 // (`xs: Vec<i32>`): monomorphization rewrites the field type to the flat
 // instance and emits it, so `String { buf: Vec<u8> }` and friends work without
-// making the outer struct generic. Also exercises `vec_pop`'s `Option<*T>`.
+// making the outer struct generic. Also exercises `pop`'s `Option<*T>`.
 
-import std/vec { Vec, vec_new, vec_push, vec_get, vec_len, vec_pop }
+import std/vec { Vec }
 import std/option { Option, unwrap }
 
 struct Pair { xs: Vec<i32>, tag: i32 }
 
 @export
 proc main() i32 {
-    let p: Pair = Pair { xs: vec_new::<i32>(), tag: 7 };
-    vec_push::<i32>(&p.xs, 10);
-    vec_push::<i32>(&p.xs, 20);
-    printf::<i32>("%d\n", vec_get::<i32>(&p.xs, 0u64) + p.tag); // 17
-    printf::<u64>("%llu\n", vec_len::<i32>(&p.xs));             // 2
+    let p: Pair = Pair { xs: Vec::<i32>::new(), tag: 7 };
+    p.xs.push(10);
+    p.xs.push(20);
+    printf::<i32>("%d\n", p.xs.get(0u64) + p.tag); // 17
+    printf::<u64>("%llu\n", p.xs.len());           // 2
 
-    // vec_pop yields Option<*T>: unwrap to the slot pointer, deref for the value
-    let popped: Option<*i32> = vec_pop::<i32>(&p.xs);
+    // pop yields Option<*T>: unwrap to the slot pointer, deref for the value
+    let popped: Option<*i32> = p.xs.pop();
     printf::<i32>("%d\n", *unwrap::<i32>(popped)); // 20
-    printf::<u64>("%llu\n", vec_len::<i32>(&p.xs)); // 1
+    printf::<u64>("%llu\n", p.xs.len()); // 1
 
     // no free: `Pair` owns through its `xs: Vec<i32>` field, so it is destroyed
     // - and the Vec's buffer released - when it goes out of scope here.

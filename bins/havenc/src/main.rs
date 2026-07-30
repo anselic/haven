@@ -119,7 +119,7 @@ fn main() {
                     std::process::exit(1);
                 });
 
-            safecheck::alloc_check_program(&mono_ast, &defs).unwrap_or_else(|errs| {
+            safecheck::alloc_check_program(&mono_ast, &defs, &cx.node_types).unwrap_or_else(|errs| {
                 for err in &errs {
                     diag::report_error("Check error", err, &files);
                 }

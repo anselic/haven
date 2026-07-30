@@ -3,10 +3,13 @@
 /// `Option<T>` holds either nothing (`None`) or a value (`Some(T)`) - the same
 /// generic ADT usable for any `T`. This library's own helpers only traffic in
 /// pointers (`Option<*T>`), since that's what haven's callers (`alloc`,
-/// `vec_pop`, ...) need, but any `Option<T>` can be built and `match`ed directly.
+/// `Vec::pop`, ...) need, but any `Option<T>` can be built and `match`ed directly.
 /// Test with `is_some`/`is_none`, then retrieve with `unwrap`/`unwrap_or`.
 
-pub enum Option<T> { None, Some(T) }
+pub enum Option<T> {
+    None,
+    Some(T),
+}
 
 /// Whether the `Option` holds a value.
 pub proc is_some<T>(o: Option<*T>) bool {

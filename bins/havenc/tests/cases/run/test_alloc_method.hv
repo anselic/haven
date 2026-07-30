@@ -1,0 +1,38 @@
+// A method call inside an `@alloc(false)` function is allowed when the method it
+// dispatches to is itself clean. The alloc checker runs on the post-mono AST,
+// where a concrete method call is still `recv.m(..)` (only generic methods were
+// lowered to named calls); it resolves the receiver's type through the member
+// table to the concrete function, so `self.tick()` / `c.bump()` become real
+// call-graph edges instead of opaque indirect calls. Also covers a method
+// calling another method on `*self` (`bump` -> `tick`), the shape std's
+// oscillators use (`sine` -> `advance`).
+//@ exit: 7
+
+struct Counter {
+    n: i32,
+
+    proc make() Counter { return Counter { n: 0 }; }
+
+    @alloc(false)
+    proc tick(*self) {
+        self.n = self.n + 1;
+    }
+
+    @alloc(false)
+    proc bump(*self) i32 {
+        self.tick();          // clean method -> method call
+        return self.n;
+    }
+}
+
+// clean free function calling a clean method twice
+@alloc(false)
+proc step(c: *Counter) i32 {
+    return c.bump() + c.bump();
+}
+
+@export
+proc main() i32 {
+    let c: Counter = Counter::make();
+    return step(&c) + 4;   // (1 + 2) + 4 = 7
+}

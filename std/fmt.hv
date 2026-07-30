@@ -6,8 +6,9 @@
 ///
 ///     extend Point: Display {
 ///         proc display(*self) String {
-///             let s: String = string_from_str("(");
-///             string_push_str(&s, string_as_str(&self.x.display()));
+///             let s: String = String::from_str("(");
+///             let x: String = self.x.display();
+///             s.push_str(x.as_str());
 ///             ...
 ///             return s;
 ///         }
@@ -17,11 +18,8 @@
 /// name. It is implemented here for the primitive integer types, `bool`, `str`,
 /// `String`, and `Vec<T>` (whenever `T: Display`).
 
-import std/string {
-    String, string_new, string_from_str, string_push_byte, string_push_str,
-    string_as_str,
-}
-import std/vec { Vec, vec_len, vec_get_ptr }
+import std/string { String }
+import std/vec { Vec }
 
 extern rt_f32_to_str(f: f32, precision: i32) str;
 extern rt_f64_to_str(d: f64, precision: i32) str;
@@ -34,13 +32,13 @@ pub trait Display {
 /// only rendered, never moved out (and so an owning `x` survives the call).
 pub proc display_print<T: Display>(x: *T) {
     let s: String = x.display();
-    print(string_as_str(&s));
+    print(s.as_str());
 }
 
 /// Print `x.display()` followed by a newline.
 pub proc display_println<T: Display>(x: *T) {
     let s: String = x.display();
-    println(string_as_str(&s));
+    println(s.as_str());
 }
 
 // --- integers
@@ -54,19 +52,19 @@ proc push_u64(s: *String, n: u64) {
     if (n >= 10u64) {
         push_u64(s, n / 10u64);
     }
-    string_push_byte(s, numerical_cast::<u8>(48u64 + (n % 10u64)));
+    s.push_byte(numerical_cast::<u8>(48u64 + (n % 10u64)));
 }
 
 proc u64_string(n: u64) String {
-    let s: String = string_new();
+    let s: String = String::new();
     push_u64(&s, n);
     return s;
 }
 
 proc i64_string(n: i64) String {
-    let s: String = string_new();
+    let s: String = String::new();
     if (n < 0i64) {
-        string_push_byte(&s, 45u8); // '-'
+        s.push_byte(45u8); // '-'
         push_u64(&s, numerical_cast::<u64>(0i64 - n));
     } else {
         push_u64(&s, numerical_cast::<u64>(n));
@@ -84,13 +82,13 @@ extend i64: Display { proc display(*self) String { return i64_string(*self); } }
 
 extend f32: Display {
     proc display(*self) String {
-        return string_from_str(rt_f32_to_str(*self, -1));
+        return String::from_str(rt_f32_to_str(*self, -1));
     }
 }
 
 extend f64: Display {
     proc display(*self) String {
-        return string_from_str(rt_f64_to_str(*self, -1));
+        return String::from_str(rt_f64_to_str(*self, -1));
     }
 }
 
@@ -98,19 +96,19 @@ extend f64: Display {
 
 extend bool: Display {
     proc display(*self) String {
-        if (*self) { return string_from_str("true"); }
-        return string_from_str("false");
+        if (*self) { return String::from_str("true"); }
+        return String::from_str("false");
     }
 }
 
 // a `str` renders as its own text: a fresh owned copy of the bytes.
 extend str: Display {
-    proc display(*self) String { return string_from_str(*self); }
+    proc display(*self) String { return String::from_str(*self); }
 }
 
 // a `String` renders as a copy of itself, so the result is independently owned.
 extend String: Display {
-    proc display(*self) String { return string_from_str(string_as_str(self)); }
+    proc display(*self) String { return String::from_str(self.as_str()); }
 }
 
 // --- containers
@@ -125,22 +123,22 @@ extend *T: Display where T: Display {
 }
 
 // `Vec<T>` is `Display` exactly when its elements are: `[a, b, c]`. Each element
-// is displayed through a borrow (`vec_get_ptr` gives a `*T`, and `display` takes
+// is displayed through a borrow (`get_ptr` gives a `*T`, and `display` takes
 // `*self`), so an owning element is never moved out; the per-element `String` is
 // dropped at the end of its loop iteration.
 extend Vec<T>: Display where T: Display {
     proc display(*self) String {
-        let s: String = string_from_str("[");
-        let n: u64 = vec_len::<T>(self);
+        let s: String = String::from_str("[");
+        let n: u64 = self.len();
         let i: u64 = 0u64;
         while (i < n) {
-            if (i > 0u64) { string_push_str(&s, ", "); }
-            let ep: *T = vec_get_ptr::<T>(self, i);
+            if (i > 0u64) { s.push_str(", "); }
+            let ep: *T = self.get_ptr(i);
             let part: String = ep.display();
-            string_push_str(&s, string_as_str(&part));
+            s.push_str(part.as_str());
             i = i + 1u64;
         }
-        string_push_byte(&s, 93u8); // ']'
+        s.push_byte(93u8); // ']'
         return s;
     }
 }

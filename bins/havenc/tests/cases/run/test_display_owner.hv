@@ -9,8 +9,8 @@
 //@ exit: 0
 
 import std/fmt { Display, display_println }
-import std/string { String, string_from_str, string_push_str, string_as_str }
-import std/vec { Vec, vec_new, vec_push }
+import std/string { String }
+import std/vec { Vec }
 import std/alloc { alloc, dealloc }
 import std/option { unwrap }
 
@@ -25,10 +25,10 @@ extend Res: Delete {
 
 extend Res: Display {
     proc display(*self) String {
-        let s: String = string_from_str("Res(");
+        let s: String = String::from_str("Res(");
         let n: String = (*self.data).display();
-        string_push_str(&s, string_as_str(&n));
-        string_push_str(&s, ")");
+        s.push_str(n.as_str());
+        s.push_str(")");
         return s;
     }
 }
@@ -41,10 +41,10 @@ proc res(n: i32) Res {
 
 @export
 proc main() i32 {
-    let v: Vec<Res> = vec_new::<Res>();
-    vec_push::<Res>(&v, res(10));
-    vec_push::<Res>(&v, res(20));
-    vec_push::<Res>(&v, res(30));
+    let v: Vec<Res> = Vec::<Res>::new();
+    v.push(res(10));
+    v.push(res(20));
+    v.push(res(30));
 
     // borrows each element to render it - no move, so the Vec still owns them.
     display_println::<Vec<Res>>(&v);   // [Res(10), Res(20), Res(30)]

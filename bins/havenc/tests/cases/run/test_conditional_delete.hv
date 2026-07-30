@@ -13,8 +13,8 @@
 // below to show the conditional `Holder` and the unconditional `Vec` compose.
 //@ exit: 0
 
-import std/string { String, string_from_str, string_as_str }
-import std/vec { Vec, vec_new, vec_push, vec_len }
+import std/string { String }
+import std/vec { Vec }
 
 struct Res { id: i32 }
 
@@ -39,15 +39,15 @@ proc main() i32 {
     // `String` holds a `Vec<u8>`; u8 owns nothing, so std's `Vec` destructor
     // frees the bytes without dropping any element, and the String is untouched
     // beyond that. Dropped automatically at end of scope.
-    let s: String = string_from_str("hi");
-    println(string_as_str(&s));
+    let s: String = String::from_str("hi");
+    println(s.as_str());
 
     // a std `Vec` of owners: unconditionally `Delete`, and `drop_in_place` runs
     // `Res::delete` for each of the two elements before the buffer is freed.
-    let owned: Vec<Res> = vec_new::<Res>();
-    vec_push::<Res>(&owned, Res { id: 10 });
-    vec_push::<Res>(&owned, Res { id: 11 });
-    printf::<u64>("owned %llu\n", vec_len::<Res>(&owned));
+    let owned: Vec<Res> = Vec::<Res>::new();
+    owned.push(Res { id: 10 });
+    owned.push(Res { id: 11 });
+    printf::<u64>("owned %llu\n", owned.len());
 
     // note the golden shows no "drop res 5": a `Holder<Res>` implements `Delete`
     // itself, so its `item` field is that method's business, not auto-dropped.

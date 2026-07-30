@@ -39,12 +39,12 @@ proc orange()    Color { return Color { r: 255u8, g: 161u8, b: 0u8,   a: 255u8 }
 proc gen_square_wave(buf_l: *f32, buf_r: *f32, num_samples: i32, phase: f32) {
     let sr: f32 = 44100.0;
     let freq: f32 = 440.0; // A4
-    let osc: osc::Osc = osc::osc_new(freq, sr);
-    osc::osc_set_phase(&osc, phase);
+    let osc: osc::Osc = osc::Osc::new(freq, sr);
+    osc.set_phase(phase);
 
     let i: i32 = 0;
     while (i < num_samples) {
-        let sample: f32 = 0.5 * osc::osc_square(&osc);
+        let sample: f32 = 0.5 * osc.square();
         buf_l[i] = sample;
         buf_r[i] = sample;
         i = i + 1;
@@ -57,12 +57,12 @@ proc process_stereo(buf_l: *f32, buf_r: *f32, num_samples: i32) {
     let sr: f32 = 44100.0;
     let cutoff: f32 = 440.0;
     let q: f32 = 0.7071; // 1/sqrt(2) for Butterworth response
-    let filter: filters::Biquad = filters::biquad_lowpass(cutoff, q, sr);
+    let filter: filters::Biquad = filters::Biquad::lowpass(cutoff, q, sr);
 
     let i: i32 = 0;
     while (i < num_samples) {
-        buf_l[i] = filters::biquad_process(&filter, buf_l[i]);
-        buf_r[i] = filters::biquad_process(&filter, buf_r[i]);
+        buf_l[i] = filter.process(buf_l[i]);
+        buf_r[i] = filter.process(buf_r[i]);
         i = i + 1;
     }
 }

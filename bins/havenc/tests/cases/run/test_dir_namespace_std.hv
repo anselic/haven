@@ -8,9 +8,9 @@ import std/dsp
 
 @export
 proc main() i32 {
-    let o: dsp::osc::Osc = dsp::osc::osc_new(1.0, 4.0);
+    let o: dsp::osc::Osc = dsp::osc::Osc::new(1.0, 4.0);
     // phase 0 -> square is +1.0
-    let s: f32 = dsp::osc::osc_square(&o);
+    let s: f32 = o.square();
     if (s > 0.0) { return 0; }
     return 1;
 }

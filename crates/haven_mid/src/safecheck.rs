@@ -1,6 +1,7 @@
 use haven_common::ast::*;
-use haven_common::defs::Defs;
+use haven_common::defs::{Defs, MemberTable};
 use crate::intrinsics::Intrinsic;
+use crate::mono::concrete_method_name;
 use std::collections::{HashMap, HashSet};
 
 // Runtime-safety (`@alloc(false)`) checking.
@@ -28,45 +29,85 @@ type CleanMap<'a> = HashMap<&'a str, bool>;
 /// identifier, so it can't collide with a real callable's name.
 const INDIRECT_CALLEE: &str = "<indirect call>";
 
+/// The dispatch information a method call needs to be resolved to its target: the
+/// post-mono inferred type of every expression (to find a receiver's type) and
+/// the member table (to dispatch that type + method name to a concrete function).
+struct Resolve<'p, 'a> {
+    node_types: &'p HashMap<usize, Type<'a>>,
+    members: &'p MemberTable<'a>,
+}
+
+/// What the callee position of a `Call` resolves to for the call graph.
+enum Callee<'a> {
+    /// Not a call edge at all: an intrinsic or an enum-variant constructor.
+    None,
+    /// A statically-known target, by its final name.
+    Named(&'a str),
+    /// Target unknown (a fn-pointer, or a method we couldn't resolve): forced dirty.
+    Indirect,
+}
+
+/// Classify a `Call`'s callee expression. A bare name is a direct call (unless a
+/// local of that name shadows it - then it's a value, i.e. indirect); a path is an
+/// enum constructor (no call); and `recv.m(..)` is a method call, resolved through
+/// the member table to the concrete function it dispatches to so it becomes a real
+/// graph edge rather than an opaque indirect one.
+fn classify_callee<'a>(func: &Expr<'a>, locals: &[&'a str], r: &Resolve<'_, 'a>) -> Callee<'a> {
+    match &func.value {
+        ExprNode::Var(name) if !locals.contains(name) => {
+            if Intrinsic::lookup(name).is_some() { Callee::None } else { Callee::Named(name) }
+        }
+        ExprNode::Path(_) => Callee::None,
+        ExprNode::Access { base, field } => {
+            match r.node_types.get(&base.id)
+                .and_then(|ty| concrete_method_name(r.members, ty, field))
+            {
+                Some(callee) => Callee::Named(callee),
+                None => Callee::Indirect,
+            }
+        }
+        _ => Callee::Indirect,
+    }
+}
+
 /// Returns the immediate calls in this expression whose callee is dirty.
 // `locals` is the stack of param/`let` names in scope at this point (see the
 // rewriter in module.rs for the same shape). a called name that's shadowed by a
 // local isn't the top-level symbol of that name: it's an indirect call through a
 // value, so we route it to INDIRECT_CALLEE instead of the clean-map lookup.
-fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], e: &Expr<'a>) -> Vec<(&'a str, Span)> {
+fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], r: &Resolve<'_, 'a>, e: &Expr<'a>) -> Vec<(&'a str, Span)> {
     match &e.value {
         ExprNode::Call { func, args, .. } => {
             // dirty calls nested in the arguments, first
             let mut dirty: Vec<(&'a str, Span)> = args.iter()
-                .flat_map(|a| dirty_calls_expr(clean, locals, a))
+                .flat_map(|a| dirty_calls_expr(clean, locals, r, a))
                 .collect();
+            // then dirty calls in a method call's receiver (`recv.m()`'s `recv`).
+            if let ExprNode::Access { base, .. } = &func.value {
+                dirty.extend(dirty_calls_expr(clean, locals, r, base));
+            }
 
-            // then the callee itself (intrinsics are always clean).
-            match &func.value {
-                ExprNode::Var(name) if !locals.contains(name) => {
-                    if Intrinsic::lookup(name).is_none()
-                        && !clean.get(name).copied().unwrap_or(false)
-                    {
-                        dirty.push((*name, func.span.clone()));
+            // then the callee itself (intrinsics/constructors are always clean).
+            match classify_callee(func, locals, r) {
+                Callee::None => {}
+                Callee::Named(name) => {
+                    if !clean.get(name).copied().unwrap_or(false) {
+                        dirty.push((name, func.span.clone()));
                     }
                 }
-                // a data-enum constructor `Enum::Variant(...)`: not a real call,
-                // just stores into stack storage. Always clean.
-                ExprNode::Path(_) => {}
-                // local fn-pointer or any computed callee: target unknown, dirty
-                _ => dirty.push((INDIRECT_CALLEE, func.span.clone())),
+                Callee::Indirect => dirty.push((INDIRECT_CALLEE, func.span.clone())),
             }
             dirty
         }
         ExprNode::Binary { left, right, .. } => {
-            let mut dirty = dirty_calls_expr(clean, locals, left);
-            dirty.extend(dirty_calls_expr(clean, locals, right));
+            let mut dirty = dirty_calls_expr(clean, locals, r, left);
+            dirty.extend(dirty_calls_expr(clean, locals, r, right));
             dirty
         }
-        ExprNode::Unary { operand, .. } => dirty_calls_expr(clean, locals, operand),
+        ExprNode::Unary { operand, .. } => dirty_calls_expr(clean, locals, r, operand),
         ExprNode::Index { slice, index } => {
-            let mut dirty = dirty_calls_expr(clean, locals, slice);
-            dirty.extend(dirty_calls_expr(clean, locals, index));
+            let mut dirty = dirty_calls_expr(clean, locals, r, slice);
+            dirty.extend(dirty_calls_expr(clean, locals, r, index));
             dirty
         }
         // literals & variable reads are always clean
@@ -74,122 +115,122 @@ fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], e: &Expr<'a>) 
     }
 }
 
-fn dirty_calls_stmt<'a>(clean: &CleanMap<'a>, locals: &mut Vec<&'a str>, s: &Stmt<'a>) -> Vec<(&'a str, Span)> {
+fn dirty_calls_stmt<'a>(clean: &CleanMap<'a>, locals: &mut Vec<&'a str>, r: &Resolve<'_, 'a>, s: &Stmt<'a>) -> Vec<(&'a str, Span)> {
     match &s.value {
-        StmtNode::Expr(e) => dirty_calls_expr(clean, locals, e),
+        StmtNode::Expr(e) => dirty_calls_expr(clean, locals, r, e),
         StmtNode::Block(block) => {
             let mark = locals.len();
             let mut dirty = Vec::new();
-            for s in block { dirty.extend(dirty_calls_stmt(clean, locals, s)); }
+            for s in block { dirty.extend(dirty_calls_stmt(clean, locals, r, s)); }
             locals.truncate(mark);
             dirty
         }
 
         StmtNode::Declare { name, value, .. } => {
-            let dirty = dirty_calls_expr(clean, locals, value); // before binding
+            let dirty = dirty_calls_expr(clean, locals, r, value); // before binding
             locals.push(name);
             dirty
         }
-        StmtNode::Assign { value, .. } => dirty_calls_expr(clean, locals, value),
+        StmtNode::Assign { value, .. } => dirty_calls_expr(clean, locals, r, value),
 
         StmtNode::If { condition, then_branch, else_branch, .. } => {
-            let mut dirty = dirty_calls_expr(clean, locals, condition);
-            dirty.extend(dirty_calls_stmt(clean, locals, then_branch));
+            let mut dirty = dirty_calls_expr(clean, locals, r, condition);
+            dirty.extend(dirty_calls_stmt(clean, locals, r, then_branch));
             if let Some(b) = else_branch {
-                dirty.extend(dirty_calls_stmt(clean, locals, b));
+                dirty.extend(dirty_calls_stmt(clean, locals, r, b));
             }
             dirty
         }
 
         StmtNode::While { condition, body } => {
-            let mut dirty = dirty_calls_expr(clean, locals, condition);
-            dirty.extend(dirty_calls_stmt(clean, locals, body));
+            let mut dirty = dirty_calls_expr(clean, locals, r, condition);
+            dirty.extend(dirty_calls_stmt(clean, locals, r, body));
             dirty
         }
 
         StmtNode::Match { scrutinee, arms } => {
-            let mut dirty = dirty_calls_expr(clean, locals, scrutinee);
+            let mut dirty = dirty_calls_expr(clean, locals, r, scrutinee);
             for (_pat, body) in arms {
-                dirty.extend(dirty_calls_stmt(clean, locals, body));
+                dirty.extend(dirty_calls_stmt(clean, locals, r, body));
             }
             dirty
         }
 
         StmtNode::Break | StmtNode::Continue => vec![],
-        StmtNode::Return(e) => dirty_calls_expr(clean, locals, e),
+        StmtNode::Return(e) => dirty_calls_expr(clean, locals, r, e),
     }
 }
 
-fn collect_calls_expr<'a>(calls: &mut HashSet<&'a str>, locals: &[&'a str], e: &Expr<'a>) {
+fn collect_calls_expr<'a>(calls: &mut HashSet<&'a str>, locals: &[&'a str], r: &Resolve<'_, 'a>, e: &Expr<'a>) {
     match &e.value {
         ExprNode::Call { func, args, .. } => {
-            match &func.value {
-                ExprNode::Var(name) if !locals.contains(name) => {
-                    if Intrinsic::lookup(name).is_none() {
-                        calls.insert(*name);
-                    }
-                }
-                // skip data-enum constructors (`Enum::Variant(...)`): they call
-                // nothing (see `dirty_calls_expr`), so they're not graph edges.
-                ExprNode::Path(_) => {}
-                // indirect call (local fn pointer or computed callee): record the
-                // sentinel so the enclosing function is forced dirty
-                _ => { calls.insert(INDIRECT_CALLEE); }
+            match classify_callee(func, locals, r) {
+                // intrinsics and enum constructors call nothing, so they're not
+                // graph edges.
+                Callee::None => {}
+                Callee::Named(name) => { calls.insert(name); }
+                // fn-pointer or unresolved callee: record the sentinel so the
+                // enclosing function is forced dirty.
+                Callee::Indirect => { calls.insert(INDIRECT_CALLEE); }
+            }
+            // a method call's receiver (`recv.m()`'s `recv`) can contain calls too.
+            if let ExprNode::Access { base, .. } = &func.value {
+                collect_calls_expr(calls, locals, r, base);
             }
             for arg in args {
-                collect_calls_expr(calls, locals, arg);
+                collect_calls_expr(calls, locals, r, arg);
             }
         }
         ExprNode::Binary { left, right, .. } => {
-            collect_calls_expr(calls, locals, left);
-            collect_calls_expr(calls, locals, right);
+            collect_calls_expr(calls, locals, r, left);
+            collect_calls_expr(calls, locals, r, right);
         }
-        ExprNode::Unary { operand, .. } => collect_calls_expr(calls, locals, operand),
+        ExprNode::Unary { operand, .. } => collect_calls_expr(calls, locals, r, operand),
         ExprNode::Index { slice, index } => {
-            collect_calls_expr(calls, locals, slice);
-            collect_calls_expr(calls, locals, index);
+            collect_calls_expr(calls, locals, r, slice);
+            collect_calls_expr(calls, locals, r, index);
         }
         _ => {}
     }
 }
 
-fn collect_calls_stmt<'a>(calls: &mut HashSet<&'a str>, locals: &mut Vec<&'a str>, s: &Stmt<'a>) {
+fn collect_calls_stmt<'a>(calls: &mut HashSet<&'a str>, locals: &mut Vec<&'a str>, r: &Resolve<'_, 'a>, s: &Stmt<'a>) {
     match &s.value {
-        StmtNode::Expr(e) => collect_calls_expr(calls, locals, e),
+        StmtNode::Expr(e) => collect_calls_expr(calls, locals, r, e),
         StmtNode::Block(stmts) => {
             let mark = locals.len();
-            for s in stmts { collect_calls_stmt(calls, locals, s); }
+            for s in stmts { collect_calls_stmt(calls, locals, r, s); }
             locals.truncate(mark);
         }
         StmtNode::Declare { name, value, .. } => {
-            collect_calls_expr(calls, locals, value); // before binding
+            collect_calls_expr(calls, locals, r, value); // before binding
             locals.push(name);
         }
-        StmtNode::Assign { value, .. } => collect_calls_expr(calls, locals, value),
+        StmtNode::Assign { value, .. } => collect_calls_expr(calls, locals, r, value),
         StmtNode::If { condition, then_branch, else_branch, .. } => {
-            collect_calls_expr(calls, locals, condition);
-            collect_calls_stmt(calls, locals, then_branch);
-            if let Some(b) = else_branch { collect_calls_stmt(calls, locals, b); }
+            collect_calls_expr(calls, locals, r, condition);
+            collect_calls_stmt(calls, locals, r, then_branch);
+            if let Some(b) = else_branch { collect_calls_stmt(calls, locals, r, b); }
         }
         StmtNode::While { condition, body } => {
-            collect_calls_expr(calls, locals, condition);
-            collect_calls_stmt(calls, locals, body);
+            collect_calls_expr(calls, locals, r, condition);
+            collect_calls_stmt(calls, locals, r, body);
         }
         StmtNode::Match { scrutinee, arms } => {
-            collect_calls_expr(calls, locals, scrutinee);
+            collect_calls_expr(calls, locals, r, scrutinee);
             for (_pat, body) in arms {
                 let mark = locals.len();
-                collect_calls_stmt(calls, locals, body);
+                collect_calls_stmt(calls, locals, r, body);
                 locals.truncate(mark);
             }
         }
-        StmtNode::Return(e) => collect_calls_expr(calls, locals, e),
+        StmtNode::Return(e) => collect_calls_expr(calls, locals, r, e),
         StmtNode::Break | StmtNode::Continue => {}
     }
 }
 
 /// Compute the clean/dirty status of every callable via a fixpoint.
-fn compute_clean<'a>(program: &[TopLevel<'a>]) -> CleanMap<'a> {
+fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>) -> CleanMap<'a> {
     let mut clean: CleanMap<'a> = HashMap::new();
 
     // leaves: externs are clean iff annotated, functions start optimistically
@@ -204,7 +245,7 @@ fn compute_clean<'a>(program: &[TopLevel<'a>]) -> CleanMap<'a> {
             TopLevelNode::Function { name, params, body, .. } => {
                 let mut callees = HashSet::new();
                 let mut locals: Vec<&'a str> = params.iter().map(|(p, _)| *p).collect();
-                for s in body { collect_calls_stmt(&mut callees, &mut locals, s); }
+                for s in body { collect_calls_stmt(&mut callees, &mut locals, r, s); }
                 calls.insert(name, callees);
                 clean.insert(name, true);
             }
@@ -237,8 +278,10 @@ fn compute_clean<'a>(program: &[TopLevel<'a>]) -> CleanMap<'a> {
 pub fn alloc_check_program<'a>(
     program: &[TopLevel<'a>],
     defs: &Defs<'a>,
+    node_types: &HashMap<usize, Type<'a>>,
 ) -> Result<(), Vec<Error>> {
-    let clean = compute_clean(program);
+    let r = Resolve { node_types, members: defs.members() };
+    let clean = compute_clean(program, &r);
 
     // mono rewrites generic calls to their mangled instance name; prefer the
     // friendly spelling it recorded (`alloc::<Vec2>`) over `std.alloc$alloc$Vec2`
@@ -257,7 +300,7 @@ pub fn alloc_check_program<'a>(
 
         let mut locals: Vec<&'a str> = params.iter().map(|(p, _)| *p).collect();
         let mut blamed: Vec<(&'a str, Span)> = Vec::new();
-        for s in body { blamed.extend(dirty_calls_stmt(&clean, &mut locals, s)); }
+        for s in body { blamed.extend(dirty_calls_stmt(&clean, &mut locals, &r, s)); }
         for (callee, span) in blamed {
             errors.push(Error::new(span, format!(
                 "Function '{}' is marked as @alloc(false) but calls '{}', which may allocate.",

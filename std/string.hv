@@ -2,22 +2,22 @@
 ///
 /// `String` is a heap-backed, growable string, a thin wrapper over a `Vec<u8>`
 /// of bytes exactly as Rust's `String` wraps a `Vec<u8>`. Build one with
-/// `string_new` (or `string_from_str` to seed it from a literal), append with
-/// `string_push_byte`/`string_push_str`, compare with `string_eq`, and hand a
-/// borrowable C string to `print`/`printf` via `string_as_str`.
+/// `String::new` (or `String::from_str` to seed it from a literal), append with
+/// `s.push_byte`/`s.push_str`, compare with `s.eq`, and hand a borrowable C
+/// string to `print`/`printf` via `s.as_str`.
 ///
 /// A `String` owns its heap allocation and frees it for you: it holds a `Vec<u8>`
 /// field, and `Vec` implements `Delete`, so a String is destroyed - buffer freed
-/// - when it goes out of scope, with no manual free to call. A fresh `string_new`
+/// - when it goes out of scope, with no manual free to call. A fresh `String::new`
 /// allocates nothing, so an empty String is cheap and the first push performs the
-/// initial allocation. No UTF-8 validation is done: `string_push_byte` can build
+/// initial allocation. No UTF-8 validation is done: `s.push_byte` can build
 /// ill-formed sequences, so treat the contents as raw bytes unless you know they
 /// are valid text.
 
 // All the growth/allocation machinery is inherited from `Vec<u8>` (see std/vec);
 // this module only adds string-flavored operations, built entirely on Vec's
 // public API. Bytes are stored WITHOUT a trailing NUL - `len` is the exact byte
-// count - and the NUL a C `str` needs is written on demand by `string_as_str`.
+// count - and the NUL a C `str` needs is written on demand by `as_str`.
 //
 // destruction is inherited too: a `String` owns nothing of its own beyond the
 // `buf: Vec<u8>` field, so the compiler drops it by dropping `buf`, whose own
@@ -27,7 +27,7 @@
 // no-op at the machine level, both are a bare pointer), and libc `strlen`
 // recovers a `str`'s length.
 
-import std/vec { Vec, vec_new, vec_with_capacity, vec_reserve, vec_push, vec_get, vec_get_ptr, vec_set, vec_len, vec_cap, vec_clear }
+import std/vec { Vec }
 
 extern strlen(s: str) u64;
 extern rt_str_as_bytes(s: str) *u8;
@@ -35,73 +35,73 @@ extern rt_bytes_as_str(p: *u8) str;
 
 pub struct String {
     buf: Vec<u8>,  /// the raw bytes, without a trailing NUL
-}
 
-/// An empty String that owns no allocation yet.
-pub proc string_new() String {
-    return String { buf: vec_new::<u8>() };
-}
-
-/// An empty String with room for `cap` bytes already reserved.
-pub proc string_with_capacity(cap: u64) String {
-    return String { buf: vec_with_capacity::<u8>(cap) };
-}
-
-/// A String seeded with a copy of the bytes of the `str` `text`.
-pub proc string_from_str(text: str) String {
-    let s: String = string_new();
-    string_push_str(&s, text);
-    return s;
-}
-
-/// The number of bytes in the String (not counting any scratch NUL).
-pub proc string_len(s: *String) u64 { return vec_len::<u8>(&s.buf); }
-/// The number of bytes the buffer can hold before it must grow.
-pub proc string_cap(s: *String) u64 { return vec_cap::<u8>(&s.buf); }
-/// Whether the String holds no bytes.
-pub proc string_is_empty(s: *String) bool { return vec_len::<u8>(&s.buf) == 0u64; }
-
-/// Append a single raw byte, growing the buffer if it is full. No UTF-8
-/// checking is done.
-pub proc string_push_byte(s: *String, b: u8) {
-    vec_push::<u8>(&s.buf, b);
-}
-
-/// Append a copy of the bytes of the `str` `text`.
-pub proc string_push_str(s: *String, text: str) {
-    let n: u64 = strlen(text);
-    let src: *u8 = rt_str_as_bytes(text);
-    // one reserve up front, then fill - avoids re-checking capacity per byte.
-    vec_reserve::<u8>(&s.buf, string_len(s) + n);
-    let i: u64 = 0u64;
-    while (i < n) {
-        vec_push::<u8>(&s.buf, src[i]);
-        i = i + 1u64;
+    /// An empty String that owns no allocation yet.
+    proc new() String {
+        return String { buf: Vec::<u8>::new() };
     }
-}
 
-/// Logically empty the String without shrinking its buffer. The bytes own
-/// nothing, so this just resets the length.
-pub proc string_clear(s: *String) { vec_clear::<u8>(&s.buf); }
-
-/// Whether two Strings hold exactly the same bytes.
-pub proc string_eq(a: *String, b: *String) bool {
-    if (string_len(a) != string_len(b)) { return false; }
-    let n: u64 = string_len(a);
-    let i: u64 = 0u64;
-    while (i < n) {
-        if (vec_get::<u8>(&a.buf, i) != vec_get::<u8>(&b.buf, i)) { return false; }
-        i = i + 1u64;
+    /// An empty String with room for `cap` bytes already reserved.
+    proc with_capacity(cap: u64) String {
+        return String { buf: Vec::<u8>::with_capacity(cap) };
     }
-    return true;
-}
 
-/// A borrowable, NUL-terminated `str` view of the bytes, valid until the next
-/// mutation or free. Writes a scratch NUL one past the last byte (growing the
-/// buffer if needed) without changing the logical length, so the returned `str`
-/// stops exactly where the String's bytes do.
-pub proc string_as_str(s: *String) str {
-    vec_reserve::<u8>(&s.buf, string_len(s) + 1u64);
-    vec_set::<u8>(&s.buf, string_len(s), 0u8);
-    return rt_bytes_as_str(vec_get_ptr::<u8>(&s.buf, 0u64));
+    /// A String seeded with a copy of the bytes of the `str` `text`.
+    proc from_str(text: str) String {
+        let s: String = String::new();
+        s.push_str(text);
+        return s;
+    }
+
+    /// The number of bytes in the String (not counting any scratch NUL).
+    proc len(*self) u64 { return self.buf.len(); }
+    /// The number of bytes the buffer can hold before it must grow.
+    proc cap(*self) u64 { return self.buf.cap(); }
+    /// Whether the String holds no bytes.
+    proc is_empty(*self) bool { return self.buf.is_empty(); }
+
+    /// Append a single raw byte, growing the buffer if it is full. No UTF-8
+    /// checking is done.
+    proc push_byte(*self, b: u8) {
+        self.buf.push(b);
+    }
+
+    /// Append a copy of the bytes of the `str` `text`.
+    proc push_str(*self, text: str) {
+        let n: u64 = strlen(text);
+        let src: *u8 = rt_str_as_bytes(text);
+        // one reserve up front, then fill - avoids re-checking capacity per byte.
+        self.buf.reserve(self.len() + n);
+        let i: u64 = 0u64;
+        while (i < n) {
+            self.buf.push(src[i]);
+            i = i + 1u64;
+        }
+    }
+
+    /// Logically empty the String without shrinking its buffer. The bytes own
+    /// nothing, so this just resets the length.
+    proc clear(*self) { self.buf.clear(); }
+
+    /// Whether this String and `other` hold exactly the same bytes.
+    proc eq(*self, other: *String) bool {
+        if (self.len() != other.len()) { return false; }
+        let n: u64 = self.len();
+        let i: u64 = 0u64;
+        while (i < n) {
+            if (self.buf.get(i) != other.buf.get(i)) { return false; }
+            i = i + 1u64;
+        }
+        return true;
+    }
+
+    /// A borrowable, NUL-terminated `str` view of the bytes, valid until the next
+    /// mutation or free. Writes a scratch NUL one past the last byte (growing the
+    /// buffer if needed) without changing the logical length, so the returned
+    /// `str` stops exactly where the String's bytes do.
+    proc as_str(*self) str {
+        self.buf.reserve(self.len() + 1u64);
+        self.buf.set(self.len(), 0u8);
+        return rt_bytes_as_str(self.buf.get_ptr(0u64));
+    }
 }

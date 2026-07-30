@@ -8,19 +8,19 @@
 //@ exit: 0
 
 import helpers/showable { Show }
-import std/string { String, string_from_str, string_as_str }
+import std/string { String }
 
 struct Tag { n: i32,
     proc new(n: i32) Tag { return Tag { n: n }; }
 }
 
 extend Tag: Show {
-    proc show(*self) String { return string_from_str("tag"); }
+    proc show(*self) String { return String::from_str("tag"); }
 }
 
 proc show_it<T: Show>(item: *T) {
     let s: String = item.show();
-    println(string_as_str(&s));
+    println(s.as_str());
     // `s` owns its buffer and is dropped at the end of this scope.
 }
 

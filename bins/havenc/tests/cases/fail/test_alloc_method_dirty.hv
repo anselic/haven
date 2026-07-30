@@ -1,0 +1,30 @@
+// The dual of test_alloc_method: resolving a method call to its target must also
+// propagate DIRTINESS, so the alloc check stays sound. `touch` is `@alloc(false)`
+// but calls the concrete method `grow`, which allocates - the checker resolves
+// `self.grow()` to `grow`, sees it is dirty, and rejects `touch`. (If method
+// calls were simply waved through, this would compile.)
+//@ error: may allocate
+
+import std/alloc { alloc }
+import std/option { unwrap }
+
+struct Thing {
+    p: *i32,
+
+    // concrete, allocating, and NOT @alloc(false)
+    proc grow(*self) {
+        self.p = unwrap::<i32>(alloc::<i32>(4u64));
+    }
+
+    @alloc(false)
+    proc touch(*self) {
+        self.grow();
+    }
+}
+
+@export
+proc main() i32 {
+    let t: Thing = Thing { p: null::<*i32>() };
+    t.touch();   // forces `touch` (and `grow`) to be monomorphized and checked
+    return 0;
+}

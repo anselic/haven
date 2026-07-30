@@ -6,8 +6,8 @@
 /// state-variable filter that produces lowpass/highpass/bandpass/notch at once.
 ///
 /// The usage pattern is the same for all three: build one with a constructor
-/// (`cutoff`/`q`/`sr` in hertz), then call its `*_process` function once per
-/// input sample. State lives in the filter struct, so keep it between samples.
+/// (`cutoff`/`q`/`sr` in hertz), then call its `.process` method once per input
+/// sample. State lives in the filter struct, so keep it between samples.
 /// All single precision.
 
 import std/math { expf, cosf, sinf, tanf, sqrtf, powf, pi_f32, tau_f32 }
@@ -22,25 +22,25 @@ pub struct OnePole {
     a0: f32,
     b1: f32,
     z1: f32, // previous output
-}
 
-/// A one-pole lowpass with corner frequency `cutoff` hertz at sample rate `sr`.
-pub proc onepole_lowpass(cutoff: f32, sr: f32) OnePole {
-    let b1: f32 = expf(-tau_f32() * cutoff / sr);
-    return OnePole { a0: 1.0 - b1, b1: b1, z1: 0.0 };
-}
+    /// A one-pole lowpass with corner frequency `cutoff` hertz at sample rate `sr`.
+    proc lowpass(cutoff: f32, sr: f32) OnePole {
+        let b1: f32 = expf(-tau_f32() * cutoff / sr);
+        return OnePole { a0: 1.0 - b1, b1: b1, z1: 0.0 };
+    }
 
-/// Retune an existing one-pole to corner frequency `cutoff` at sample rate `sr`.
-pub proc onepole_set_cutoff(f: *OnePole, cutoff: f32, sr: f32) {
-    f.b1 = expf(-tau_f32() * cutoff / sr);
-    f.a0 = 1.0 - f.b1;
-}
+    /// Retune to corner frequency `cutoff` at sample rate `sr`.
+    proc set_cutoff(*self, cutoff: f32, sr: f32) {
+        self.b1 = expf(-tau_f32() * cutoff / sr);
+        self.a0 = 1.0 - self.b1;
+    }
 
-/// Filter one input sample `x`, returning the filtered output.
-@alloc(false)
-pub proc onepole_process(f: *OnePole, x: f32) f32 {
-    f.z1 = f.a0 * x + f.b1 * f.z1;
-    return f.z1;
+    /// Filter one input sample `x`, returning the filtered output.
+    @alloc(false)
+    proc process(*self, x: f32) f32 {
+        self.z1 = self.a0 * x + self.b1 * self.z1;
+        return self.z1;
+    }
 }
 
 // --- Biquad ---------------------------------------------------------------
@@ -54,113 +54,113 @@ pub struct Biquad {
     b0: f32, b1: f32, b2: f32,
     a1: f32, a2: f32,
     s1: f32, s2: f32, // transposed DF-II state
-}
 
-/// Build a biquad from raw coefficients `b0..a2`, normalizing by `a0` and
-/// starting from zero state. The response constructors below are built on this.
-pub proc biquad_from(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) Biquad {
-    return Biquad {
-        b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
-        a1: a1 / a0, a2: a2 / a0,
-        s1: 0.0, s2: 0.0,
-    };
-}
+    /// Build a biquad from raw coefficients `b0..a2`, normalizing by `a0` and
+    /// starting from zero state. The response constructors below are built on this.
+    proc from(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) Biquad {
+        return Biquad {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            s1: 0.0, s2: 0.0,
+        };
+    }
 
-/// Lowpass at `cutoff` hertz with resonance `q`, for sample rate `sr`.
-pub proc biquad_lowpass(cutoff: f32, q: f32, sr: f32) Biquad {
-    let w: f32 = tau_f32() * cutoff / sr;
-    let cs: f32 = cosf(w);
-    let alpha: f32 = sinf(w) / (2.0 * q);
-    return biquad_from(
-        (1.0 - cs) / 2.0, 1.0 - cs, (1.0 - cs) / 2.0,
-        1.0 + alpha, -2.0 * cs, 1.0 - alpha);
-}
+    /// Lowpass at `cutoff` hertz with resonance `q`, for sample rate `sr`.
+    proc lowpass(cutoff: f32, q: f32, sr: f32) Biquad {
+        let w: f32 = tau_f32() * cutoff / sr;
+        let cs: f32 = cosf(w);
+        let alpha: f32 = sinf(w) / (2.0 * q);
+        return Biquad::from(
+            (1.0 - cs) / 2.0, 1.0 - cs, (1.0 - cs) / 2.0,
+            1.0 + alpha, -2.0 * cs, 1.0 - alpha);
+    }
 
-/// Highpass at `cutoff` hertz with resonance `q`, for sample rate `sr`.
-pub proc biquad_highpass(cutoff: f32, q: f32, sr: f32) Biquad {
-    let w: f32 = tau_f32() * cutoff / sr;
-    let cs: f32 = cosf(w);
-    let alpha: f32 = sinf(w) / (2.0 * q);
-    return biquad_from(
-        (1.0 + cs) / 2.0, -(1.0 + cs), (1.0 + cs) / 2.0,
-        1.0 + alpha, -2.0 * cs, 1.0 - alpha);
-}
+    /// Highpass at `cutoff` hertz with resonance `q`, for sample rate `sr`.
+    proc highpass(cutoff: f32, q: f32, sr: f32) Biquad {
+        let w: f32 = tau_f32() * cutoff / sr;
+        let cs: f32 = cosf(w);
+        let alpha: f32 = sinf(w) / (2.0 * q);
+        return Biquad::from(
+            (1.0 + cs) / 2.0, -(1.0 + cs), (1.0 + cs) / 2.0,
+            1.0 + alpha, -2.0 * cs, 1.0 - alpha);
+    }
 
-/// Bandpass centered at `cutoff` hertz with `q` setting the width, normalized to
-/// 0 dB peak gain, for sample rate `sr`.
-pub proc biquad_bandpass(cutoff: f32, q: f32, sr: f32) Biquad {
-    let w: f32 = tau_f32() * cutoff / sr;
-    let cs: f32 = cosf(w);
-    let alpha: f32 = sinf(w) / (2.0 * q);
-    return biquad_from(
-        alpha, 0.0, -alpha,
-        1.0 + alpha, -2.0 * cs, 1.0 - alpha);
-}
+    /// Bandpass centered at `cutoff` hertz with `q` setting the width, normalized
+    /// to 0 dB peak gain, for sample rate `sr`.
+    proc bandpass(cutoff: f32, q: f32, sr: f32) Biquad {
+        let w: f32 = tau_f32() * cutoff / sr;
+        let cs: f32 = cosf(w);
+        let alpha: f32 = sinf(w) / (2.0 * q);
+        return Biquad::from(
+            alpha, 0.0, -alpha,
+            1.0 + alpha, -2.0 * cs, 1.0 - alpha);
+    }
 
-/// Notch (band-reject) at `cutoff` hertz with `q` setting the width, for sample
-/// rate `sr`.
-pub proc biquad_notch(cutoff: f32, q: f32, sr: f32) Biquad {
-    let w: f32 = tau_f32() * cutoff / sr;
-    let cs: f32 = cosf(w);
-    let alpha: f32 = sinf(w) / (2.0 * q);
-    return biquad_from(
-        1.0, -2.0 * cs, 1.0,
-        1.0 + alpha, -2.0 * cs, 1.0 - alpha);
-}
+    /// Notch (band-reject) at `cutoff` hertz with `q` setting the width, for
+    /// sample rate `sr`.
+    proc notch(cutoff: f32, q: f32, sr: f32) Biquad {
+        let w: f32 = tau_f32() * cutoff / sr;
+        let cs: f32 = cosf(w);
+        let alpha: f32 = sinf(w) / (2.0 * q);
+        return Biquad::from(
+            1.0, -2.0 * cs, 1.0,
+            1.0 + alpha, -2.0 * cs, 1.0 - alpha);
+    }
 
-/// Peaking EQ: `gain_db` boost (or cut) at `cutoff` hertz, bandwidth set by `q`,
-/// for sample rate `sr`.
-pub proc biquad_peak(cutoff: f32, q: f32, gain_db: f32, sr: f32) Biquad {
-    let a: f32 = powf(10.0, gain_db / 40.0);
-    let w: f32 = tau_f32() * cutoff / sr;
-    let cs: f32 = cosf(w);
-    let alpha: f32 = sinf(w) / (2.0 * q);
-    return biquad_from(
-        1.0 + alpha * a, -2.0 * cs, 1.0 - alpha * a,
-        1.0 + alpha / a, -2.0 * cs, 1.0 - alpha / a);
-}
+    /// Peaking EQ: `gain_db` boost (or cut) at `cutoff` hertz, bandwidth set by
+    /// `q`, for sample rate `sr`.
+    proc peak(cutoff: f32, q: f32, gain_db: f32, sr: f32) Biquad {
+        let a: f32 = powf(10.0, gain_db / 40.0);
+        let w: f32 = tau_f32() * cutoff / sr;
+        let cs: f32 = cosf(w);
+        let alpha: f32 = sinf(w) / (2.0 * q);
+        return Biquad::from(
+            1.0 + alpha * a, -2.0 * cs, 1.0 - alpha * a,
+            1.0 + alpha / a, -2.0 * cs, 1.0 - alpha / a);
+    }
 
-/// Low shelf: `gain_db` boost (or cut) below `cutoff` hertz, slope set by `q`,
-/// for sample rate `sr`.
-pub proc biquad_lowshelf(cutoff: f32, q: f32, gain_db: f32, sr: f32) Biquad {
-    let a: f32 = powf(10.0, gain_db / 40.0);
-    let w: f32 = tau_f32() * cutoff / sr;
-    let cs: f32 = cosf(w);
-    let alpha: f32 = sinf(w) / (2.0 * q);
-    let ta: f32 = 2.0 * sqrtf(a) * alpha;
-    return biquad_from(
-        a * ((a + 1.0) - (a - 1.0) * cs + ta),
-        2.0 * a * ((a - 1.0) - (a + 1.0) * cs),
-        a * ((a + 1.0) - (a - 1.0) * cs - ta),
-        (a + 1.0) + (a - 1.0) * cs + ta,
-        -2.0 * ((a - 1.0) + (a + 1.0) * cs),
-        (a + 1.0) + (a - 1.0) * cs - ta);
-}
+    /// Low shelf: `gain_db` boost (or cut) below `cutoff` hertz, slope set by
+    /// `q`, for sample rate `sr`.
+    proc lowshelf(cutoff: f32, q: f32, gain_db: f32, sr: f32) Biquad {
+        let a: f32 = powf(10.0, gain_db / 40.0);
+        let w: f32 = tau_f32() * cutoff / sr;
+        let cs: f32 = cosf(w);
+        let alpha: f32 = sinf(w) / (2.0 * q);
+        let ta: f32 = 2.0 * sqrtf(a) * alpha;
+        return Biquad::from(
+            a * ((a + 1.0) - (a - 1.0) * cs + ta),
+            2.0 * a * ((a - 1.0) - (a + 1.0) * cs),
+            a * ((a + 1.0) - (a - 1.0) * cs - ta),
+            (a + 1.0) + (a - 1.0) * cs + ta,
+            -2.0 * ((a - 1.0) + (a + 1.0) * cs),
+            (a + 1.0) + (a - 1.0) * cs - ta);
+    }
 
-/// High shelf: `gain_db` boost (or cut) above `cutoff` hertz, slope set by `q`,
-/// for sample rate `sr`.
-pub proc biquad_highshelf(cutoff: f32, q: f32, gain_db: f32, sr: f32) Biquad {
-    let a: f32 = powf(10.0, gain_db / 40.0);
-    let w: f32 = tau_f32() * cutoff / sr;
-    let cs: f32 = cosf(w);
-    let alpha: f32 = sinf(w) / (2.0 * q);
-    let ta: f32 = 2.0 * sqrtf(a) * alpha;
-    return biquad_from(
-        a * ((a + 1.0) + (a - 1.0) * cs + ta),
-        -2.0 * a * ((a - 1.0) + (a + 1.0) * cs),
-        a * ((a + 1.0) + (a - 1.0) * cs - ta),
-        (a + 1.0) - (a - 1.0) * cs + ta,
-        2.0 * ((a - 1.0) - (a + 1.0) * cs),
-        (a + 1.0) - (a - 1.0) * cs - ta);
-}
+    /// High shelf: `gain_db` boost (or cut) above `cutoff` hertz, slope set by
+    /// `q`, for sample rate `sr`.
+    proc highshelf(cutoff: f32, q: f32, gain_db: f32, sr: f32) Biquad {
+        let a: f32 = powf(10.0, gain_db / 40.0);
+        let w: f32 = tau_f32() * cutoff / sr;
+        let cs: f32 = cosf(w);
+        let alpha: f32 = sinf(w) / (2.0 * q);
+        let ta: f32 = 2.0 * sqrtf(a) * alpha;
+        return Biquad::from(
+            a * ((a + 1.0) + (a - 1.0) * cs + ta),
+            -2.0 * a * ((a - 1.0) + (a + 1.0) * cs),
+            a * ((a + 1.0) + (a - 1.0) * cs - ta),
+            (a + 1.0) - (a - 1.0) * cs + ta,
+            2.0 * ((a - 1.0) - (a + 1.0) * cs),
+            (a + 1.0) - (a - 1.0) * cs - ta);
+    }
 
-/// Filter one input sample `x`, returning the filtered output.
-@alloc(false)
-pub proc biquad_process(f: *Biquad, x: f32) f32 {
-    let y: f32 = f.b0 * x + f.s1;
-    f.s1 = f.b1 * x - f.a1 * y + f.s2;
-    f.s2 = f.b2 * x - f.a2 * y;
-    return y;
+    /// Filter one input sample `x`, returning the filtered output.
+    @alloc(false)
+    proc process(*self, x: f32) f32 {
+        let y: f32 = self.b0 * x + self.s1;
+        self.s1 = self.b1 * x - self.a1 * y + self.s2;
+        self.s2 = self.b2 * x - self.a2 * y;
+        return y;
+    }
 }
 
 // --- StateVariable --------------------------------------------------------
@@ -183,40 +183,40 @@ pub struct StateVariable {
     k: f32, // damping, = 1 / Q
     a1: f32, a2: f32, a3: f32,
     ic1eq: f32, ic2eq: f32, // integrator states
-}
 
-/// A state-variable filter at `cutoff` hertz with resonance `q`, for sample
-/// rate `sr`.
-pub proc svf_new(cutoff: f32, q: f32, sr: f32) StateVariable {
-    let g: f32 = tanf(pi_f32() * cutoff / sr);
-    let k: f32 = 1.0 / q;
-    let a1: f32 = 1.0 / (1.0 + g * (g + k));
-    let a2: f32 = g * a1;
-    let a3: f32 = g * a2;
-    return StateVariable { g: g, k: k, a1: a1, a2: a2, a3: a3, ic1eq: 0.0, ic2eq: 0.0 };
-}
+    /// A state-variable filter at `cutoff` hertz with resonance `q`, for sample
+    /// rate `sr`.
+    proc new(cutoff: f32, q: f32, sr: f32) StateVariable {
+        let g: f32 = tanf(pi_f32() * cutoff / sr);
+        let k: f32 = 1.0 / q;
+        let a1: f32 = 1.0 / (1.0 + g * (g + k));
+        let a2: f32 = g * a1;
+        let a3: f32 = g * a2;
+        return StateVariable { g: g, k: k, a1: a1, a2: a2, a3: a3, ic1eq: 0.0, ic2eq: 0.0 };
+    }
 
-/// Retune an existing state-variable filter to `cutoff` hertz and resonance `q`,
-/// for sample rate `sr`, keeping its running state.
-pub proc svf_set(f: *StateVariable, cutoff: f32, q: f32, sr: f32) {
-    f.g = tanf(pi_f32() * cutoff / sr);
-    f.k = 1.0 / q;
-    f.a1 = 1.0 / (1.0 + f.g * (f.g + f.k));
-    f.a2 = f.g * f.a1;
-    f.a3 = f.g * f.a2;
-}
+    /// Retune to `cutoff` hertz and resonance `q`, for sample rate `sr`, keeping
+    /// its running state.
+    proc set(*self, cutoff: f32, q: f32, sr: f32) {
+        self.g = tanf(pi_f32() * cutoff / sr);
+        self.k = 1.0 / q;
+        self.a1 = 1.0 / (1.0 + self.g * (self.g + self.k));
+        self.a2 = self.g * self.a1;
+        self.a3 = self.g * self.a2;
+    }
 
-/// Filter one input sample `x`, returning all four responses as an `SvfOut`.
-@alloc(false)
-pub proc svf_process(f: *StateVariable, x: f32) SvfOut {
-    let v3: f32 = x - f.ic2eq;
-    let v1: f32 = f.a1 * f.ic1eq + f.a2 * v3;
-    let v2: f32 = f.ic2eq + f.a2 * f.ic1eq + f.a3 * v3;
-    f.ic1eq = 2.0 * v1 - f.ic1eq;
-    f.ic2eq = 2.0 * v2 - f.ic2eq;
+    /// Filter one input sample `x`, returning all four responses as an `SvfOut`.
+    @alloc(false)
+    proc process(*self, x: f32) SvfOut {
+        let v3: f32 = x - self.ic2eq;
+        let v1: f32 = self.a1 * self.ic1eq + self.a2 * v3;
+        let v2: f32 = self.ic2eq + self.a2 * self.ic1eq + self.a3 * v3;
+        self.ic1eq = 2.0 * v1 - self.ic1eq;
+        self.ic2eq = 2.0 * v2 - self.ic2eq;
 
-    let lp: f32 = v2;
-    let bp: f32 = v1;
-    let hp: f32 = x - f.k * v1 - v2;
-    return SvfOut { lp: lp, hp: hp, bp: bp, notch: hp + lp };
+        let lp: f32 = v2;
+        let bp: f32 = v1;
+        let hp: f32 = x - self.k * v1 - v2;
+        return SvfOut { lp: lp, hp: hp, bp: bp, notch: hp + lp };
+    }
 }

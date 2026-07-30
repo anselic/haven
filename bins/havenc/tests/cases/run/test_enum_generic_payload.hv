@@ -4,7 +4,7 @@
 // a non-generic enum and a generic enum whose payloads mix a type param (`T`)
 // with a concrete instance (`Vec<i32>`).
 
-import std/vec { Vec, vec_new, vec_push, vec_get, vec_len }
+import std/vec { Vec }
 
 @repr(C)
 enum Bag { Empty, Full(Vec<i32>) }
@@ -15,27 +15,27 @@ enum Wrap<T> { Nil, One(T), Many(Vec<i32>) }
 proc bag_first(b: Bag) i32 {
     match (b) {
         Bag::Empty -> { return -1; }
-        Bag::Full(v) -> { return vec_get::<i32>(&v, 0u64); }
+        Bag::Full(v) -> { return v.get(0u64); }
     }
 }
 
 @export
 proc main() i32 {
-    let xs: Vec<i32> = vec_new::<i32>();
-    vec_push::<i32>(&xs, 42);
-    vec_push::<i32>(&xs, 7);
+    let xs: Vec<i32> = Vec::<i32>::new();
+    xs.push(42);
+    xs.push(7);
     printf::<i32>("%d\n", bag_first(Bag::Full(xs))); // 42
     printf::<i32>("%d\n", bag_first(Bag::Empty));    // -1
 
     // generic enum: the concrete-instance payload
-    let ys: Vec<i32> = vec_new::<i32>();
-    vec_push::<i32>(&ys, 100);
-    vec_push::<i32>(&ys, 200);
+    let ys: Vec<i32> = Vec::<i32>::new();
+    ys.push(100);
+    ys.push(200);
     let w: Wrap<i32> = Wrap::Many::<i32>(ys);
     match (w) {
         Wrap::Nil -> { printf::<i32>("%d\n", 0); }
         Wrap::One(x) -> { printf::<i32>("%d\n", x); }
-        Wrap::Many(v) -> { printf::<i32>("%d\n", vec_get::<i32>(&v, 1u64)); } // 200
+        Wrap::Many(v) -> { printf::<i32>("%d\n", v.get(1u64)); } // 200
     }
 
     // generic enum: the type-param payload
@@ -43,7 +43,7 @@ proc main() i32 {
     match (single) {
         Wrap::Nil -> { printf::<i32>("%d\n", 0); }
         Wrap::One(x) -> { printf::<i32>("%d\n", x); } // 9
-        Wrap::Many(v) -> { printf::<i32>("%d\n", numerical_cast::<i32>(vec_len::<i32>(&v))); }
+        Wrap::Many(v) -> { printf::<i32>("%d\n", numerical_cast::<i32>(v.len())); }
     }
     return 0;
 }

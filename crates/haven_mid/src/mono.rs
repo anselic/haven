@@ -337,6 +337,33 @@ fn member_of<'a>(members: &MemberTable<'a>, ty: &Type<'a>, name: &str)
     }
 }
 
+/// The concrete function a method call `recv.field(...)` dispatches to, for a
+/// receiver of type `ty`. Returns `None` when the call is not a resolvable
+/// concrete method: an associated function (spelled as a path, never reached
+/// here), a generic-`extend` template (which mono has already rewritten into a
+/// direct call on the instance, so its `Access` form no longer survives), or a
+/// receiver whose method can't be found. Callers that can't resolve a method
+/// this way should treat the call conservatively.
+///
+/// Used by the `@alloc(false)` check, which runs on the post-mono AST where a
+/// concrete method call is still `Call { func: Access { .. } }` (only generic
+/// ones were lowered to named calls). Resolving it to `m.name` - the top-level
+/// function `lower_methods` desugared the method into - turns the call into a
+/// real call-graph edge instead of an opaque indirect call.
+pub(crate) fn concrete_method_name<'a>(
+    members: &MemberTable<'a>,
+    ty: &Type<'a>,
+    field: &'a str,
+) -> Option<&'a str> {
+    let (m, _, _) = member_of(members, ty, field)?;
+    // an associated fn has no receiver to dispatch on, and a template's name is
+    // a base that has no clean-status of its own; neither is a concrete edge.
+    if m.receiver == Receiver::Associated || !m.generics.is_empty() {
+        return None;
+    }
+    Some(m.name)
+}
+
 impl<'p, 'a> Mono<'p, 'a> {
     /// Record an instantiation request, return its (stable) mangled name.
     /// de-dupes so each distinct instance is built exactly once.

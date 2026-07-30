@@ -13,21 +13,21 @@
 //@ exit: 0
 
 import std/fmt { Display, display_println }
-import std/string { String, string_from_str, string_push_str, string_as_str }
-import std/vec { Vec, vec_new, vec_push }
+import std/string { String }
+import std/vec { Vec }
 
 // a user type is displayable by composing the displays of its parts.
 struct Point { x: i32, y: i32 }
 
 extend Point: Display {
     proc display(*self) String {
-        let s: String = string_from_str("(");
+        let s: String = String::from_str("(");
         let xs: String = self.x.display();
-        string_push_str(&s, string_as_str(&xs));
-        string_push_str(&s, ", ");
+        s.push_str(xs.as_str());
+        s.push_str(", ");
         let ys: String = self.y.display();
-        string_push_str(&s, string_as_str(&ys));
-        string_push_str(&s, ")");
+        s.push_str(ys.as_str());
+        s.push_str(")");
         return s;
     }
 }
@@ -44,38 +44,38 @@ proc main() i32 {
 
     // --- str and String
     let hello: str = "hello";               display_println::<str>(&hello);   // hello
-    let owned: String = string_from_str("owned"); display_println::<String>(&owned); // owned
+    let owned: String = String::from_str("owned"); display_println::<String>(&owned); // owned
 
     // --- a Vec of primitives, rendered as `[a, b, c]`, through the helper (its
     // `T: Display` bound is `Vec<i32>: Display`, checked recursively).
-    let v: Vec<i32> = vec_new::<i32>();
-    vec_push::<i32>(&v, 1);
-    vec_push::<i32>(&v, 22);
-    vec_push::<i32>(&v, 333);
+    let v: Vec<i32> = Vec::<i32>::new();
+    v.push(1);
+    v.push(22);
+    v.push(333);
     display_println::<Vec<i32>>(&v);        // [1, 22, 333]
 
     // --- an empty Vec renders as `[]`
-    let empty: Vec<i32> = vec_new::<i32>();
+    let empty: Vec<i32> = Vec::<i32>::new();
     display_println::<Vec<i32>>(&empty);    // []
 
     // --- nested containers: `T` here is itself a generic instance, so dispatch
     // has to put `Vec$i32` back into `Vec<i32>` form to find its impl.
-    let outer: Vec<Vec<i32>> = vec_new::<Vec<i32>>();
-    let row0: Vec<i32> = vec_new::<i32>();
-    vec_push::<i32>(&row0, 1);
-    vec_push::<i32>(&row0, 2);
-    vec_push::<Vec<i32>>(&outer, row0);
-    let row1: Vec<i32> = vec_new::<i32>();
-    vec_push::<i32>(&row1, 3);
-    vec_push::<Vec<i32>>(&outer, row1);
+    let outer: Vec<Vec<i32>> = Vec::<Vec<i32>>::new();
+    let row0: Vec<i32> = Vec::<i32>::new();
+    row0.push(1);
+    row0.push(2);
+    outer.push(row0);
+    let row1: Vec<i32> = Vec::<i32>::new();
+    row1.push(3);
+    outer.push(row1);
     display_println::<Vec<Vec<i32>>>(&outer); // [[1, 2], [3]]
 
     // --- a user type, and a Vec of it
     let p: Point = Point { x: 7, y: 8 };
     display_println::<Point>(&p);           // (7, 8)
-    let pts: Vec<Point> = vec_new::<Point>();
-    vec_push::<Point>(&pts, Point { x: 1, y: 2 });
-    vec_push::<Point>(&pts, Point { x: 3, y: 4 });
+    let pts: Vec<Point> = Vec::<Point>::new();
+    pts.push(Point { x: 1, y: 2 });
+    pts.push(Point { x: 3, y: 4 });
     display_println::<Vec<Point>>(&pts);    // [(1, 2), (3, 4)]
 
     return 0;
