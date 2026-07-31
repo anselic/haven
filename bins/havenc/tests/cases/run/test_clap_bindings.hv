@@ -1,0 +1,79 @@
+// The std/clap CLAP ABI bindings: pin the ABI-critical struct sizes (they must
+// match the C headers byte-for-byte) and drive one indirect call through a
+// plugin vtable to prove the fn-pointer fields resolve and lower at runtime.
+
+import std/clap/version { ClapVersion, clap_version_is_compatible }
+import std/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
+import std/clap/plugin { ClapPlugin, ClapPluginEntry, ClapPluginDescriptor }
+import std/clap/events {
+    ClapEventHeader, ClapEventNote,
+    ClapEventTransport, ClapInputEvents, ClapOutputEvents,
+}
+import std/clap/ext { ClapParamInfo }
+
+proc stub_init(p: *ClapPlugin) bool { return true; }
+proc stub_destroy(p: *ClapPlugin) void { }
+proc stub_activate(p: *ClapPlugin, sr: f64, minf: u32, maxf: u32) bool { return true; }
+proc stub_deactivate(p: *ClapPlugin) void { }
+proc stub_start(p: *ClapPlugin) bool { return true; }
+proc stub_stop(p: *ClapPlugin) void { }
+proc stub_reset(p: *ClapPlugin) void { }
+proc stub_on_main(p: *ClapPlugin) void { }
+proc stub_get_ext(p: *ClapPlugin, id: str) *void { return null::<*void>(); }
+
+proc stub_process(p: *ClapPlugin, ctx: *ClapProcess) ClapProcessStatus {
+    if (ctx.frames_count == 0u32) { return ClapProcessStatus::Sleep; }
+    return ClapProcessStatus::Continue;
+}
+
+@export
+proc main() i32 {
+    // ABI sizes — must equal the C layout exactly.
+    printf::<u64>("%llu\n", sizeof::<ClapPlugin>());       // 96
+    printf::<u64>("%llu\n", sizeof::<ClapProcess>());      // 64
+    printf::<u64>("%llu\n", sizeof::<ClapParamInfo>());    // 1320
+    printf::<u64>("%llu\n", sizeof::<ClapEventNote>());    // 40
+    printf::<u64>("%llu\n", sizeof::<ClapEventHeader>());  // 16
+    printf::<u64>("%llu\n", sizeof::<ClapPluginEntry>());  // 40 (12 + 4 pad + 3*8)
+
+    // version compatibility helper
+    let v: ClapVersion = ClapVersion { major: 1u32, minor: 2u32, revision: 2u32 };
+    if (clap_version_is_compatible(v)) { println("compatible"); }
+
+    // build a vtable and call through it (indirect calls through fn-ptr fields).
+    let vt: ClapPlugin = ClapPlugin {
+        desc: null::<*ClapPluginDescriptor>(),
+        plugin_data: null::<*void>(),
+        init: stub_init,
+        destroy: stub_destroy,
+        activate: stub_activate,
+        deactivate: stub_deactivate,
+        start_processing: stub_start,
+        stop_processing: stub_stop,
+        reset: stub_reset,
+        process: stub_process,
+        get_extension: stub_get_ext,
+        on_main_thread: stub_on_main,
+    };
+
+    let ctx: ClapProcess = ClapProcess {
+        steady_time: 0i64,
+        frames_count: 128u32,
+        transport: null::<*ClapEventTransport>(),
+        audio_inputs: null::<*ClapAudioBuffer>(),
+        audio_outputs: null::<*ClapAudioBuffer>(),
+        audio_inputs_count: 0u32,
+        audio_outputs_count: 0u32,
+        in_events: null::<*ClapInputEvents>(),
+        out_events: null::<*ClapOutputEvents>(),
+    };
+
+    if (!vt.init(&vt)) { return 1; }
+    match (vt.process(&vt, &ctx)) {
+        ClapProcessStatus::Continue -> { println("continue"); }
+        ClapProcessStatus::Sleep    -> { println("sleep"); }
+        ClapProcessStatus::Error    -> { println("error"); }
+        _ -> { println("other"); }
+    }
+    return 0;
+}

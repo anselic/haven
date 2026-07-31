@@ -1,12 +1,249 @@
-struct Version {
-    major: u32,
-    minor: u32,
-    revision: u32,
+// A minimal but structurally-complete CLAP plugin: a stereo gain.
+//
+// Build it as a shared library and rename to `Gain.clap`:
+//     havenc examples/3_clap.hv -o Gain --shared
+//     # then move Gain.dll -> Gain.clap  (see build.hv / std/process for bundling)
+//
+// A CLAP host loads the library, looks up the single exported symbol
+// `clap_entry`, and walks entry -> factory -> descriptor -> plugin vtable,
+// asking the plugin for the `audio-ports` and `params` extensions.
+//
+// This example wires that whole chain against std/clap. The DSP is intentionally
+// tiny (multiply every sample by a gain), and the descriptor/vtables are leaked
+// static singletons — idiomatic for a process-lifetime plugin with no per-host
+// mutable global state (haven has const globals only).
+
+import std/clap/version { ClapVersion, clap_version_current }
+import std/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
+import std/clap/events { ClapInputEvents, ClapOutputEvents }
+import std/clap/plugin {
+    ClapPlugin, ClapHost, ClapPluginDescriptor,
+    ClapPluginFactory, ClapPluginEntry, CLAP_PLUGIN_FACTORY_ID,
+}
+import std/clap/ext {
+    ClapAudioPortInfo, ClapPluginAudioPorts, CLAP_EXT_AUDIO_PORTS,
+    CLAP_AUDIO_PORT_IS_MAIN, CLAP_PORT_STEREO,
+    ClapParamInfo, ClapPluginParams, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE,
+}
+import std/alloc { alloc, dealloc }
+
+// --- plugin instance --------------------------------------------------------
+// State lives on the heap behind clap_plugin.plugin_data.
+struct Gain {
+    clap_plugin: ClapPlugin,   // the vtable the host calls; must be first field
+    gain: f64,
+    sample_rate: f64,
 }
 
-@export const PLUGIN_VERSION: Version = Version { major: 1u32, minor: 2u32, revision: 2u32 };
+// --- lifecycle callbacks ----------------------------------------------------
+proc gain_init(p: *ClapPlugin) bool { return true; }
 
+proc gain_destroy(p: *ClapPlugin) void {
+    let self: *Gain = ptr_cast::<*Gain>(p.plugin_data);
+    dealloc::<Gain>(self);
+}
+
+proc gain_activate(p: *ClapPlugin, sr: f64, minf: u32, maxf: u32) bool {
+    let self: *Gain = ptr_cast::<*Gain>(p.plugin_data);
+    self.sample_rate = sr;
+    return true;
+}
+
+proc gain_deactivate(p: *ClapPlugin) void { }
+proc gain_start(p: *ClapPlugin) bool { return true; }
+proc gain_stop(p: *ClapPlugin) void { }
+proc gain_reset(p: *ClapPlugin) void { }
+proc gain_on_main_thread(p: *ClapPlugin) void { }
+
+// The audio callback: out[ch][i] = in[ch][i] * gain, per channel/frame.
+proc gain_process(p: *ClapPlugin, ctx: *ClapProcess) ClapProcessStatus {
+    let self: *Gain = ptr_cast::<*Gain>(p.plugin_data);
+    let g: f64 = self.gain;
+
+    let frames: u32 = ctx.frames_count;
+    let outs: *ClapAudioBuffer = ctx.audio_outputs;
+    let ins: *ClapAudioBuffer = ctx.audio_inputs;
+
+    let channels: u32 = outs.channel_count;
+    let ch: u32 = 0u32;
+    while (ch < channels) {
+        let src: *f32 = ins.data32[ch];
+        let dst: *f32 = outs.data32[ch];
+        let i: u32 = 0u32;
+        while (i < frames) {
+            dst[i] = numerical_cast::<f32>(numerical_cast::<f64>(src[i]) * g);
+            i = i + 1u32;
+        }
+        ch = ch + 1u32;
+    }
+    return ClapProcessStatus::Continue;
+}
+
+// --- audio-ports extension (1 stereo in, 1 stereo out) ----------------------
+proc gain_ap_count(p: *ClapPlugin, is_input: bool) u32 { return 1u32; }
+
+proc gain_ap_get(p: *ClapPlugin, index: u32, is_input: bool, info: *ClapAudioPortInfo) bool {
+    info.id = 0u32;
+    info.flags = CLAP_AUDIO_PORT_IS_MAIN();
+    info.channel_count = 2u32;
+    info.port_type = CLAP_PORT_STEREO();
+    info.in_place_pair = 0u32;
+    return true;
+}
+
+proc gain_audio_ports() *ClapPluginAudioPorts {
+    let ext: *ClapPluginAudioPorts = alloc::<ClapPluginAudioPorts>(1u64)
+        .expect("audio-ports ext alloc");
+    ptr_write::<ClapPluginAudioPorts>(ext, ClapPluginAudioPorts {
+        count: gain_ap_count,
+        get: gain_ap_get,
+    });
+    return ext;
+}
+
+// --- params extension (one "Gain" parameter) --------------------------------
+proc gain_params_count(p: *ClapPlugin) u32 { return 1u32; }
+
+proc gain_params_get_info(p: *ClapPlugin, idx: u32, info: *ClapParamInfo) bool {
+    info.id = 0u32;
+    info.flags = CLAP_PARAM_IS_AUTOMATABLE();
+    info.cookie = null::<*void>();
+    info.min_value = 0.0f64;
+    info.max_value = 2.0f64;
+    info.default_value = 1.0f64;
+    return true;
+}
+
+proc gain_params_get_value(p: *ClapPlugin, id: u32, out: *f64) bool {
+    let self: *Gain = ptr_cast::<*Gain>(p.plugin_data);
+    *out = self.gain;
+    return true;
+}
+
+proc gain_params_v2t(p: *ClapPlugin, id: u32, v: f64, buf: *u8, cap: u32) bool { return false; }
+proc gain_params_t2v(p: *ClapPlugin, id: u32, txt: str, out: *f64) bool { return false; }
+
+proc gain_params_flush(p: *ClapPlugin, in_ev: *ClapInputEvents, out_ev: *ClapOutputEvents) void { }
+
+proc gain_params() *ClapPluginParams {
+    let ext: *ClapPluginParams = alloc::<ClapPluginParams>(1u64).expect("params ext alloc");
+    ptr_write::<ClapPluginParams>(ext, ClapPluginParams {
+        count: gain_params_count,
+        get_info: gain_params_get_info,
+        get_value: gain_params_get_value,
+        value_to_text: gain_params_v2t,
+        text_to_value: gain_params_t2v,
+        flush: gain_params_flush,
+    });
+    return ext;
+}
+
+// get_extension: hand out the vtable whose id matches. (str compare via strcmp.)
+extern strcmp(a: str, b: str) i32;
+
+proc gain_get_extension(p: *ClapPlugin, id: str) *void {
+    if (strcmp(id, CLAP_EXT_AUDIO_PORTS()) == 0i32) {
+        return ptr_cast::<*void>(gain_audio_ports());
+    }
+    if (strcmp(id, CLAP_EXT_PARAMS()) == 0i32) {
+        return ptr_cast::<*void>(gain_params());
+    }
+    return null::<*void>();
+}
+
+// --- descriptor -------------------------------------------------------------
+// `features` is a NULL-terminated char** (CLAP walks it until a null entry).
+// haven can't yet spell a null `str` directly (null/ptr_cast reject the bare
+// `str` pointee), so we allocate the array *zeroed* via calloc: the trailing
+// unset slot is already a null pointer — exactly the terminator CLAP expects.
+extern calloc(count: u64, size: u64) *void;
+
+proc gain_features() *str {
+    let arr: *str = ptr_cast::<*str>(calloc(3u64, sizeof::<str>()));
+    arr[0] = "audio-effect";
+    arr[1] = "stereo";
+    // arr[2] stays zero -> the NULL terminator.
+    return arr;
+}
+
+proc gain_descriptor() *ClapPluginDescriptor {
+    let d: *ClapPluginDescriptor = alloc::<ClapPluginDescriptor>(1u64).expect("descriptor alloc");
+    ptr_write::<ClapPluginDescriptor>(d, ClapPluginDescriptor {
+        clap_version: clap_version_current(),
+        id: "com.haven.gain",
+        name: "Haven Gain",
+        vendor: "Haven",
+        url: "https://example.com",
+        manual_url: "",
+        support_url: "",
+        version: "1.0.0",
+        description: "A simple stereo gain.",
+        features: gain_features(),
+    });
+    return d;
+}
+
+// --- factory ----------------------------------------------------------------
+proc gain_factory_count(f: *ClapPluginFactory) u32 { return 1u32; }
+
+proc gain_factory_get_desc(f: *ClapPluginFactory, index: u32) *ClapPluginDescriptor {
+    return gain_descriptor();
+}
+
+proc gain_factory_create(f: *ClapPluginFactory, host: *ClapHost, id: str) *ClapPlugin {
+    let self: *Gain = alloc::<Gain>(1u64).expect("plugin alloc");
+    self.gain = 1.0f64;
+    self.sample_rate = 44100.0f64;
+    ptr_write::<ClapPlugin>(&self.clap_plugin, ClapPlugin {
+        desc: gain_descriptor(),
+        plugin_data: ptr_cast::<*void>(self),
+        init: gain_init,
+        destroy: gain_destroy,
+        activate: gain_activate,
+        deactivate: gain_deactivate,
+        start_processing: gain_start,
+        stop_processing: gain_stop,
+        reset: gain_reset,
+        process: gain_process,
+        get_extension: gain_get_extension,
+        on_main_thread: gain_on_main_thread,
+    });
+    return &self.clap_plugin;
+}
+
+proc gain_factory() *ClapPluginFactory {
+    let f: *ClapPluginFactory = alloc::<ClapPluginFactory>(1u64).expect("factory alloc");
+    ptr_write::<ClapPluginFactory>(f, ClapPluginFactory {
+        get_plugin_count: gain_factory_count,
+        get_plugin_descriptor: gain_factory_get_desc,
+        create_plugin: gain_factory_create,
+    });
+    return f;
+}
+
+// --- entry ------------------------------------------------------------------
+proc entry_init(path: str) bool { return true; }
+proc entry_deinit() void { }
+
+proc entry_get_factory(id: str) *void {
+    if (strcmp(id, CLAP_PLUGIN_FACTORY_ID()) == 0i32) {
+        return ptr_cast::<*void>(gain_factory());
+    }
+    return null::<*void>();
+}
+
+// THE one symbol a `.clap` must export. The host looks up "clap_entry".
+@export const clap_entry: ClapPluginEntry = ClapPluginEntry {
+    clap_version: ClapVersion { major: 1u32, minor: 2u32, revision: 2u32 },
+    init: entry_init,
+    deinit: entry_deinit,
+    get_factory: entry_get_factory,
+};
+
+// A `main` so the file also builds as an executable for a quick smoke check;
+// a real `.clap` is built with `--shared` and needs no `main`.
 @export
 proc main() i32 {
+    printf::<u64>("%llu\n", sizeof::<Gain>());
     return 0;
 }

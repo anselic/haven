@@ -1,0 +1,129 @@
+// CLAP ABI bindings — the essential plugin-side extensions.
+//   ext/stream.h, ext/audio-ports.h, ext/note-ports.h, ext/params.h,
+//   ext/state.h, ext/latency.h
+//
+// A plugin returns a pointer to a (typically static) one of these vtables from
+// its `get_extension(plugin, id)` callback when `id` matches the CLAP_EXT_*
+// string below.
+//
+// `char name[CLAP_NAME_SIZE]` fields are `[u8; 256]`; `char module[CLAP_PATH_SIZE]`
+// is `[u8; 1024]`. CLAP_NAME_SIZE = 256, CLAP_PATH_SIZE = 1024.
+
+import std/clap/plugin { ClapPlugin }
+import std/clap/events { ClapInputEvents, ClapOutputEvents }
+
+pub proc CLAP_NAME_SIZE() u64 { return 256u64; }
+pub proc CLAP_PATH_SIZE() u64 { return 1024u64; }
+
+// --- ext/stream.h ---------------------------------------------------------
+@repr(C)
+pub struct ClapIStream {
+    ctx: *void,
+    read: proc(*ClapIStream, *void, u64) i64,
+}
+
+@repr(C)
+pub struct ClapOStream {
+    ctx: *void,
+    write: proc(*ClapOStream, *void, u64) i64,
+}
+
+// --- ext/audio-ports.h ----------------------------------------------------
+pub proc CLAP_EXT_AUDIO_PORTS() str { return "clap.audio-ports"; }
+pub proc CLAP_PORT_MONO() str { return "mono"; }
+pub proc CLAP_PORT_STEREO() str { return "stereo"; }
+
+pub proc CLAP_AUDIO_PORT_IS_MAIN() u32 { return 1u32; }                     // 1 << 0
+pub proc CLAP_AUDIO_PORT_SUPPORTS_64BITS() u32 { return 2u32; }             // 1 << 1
+pub proc CLAP_AUDIO_PORT_PREFERS_64BITS() u32 { return 4u32; }              // 1 << 2
+pub proc CLAP_AUDIO_PORT_REQUIRES_COMMON_SAMPLE_SIZE() u32 { return 8u32; } // 1 << 3
+
+@repr(C)
+pub struct ClapAudioPortInfo {
+    id: u32,                 // clap_id
+    name: [u8; 256],         // char[CLAP_NAME_SIZE]
+    flags: u32,
+    channel_count: u32,
+    port_type: str,
+    in_place_pair: u32,      // clap_id
+}
+
+@repr(C)
+pub struct ClapPluginAudioPorts {
+    count: proc(*ClapPlugin, bool) u32,
+    get: proc(*ClapPlugin, u32, bool, *ClapAudioPortInfo) bool,
+}
+
+// --- ext/note-ports.h -----------------------------------------------------
+pub proc CLAP_EXT_NOTE_PORTS() str { return "clap.note-ports"; }
+
+pub proc CLAP_NOTE_DIALECT_CLAP() u32 { return 1u32; }     // 1 << 0
+pub proc CLAP_NOTE_DIALECT_MIDI() u32 { return 2u32; }     // 1 << 1
+pub proc CLAP_NOTE_DIALECT_MIDI_MPE() u32 { return 4u32; } // 1 << 2
+pub proc CLAP_NOTE_DIALECT_MIDI2() u32 { return 8u32; }    // 1 << 3
+
+@repr(C)
+pub struct ClapNotePortInfo {
+    id: u32,
+    supported_dialects: u32,
+    preferred_dialect: u32,
+    name: [u8; 256],
+}
+
+@repr(C)
+pub struct ClapPluginNotePorts {
+    count: proc(*ClapPlugin, bool) u32,
+    get: proc(*ClapPlugin, u32, bool, *ClapNotePortInfo) bool,
+}
+
+// --- ext/params.h ---------------------------------------------------------
+pub proc CLAP_EXT_PARAMS() str { return "clap.params"; }
+
+pub proc CLAP_PARAM_IS_STEPPED() u32 { return 1u32; }        // 1 << 0
+pub proc CLAP_PARAM_IS_PERIODIC() u32 { return 2u32; }       // 1 << 1
+pub proc CLAP_PARAM_IS_HIDDEN() u32 { return 4u32; }         // 1 << 2
+pub proc CLAP_PARAM_IS_READONLY() u32 { return 8u32; }       // 1 << 3
+pub proc CLAP_PARAM_IS_BYPASS() u32 { return 16u32; }        // 1 << 4
+pub proc CLAP_PARAM_IS_AUTOMATABLE() u32 { return 32u32; }   // 1 << 5
+pub proc CLAP_PARAM_IS_MODULATABLE() u32 { return 1024u32; } // 1 << 10
+pub proc CLAP_PARAM_REQUIRES_PROCESS() u32 { return 32768u32; } // 1 << 15
+pub proc CLAP_PARAM_IS_ENUM() u32 { return 65536u32; }       // 1 << 16
+
+@repr(C)
+pub struct ClapParamInfo {
+    id: u32,                 // clap_id
+    flags: u32,              // clap_param_info_flags
+    cookie: *void,
+    name: [u8; 256],         // char[CLAP_NAME_SIZE]
+    module: [u8; 1024],      // char[CLAP_PATH_SIZE]
+    min_value: f64,
+    max_value: f64,
+    default_value: f64,
+}
+
+@repr(C)
+pub struct ClapPluginParams {
+    count: proc(*ClapPlugin) u32,
+    get_info: proc(*ClapPlugin, u32, *ClapParamInfo) bool,
+    get_value: proc(*ClapPlugin, u32, *f64) bool,
+    value_to_text: proc(*ClapPlugin, u32, f64, *u8, u32) bool,
+    text_to_value: proc(*ClapPlugin, u32, str, *f64) bool,
+    flush: proc(*ClapPlugin, *ClapInputEvents, *ClapOutputEvents) void,
+}
+
+// --- ext/state.h ----------------------------------------------------------
+pub proc CLAP_EXT_STATE() str { return "clap.state"; }
+
+@repr(C)
+pub struct ClapPluginState {
+    save: proc(*ClapPlugin, *ClapOStream) bool,
+    load: proc(*ClapPlugin, *ClapIStream) bool,
+}
+
+// --- ext/latency.h --------------------------------------------------------
+pub proc CLAP_EXT_LATENCY() str { return "clap.latency"; }
+
+@repr(C)
+pub struct ClapPluginLatency {
+    get: proc(*ClapPlugin) u32,
+}
