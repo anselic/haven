@@ -131,6 +131,11 @@ fn main() {
 
             let llvm_ir_output_path = args.output.with_extension("ll");
 
+            // If the output is in a directory (that may or may not exist), create the directory first
+            if let Some(parent_dir) = llvm_ir_output_path.parent() {
+                std::fs::create_dir_all(parent_dir).expect("Failed to create output directory");
+            }
+
             std::fs::write(&llvm_ir_output_path, llvm_ir)
                 .expect("Failed to write LLVM IR to file");
 

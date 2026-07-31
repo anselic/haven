@@ -98,6 +98,55 @@ pub proc mkdir(path: str) Result<Unit, FsError> {
     return Result::Ok::<Unit, FsError>(Unit::Unit);
 }
 
+/// Create the directory `path` and any missing parents, like Rust's
+/// `fs::create_dir_all`. Components are split on `/` (the separator this project
+/// uses throughout), and each prefix is created in turn; a level that already
+/// exists as a directory is not an error, so calling it on an existing tree is a
+/// no-op. Only a genuine failure - a missing permission, a parent that is a file,
+/// etc. - yields `Err`. A leading `/` is kept (absolute paths), and repeated or
+/// trailing separators collapse away.
+pub proc mkdir_all(path: str) Result<Unit, FsError> {
+    let full: String = String::from_str(path);
+    let parts: Vec<String> = full.split(47u8);  // '/'
+    let acc: String = String::new();            // the prefix built up so far
+    let ends_sep: bool = false;                 // does `acc` already end with '/'?
+    let n: u64 = parts.len();
+    let i: u64 = 0u64;
+    while (i < n) {
+        let part: *String = parts.get_ptr(i);
+        if (part.is_empty()) {
+            // a leading empty component means an absolute path ("/..."): keep the
+            // root slash. Interior/trailing empties come from "//" or a trailing
+            // "/", and collapse away.
+            if (i == 0u64) {
+                acc.push_byte(47u8);
+                ends_sep = true;
+            }
+            i = i + 1u64;
+            continue;
+        }
+        // join onto the prefix with a separator, unless there is nothing to join
+        // to yet or one is already there.
+        if (!acc.is_empty() && !ends_sep) {
+            acc.push_byte(47u8);
+        }
+        acc.push_string(part);
+        ends_sep = false;
+        // create this prefix; an already-present directory is fine, anything else
+        // (checked via `is_dir` so we don't depend on a specific errno) is fatal.
+        match (mkdir(acc.as_str())) {
+            Result::Ok(_)  -> {}
+            Result::Err(e) -> {
+                if (!is_dir(acc.as_str())) {
+                    return Result::Err::<Unit, FsError>(e);
+                }
+            }
+        }
+        i = i + 1u64;
+    }
+    return Result::Ok::<Unit, FsError>(Unit::Unit);
+}
+
 /// Remove the file or empty directory at `path`.
 pub proc remove(path: str) Result<Unit, FsError> {
     let e: i32 = rt_fs_remove(path);

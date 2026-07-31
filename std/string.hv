@@ -113,6 +113,37 @@ pub struct String {
         return true;
     }
 
+    /// Split into segments on every occurrence of the byte `sep`, returning them
+    /// as owned `String`s. Like Rust's `str::split`, the separators are consumed
+    /// and empty segments are kept: `n` separators always yield `n + 1` segments,
+    /// so a leading/trailing `sep` produces an empty segment at that end and a run
+    /// of `sep`s produces empty segments between them. Splitting an empty String
+    /// yields a single empty segment. Each segment owns a fresh copy of its bytes.
+    proc split(*self, sep: u8) Vec<String> {
+        let result: Vec<String> = Vec::<String>::new();
+        let n: u64 = self.len();
+        let start: u64 = 0u64;
+        let i: u64 = 0u64;
+        // walk one past the end so the final segment [start, n) flushes uniformly;
+        // `||` short-circuits, so `get(i)` is never read at `i == n`.
+        while (i <= n) {
+            if (i == n || self.buf.get(i) == sep) {
+                // build this segment as a fresh local, then move it into `result`;
+                // a new binding each flush keeps the ownership pass happy.
+                let seg: String = String::new();
+                let j: u64 = start;
+                while (j < i) {
+                    seg.push_byte(self.buf.get(j));
+                    j = j + 1u64;
+                }
+                result.push(seg);
+                start = i + 1u64;
+            }
+            i = i + 1u64;
+        }
+        return result;
+    }
+
     /// A read-only pointer to the raw bytes, with no trailing NUL guaranteed -
     /// exactly `len` bytes are valid. Points into the buffer, so it is invalidated
     /// by the next mutation or free; for an empty String it is null. Pair it with
