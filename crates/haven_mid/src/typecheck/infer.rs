@@ -257,8 +257,8 @@ fn typecheck_intrinsic<'a>(
             let count_ty = infer(cx, &args[1])?;
             // any integer width: the expansion counts in whatever type it is
             // given, so a `u64` length and a `u32` one both work unconverted.
-            if !matches!(count_ty, Type::Int8 | Type::Int32 | Type::Int64
-                                 | Type::Uint8 | Type::Uint32 | Type::Uint64) {
+            if !matches!(count_ty, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+                                 | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64) {
                 return Err(Error {
                     msg: format!("{}() second argument must be an integer count, got `{}`",
                                  intrinsic, cx.show(&count_ty)),
@@ -431,9 +431,11 @@ pub(crate) fn check_expr<'a>(
     let actual = match value {
         ExprNode::Bool(_)    => Type::Bool,
         ExprNode::Int8(_)    => Type::Int8,
+        ExprNode::Int16(_)   => Type::Int16,
         ExprNode::Int32(_)   => Type::Int32,
         ExprNode::Int64(_)   => Type::Int64,
         ExprNode::Uint8(_)   => Type::Uint8,
+        ExprNode::Uint16(_)  => Type::Uint16,
         ExprNode::Uint32(_)  => Type::Uint32,
         ExprNode::Uint64(_)  => Type::Uint64,
         ExprNode::Float32(_) => Type::Float32,
@@ -491,9 +493,11 @@ fn infer<'a>(
     let ty = match value {
         ExprNode::Bool(_)    => Type::Bool,
         ExprNode::Int8(_)    => Type::Int8,
+        ExprNode::Int16(_)   => Type::Int16,
         ExprNode::Int32(_)   => Type::Int32,
         ExprNode::Int64(_)   => Type::Int64,
         ExprNode::Uint8(_)   => Type::Uint8,
+        ExprNode::Uint16(_)  => Type::Uint16,
         ExprNode::Uint32(_)  => Type::Uint32,
         ExprNode::Uint64(_)  => Type::Uint64,
         ExprNode::Float32(_) => Type::Float32,

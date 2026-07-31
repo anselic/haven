@@ -303,8 +303,8 @@ fn leaf_class(ty: &Type) -> Class {
         Type::Simd(inner, _) if inner.is_numeric() && !inner.is_integer() => Class::Sse,
         Type::Simd(_, _) => Class::Integer, // integer-lane vectors go in GP-class regs
         Type::Bool
-        | Type::Int8 | Type::Int32 | Type::Int64
-        | Type::Uint8 | Type::Uint32 | Type::Uint64
+        | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+        | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64
         | Type::Pointer(_) | Type::Function { .. } => Class::Integer,
         // A slice is a two-INTEGER-word fat pointer; FFI bans it, but classify
         // sanely. `str` is a single `*const u8`, handled as a pointer leaf below.

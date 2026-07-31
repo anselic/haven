@@ -80,13 +80,15 @@ pub(crate) fn enum_repr<'a>(attributes: &[Attribute<'a>]) -> Result<(Type<'a>, b
             return match a.value.value.as_deref() {
                 None | Some("C") | Some("i32") => Ok((Type::Int32, true)),
                 Some("i8")  => Ok((Type::Int8, true)),
+                Some("i16") => Ok((Type::Int16, true)),
                 Some("i64") => Ok((Type::Int64, true)),
                 Some("u8")  => Ok((Type::Uint8, true)),
+                Some("u16") => Ok((Type::Uint16, true)),
                 Some("u32") => Ok((Type::Uint32, true)),
                 Some("u64") => Ok((Type::Uint64, true)),
                 Some(other) => Err(format!(
                     "unknown @repr('{}') on enum; expected an integer type \
-                     (i8/i32/i64/u8/u32/u64) or C", other)),
+                     (i8/i16/i32/i64/u8/u16/u32/u64) or C", other)),
             };
         }
     }

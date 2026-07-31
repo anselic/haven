@@ -19,6 +19,13 @@ proc main() i32 {
     // float narrow/widen round-trip: f32 -> f64 -> f32 (1.5 is exact in binary)
     printf32("%f\n", numerical_cast::<f32>(numerical_cast::<f64>(1.5f32))); // 1.500000
 
+    // i16 widen/narrow round-trip: i32 -> i16 -> i32 (value fits in i16)
+    printf::<i32>("%d\n", numerical_cast::<i32>(numerical_cast::<i16>(1000i32))); // 1000
+    // i16 narrowing truncates to the low 16 bits: 70000 & 0xFFFF = 4464
+    printf::<i32>("%d\n", numerical_cast::<i32>(numerical_cast::<i16>(70000i32))); // 4464
+    // i16 -> f32
+    printf32("%f\n", numerical_cast::<f32>(numerical_cast::<i16>(12i32))); // 12.000000
+
     // compile-only coverage for the casts that have no printer:
     // unsigned and 64-bit destinations (zext / uitofp / fptoui / fptrunc).
     let a: u32 = numerical_cast::<u32>(1i32);
@@ -27,6 +34,14 @@ proc main() i32 {
     let d: u64 = numerical_cast::<u64>(4.0f64);
     let e: i64 = numerical_cast::<i64>(5u32);
     let f: f64 = numerical_cast::<f64>(6u64);
+    // 16-bit destinations (trunc / zext / uitofp / fptoui) and 8<->16 widening.
+    let g: u16 = numerical_cast::<u16>(7i32);
+    let h: i32 = numerical_cast::<i32>(8u16);
+    let i: u16 = numerical_cast::<u16>(9.0f32);
+    let j: f32 = numerical_cast::<f32>(10u16);
+    let k: i16 = numerical_cast::<i16>(11i8);
+    let l: u16 = numerical_cast::<u16>(12u8);
+    let m: i8  = numerical_cast::<i8>(13i16);
 
     return 0;
 }

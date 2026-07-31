@@ -1,6 +1,6 @@
-//@ error: unknown @repr('u16') on enum
-// haven has no 16-bit integer type, so @repr(u16) is rejected.
-@repr(u16)
+//@ error: unknown @repr('f32') on enum
+// an enum discriminant must be an integer type; a float repr is rejected.
+@repr(f32)
 enum E { A, B }
 
 @export

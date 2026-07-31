@@ -9,9 +9,11 @@ use super::ir::*;
 pub(crate) fn int_const(repr: &Type, val: i64) -> Const {
     match repr {
         Type::Int8   => Const::Int8(val as i8),
+        Type::Int16  => Const::Int16(val as i16),
         Type::Int32  => Const::Int32(val as i32),
         Type::Int64  => Const::Int64(val),
         Type::Uint8  => Const::Uint8(val as u8),
+        Type::Uint16 => Const::Uint16(val as u16),
         Type::Uint32 => Const::Uint32(val as u32),
         Type::Uint64 => Const::Uint64(val as u64),
         _ => unreachable!("non-integer enum repr {:?}", repr),

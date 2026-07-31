@@ -24,11 +24,13 @@ fn emit_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> String {
         Void => "void".to_string(),
         Bool => "i1".to_string(),
         Int8 => "i8".to_string(),
+        Int16 => "i16".to_string(),
         Int32 => "i32".to_string(),
         Int64 => "i64".to_string(),
         // LLVM just use one width for unsigned integers and rely on the
         // instructions (or us) to interpret them correctly
         Uint8 => "i8".to_string(),
+        Uint16 => "i16".to_string(),
         Uint32 => "i32".to_string(),
         Uint64 => "i64".to_string(),
         Float32 => "float".to_string(),
@@ -239,8 +241,8 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             };
 
             let is_float = matches!(inner, Type::Float32 | Type::Float64);
-            let is_signed_int = matches!(inner, Type::Int8 | Type::Int32 | Type::Int64);
-            let is_unsigned_int = matches!(inner, Type::Uint8 | Type::Uint32 | Type::Uint64);
+            let is_signed_int = matches!(inner, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64);
+            let is_unsigned_int = matches!(inner, Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64);
 
             let flags_str = if *inner == Type::Float32 || *inner == Type::Float64 {
                 format!(" {}", cx.current_fast_math_flags.to_str())
@@ -491,6 +493,43 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 (Float32, Uint8) => emitln!(cx, "    {dst} = call i8 @llvm.fptoui.sat.i8.f32(float {value})"),
                 (Float64, Int8)  => emitln!(cx, "    {dst} = call i8 @llvm.fptosi.sat.i8.f64(double {value})"),
                 (Float64, Uint8) => emitln!(cx, "    {dst} = call i8 @llvm.fptoui.sat.i8.f64(double {value})"),
+
+                // --- 16-bit integer (i16 / u16) conversions ---
+                // same 16-bit width: identity bitcast
+                (Int16, Int16) | (Int16, Uint16) | (Uint16, Int16) | (Uint16, Uint16) =>
+                    emitln!(cx, "    {dst} = bitcast i16 {} to i16", value),
+
+                // widening from 16-bit: signed source sign-extends, unsigned zero-extends
+                (Int16, Int32) | (Int16, Uint32)  => emitln!(cx, "    {dst} = sext i16 {} to i32", value),
+                (Int16, Int64) | (Int16, Uint64)  => emitln!(cx, "    {dst} = sext i16 {} to i64", value),
+                (Uint16, Int32) | (Uint16, Uint32) => emitln!(cx, "    {dst} = zext i16 {} to i32", value),
+                (Uint16, Int64) | (Uint16, Uint64) => emitln!(cx, "    {dst} = zext i16 {} to i64", value),
+
+                // widening from 8-bit to 16-bit
+                (Int8, Int16) | (Int8, Uint16)  => emitln!(cx, "    {dst} = sext i8 {} to i16", value),
+                (Uint8, Int16) | (Uint8, Uint16) => emitln!(cx, "    {dst} = zext i8 {} to i16", value),
+
+                // narrowing to 16-bit: truncate (signedness of source is irrelevant)
+                (Int32, Int16) | (Int32, Uint16) | (Uint32, Int16) | (Uint32, Uint16) =>
+                    emitln!(cx, "    {dst} = trunc i32 {} to i16", value),
+                (Int64, Int16) | (Int64, Uint16) | (Uint64, Int16) | (Uint64, Uint16) =>
+                    emitln!(cx, "    {dst} = trunc i64 {} to i16", value),
+
+                // narrowing 16-bit to 8-bit: truncate
+                (Int16, Int8) | (Int16, Uint8) | (Uint16, Int8) | (Uint16, Uint8) =>
+                    emitln!(cx, "    {dst} = trunc i16 {} to i8", value),
+
+                // 16-bit integer to float
+                (Int16, Float32)  => emitln!(cx, "    {dst} = sitofp i16 {} to float", value),
+                (Int16, Float64)  => emitln!(cx, "    {dst} = sitofp i16 {} to double", value),
+                (Uint16, Float32) => emitln!(cx, "    {dst} = uitofp i16 {} to float", value),
+                (Uint16, Float64) => emitln!(cx, "    {dst} = uitofp i16 {} to double", value),
+
+                // float to 16-bit integer (saturating, matching the other widths above)
+                (Float32, Int16)  => emitln!(cx, "    {dst} = call i16 @llvm.fptosi.sat.i16.f32(float {value})"),
+                (Float32, Uint16) => emitln!(cx, "    {dst} = call i16 @llvm.fptoui.sat.i16.f32(float {value})"),
+                (Float64, Int16)  => emitln!(cx, "    {dst} = call i16 @llvm.fptosi.sat.i16.f64(double {value})"),
+                (Float64, Uint16) => emitln!(cx, "    {dst} = call i16 @llvm.fptoui.sat.i16.f64(double {value})"),
 
                 (f, t) => unreachable!("unsupported type extension from {f:?} to {t:?}"),
             };

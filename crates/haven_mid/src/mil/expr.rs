@@ -257,9 +257,11 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
     match &expr.value {
         ExprNode::Bool(b)    => Value::Const(Const::Bool(*b)),
         ExprNode::Int8(n)    => Value::Const(Const::Int8(*n)),
+        ExprNode::Int16(n)   => Value::Const(Const::Int16(*n)),
         ExprNode::Int32(n)   => Value::Const(Const::Int32(*n)),
         ExprNode::Int64(n)   => Value::Const(Const::Int64(*n)),
         ExprNode::Uint8(n)   => Value::Const(Const::Uint8(*n)),
+        ExprNode::Uint16(n)  => Value::Const(Const::Uint16(*n)),
         ExprNode::Uint32(n)  => Value::Const(Const::Uint32(*n)),
         ExprNode::Uint64(n)  => Value::Const(Const::Uint64(*n)),
         ExprNode::Float32(n) => Value::Const(Const::Float32(*n)),

@@ -105,8 +105,8 @@ pub enum Binding<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token<'a> {
     Bool(bool),
-    Int8(i8), Int32(i32), Int64(i64),
-    Uint8(u8), Uint32(u32), Uint64(u64),
+    Int8(i8), Int16(i16), Int32(i32), Int64(i64),
+    Uint8(u8), Uint16(u16), Uint32(u32), Uint64(u64),
     Float32(f32), Float64(f64),
     Str(&'a str),
     Var(&'a str),
@@ -132,9 +132,11 @@ impl Display for Token<'_> {
         match self {
             Token::Bool(b)      => write!(f, "{}", b),
             Token::Int8(n)      => write!(f, "{}i8", n),
+            Token::Int16(n)     => write!(f, "{}i16", n),
             Token::Int32(n)     => write!(f, "{}i32", n),
             Token::Int64(n)     => write!(f, "{}i64", n),
             Token::Uint8(n)     => write!(f, "{}u8", n),
+            Token::Uint16(n)    => write!(f, "{}u16", n),
             Token::Uint32(n)    => write!(f, "{}u32", n),
             Token::Uint64(n)    => write!(f, "{}u64", n),
             Token::Float32(n)   => write!(f, "{}f32", n),
@@ -324,8 +326,8 @@ impl<'a> Display for Path<'a> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type<'a> {
     Void, Bool,
-    Int8, Int32, Int64,
-    Uint8, Uint32, Uint64,
+    Int8, Int16, Int32, Int64,
+    Uint8, Uint16, Uint32, Uint64,
     Float32, Float64,
     Function {
         params: Vec<Type<'a>>,
@@ -406,15 +408,15 @@ impl<'a> Type<'a> {
 
     pub fn is_numeric(&self) -> bool {
         matches!(self,
-            Type::Int8 | Type::Int32 | Type::Int64
-            | Type::Uint8 | Type::Uint32 | Type::Uint64
+            Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+            | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64
             | Type::Float32 | Type::Float64)
     }
 
     pub fn is_integer(&self) -> bool {
         matches!(self,
-            Type::Int8 | Type::Int32 | Type::Int64
-            | Type::Uint8 | Type::Uint32 | Type::Uint64)
+            Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+            | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64)
     }
 
     pub fn is_numeric_or_numeric_simd(&self) -> bool {
@@ -428,8 +430,8 @@ impl<'a> Display for Type<'a> {
         match self {
             Void => write!(f, "void"),
             Bool => write!(f, "bool"),
-            Uint8 => write!(f, "u8"), Uint32 => write!(f, "u32"), Uint64 => write!(f, "u64"),
-            Int8 => write!(f, "i8"), Int32 => write!(f, "i32"), Int64 => write!(f, "i64"),
+            Uint8 => write!(f, "u8"), Uint16 => write!(f, "u16"), Uint32 => write!(f, "u32"), Uint64 => write!(f, "u64"),
+            Int8 => write!(f, "i8"), Int16 => write!(f, "i16"), Int32 => write!(f, "i32"), Int64 => write!(f, "i64"),
             Float32 => write!(f, "f32"), Float64 => write!(f, "f64"),
             Function { params, return_type } => {
                 let params_str = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
@@ -563,8 +565,8 @@ impl<'a> Display for NameRef<'a> {
 #[derive(Clone, Debug)]
 pub enum ExprNode<'a> {
     Bool(bool),
-    Int8(i8), Int32(i32), Int64(i64),
-    Uint8(u8), Uint32(u32), Uint64(u64),
+    Int8(i8), Int16(i16), Int32(i32), Int64(i64),
+    Uint8(u8), Uint16(u16), Uint32(u32), Uint64(u64),
     Float32(f32), Float64(f64),
     /// String literal `"..."`. Holds the raw source text between the quotes.
     /// escape sequences are resolved later, during MIL lowering, e.g.
@@ -629,9 +631,11 @@ impl<'a> Display for ExprNode<'a> {
         match self {
             ExprNode::Bool(val) => write!(f, "{}", val),
             ExprNode::Int8(val) => write!(f, "{}i8", val),
+            ExprNode::Int16(val) => write!(f, "{}i16", val),
             ExprNode::Int32(val) => write!(f, "{}i32", val),
             ExprNode::Int64(val) => write!(f, "{}i64", val),
             ExprNode::Uint8(val) => write!(f, "{}u8", val),
+            ExprNode::Uint16(val) => write!(f, "{}u16", val),
             ExprNode::Uint32(val) => write!(f, "{}u32", val),
             ExprNode::Uint64(val) => write!(f, "{}u64", val),
             ExprNode::Float32(val) => write!(f, "{}f32", val),

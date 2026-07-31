@@ -73,6 +73,8 @@ proc i64_string(n: i64) String {
 }
 
 extend u8:  Display { proc display(*self) String { return u64_string(numerical_cast::<u64>(*self)); } }
+extend u16: Display { proc display(*self) String { return u64_string(numerical_cast::<u64>(*self)); } }
+extend i16: Display { proc display(*self) String { return i64_string(numerical_cast::<i64>(*self)); } }
 extend u32: Display { proc display(*self) String { return u64_string(numerical_cast::<u64>(*self)); } }
 extend u64: Display { proc display(*self) String { return u64_string(*self); } }
 extend i32: Display { proc display(*self) String { return i64_string(numerical_cast::<i64>(*self)); } }

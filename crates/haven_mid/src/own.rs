@@ -520,9 +520,11 @@ impl<'a, 'c> Checker<'a, 'c> {
     fn int_lit(&mut self, ty: &Type<'a>, v: u64, span: Span) -> Option<Expr<'a>> {
         let node = match ty {
             Type::Int8 => ExprNode::Int8(v as i8),
+            Type::Int16 => ExprNode::Int16(v as i16),
             Type::Int32 => ExprNode::Int32(v as i32),
             Type::Int64 => ExprNode::Int64(v as i64),
             Type::Uint8 => ExprNode::Uint8(v as u8),
+            Type::Uint16 => ExprNode::Uint16(v as u16),
             Type::Uint32 => ExprNode::Uint32(v as u32),
             Type::Uint64 => ExprNode::Uint64(v),
             _ => return None,

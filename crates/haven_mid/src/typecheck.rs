@@ -43,8 +43,8 @@ fn check_export_type<'a>(
         Type::Pointer(inner) => match &**inner {
             Type::Named { .. }
             | Type::Void | Type::Bool
-            | Type::Int8 | Type::Int32 | Type::Int64
-            | Type::Uint8 | Type::Uint32 | Type::Uint64
+            | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+            | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64
             | Type::Float32 | Type::Float64
             | Type::Str
             | Type::Pointer(_) => Ok(()),
@@ -104,8 +104,8 @@ fn check_export_type<'a>(
         }
         // these are all fine across FFI
         Type::Void | Type::Bool
-        | Type::Int8 | Type::Int32 | Type::Int64
-        | Type::Uint8 | Type::Uint32 | Type::Uint64
+        | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+        | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64
         | Type::Float32 | Type::Float64 => Ok(()),
     }
 }
@@ -118,14 +118,14 @@ fn check_export_type<'a>(
 fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), Error> {
     match &expr.value {
         ExprNode::Bool(_)
-        | ExprNode::Int8(_) | ExprNode::Int32(_) | ExprNode::Int64(_)
-        | ExprNode::Uint8(_) | ExprNode::Uint32(_) | ExprNode::Uint64(_)
+        | ExprNode::Int8(_) | ExprNode::Int16(_) | ExprNode::Int32(_) | ExprNode::Int64(_)
+        | ExprNode::Uint8(_) | ExprNode::Uint16(_) | ExprNode::Uint32(_) | ExprNode::Uint64(_)
         | ExprNode::Float32(_) | ExprNode::Float64(_) => Ok(()),
         // a negated numeric literal, e.g. `-1.0`, is still a constant
         ExprNode::Unary { op: UnaryOp::Neg, operand }
             if matches!(operand.value,
-                ExprNode::Int8(_) | ExprNode::Int32(_) | ExprNode::Int64(_)
-                | ExprNode::Uint8(_) | ExprNode::Uint32(_) | ExprNode::Uint64(_)
+                ExprNode::Int8(_) | ExprNode::Int16(_) | ExprNode::Int32(_) | ExprNode::Int64(_)
+                | ExprNode::Uint8(_) | ExprNode::Uint16(_) | ExprNode::Uint32(_) | ExprNode::Uint64(_)
                 | ExprNode::Float32(_) | ExprNode::Float64(_)) => Ok(()),
         // an `Enum::Variant` is a compile-time integer constant.
         ExprNode::Path(path) if enum_variant(cx, path).is_some() => Ok(()),

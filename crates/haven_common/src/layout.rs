@@ -71,6 +71,7 @@ pub fn size_of<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> usize {
         // C `_Bool` occupies one byte in memory even though it is `i1` in IR.
         Bool => 1,
         Int8 | Uint8 => 1,
+        Int16 | Uint16 => 2,
         Int32 | Uint32 | Float32 => 4,
         Int64 | Uint64 | Float64 => 8,
         Pointer(_) | Function { .. } => POINTER_SIZE,
@@ -106,6 +107,7 @@ pub fn align_of<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> usize {
         // Zero-sized things still need a non-zero alignment for `round_up`.
         Void | Bool => 1,
         Int8 | Uint8 => 1,
+        Int16 | Uint16 => 2,
         Int32 | Uint32 | Float32 => 4,
         Int64 | Uint64 | Float64 => 8,
         Pointer(_) | Function { .. } => POINTER_ALIGN,
