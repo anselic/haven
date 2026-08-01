@@ -557,6 +557,47 @@ fn infer<'a>(
             ty
         },
 
+        // A generic function taken by value: `foo::<Concrete>`. The turbofish
+        // fully specifies the instance, so its type is the *substituted* function
+        // signature - a plain function pointer. Monomorphization mints `foo$...`
+        // and rewrites this node to a bare `Var` of that symbol, so nothing past
+        // mono sees a `FnRef`.
+        ExprNode::FnRef { name, type_args } => {
+            let fname = name.path.as_single().ok_or_else(|| Error {
+                msg: format!("'{}' is not a function", name),
+                span: span.clone(),
+            })?;
+            let Some(sig) = cx.generic_fns.get(fname).cloned() else {
+                // a non-generic function reference carries no turbofish, so a name
+                // here that isn't a generic fn is either undefined or a plain fn
+                // wrongly given type arguments.
+                let msg = if cx.lookup(fname).is_some() {
+                    format!("'{}' is not generic and takes no type arguments", fname)
+                } else {
+                    format!("unknown function '{}'", fname)
+                };
+                return Err(Error { msg, span });
+            };
+            if type_args.len() != sig.generics.len() {
+                return Err(Error {
+                    msg: format!(
+                        "{}() expects {} generic argument{} in `::<...>`, got {}",
+                        fname, sig.generics.len(),
+                        if sig.generics.len() == 1 { "" } else { "s" }, type_args.len(),
+                    ),
+                    span,
+                });
+            }
+            let (type_bindings, const_bindings) =
+                bind_turbofish(cx, fname, &sig.generics, type_args, &span)?;
+            let params: Vec<Type<'a>> = sig.params.iter()
+                .map(|p| subst_param_type(&type_bindings, &const_bindings, p)).collect();
+            let ret = subst_param_type(&type_bindings, &const_bindings, &sig.return_type);
+            let fn_ty = Type::Function { params, return_type: Box::new(ret) };
+            cx.node_types.insert(metadata.id, fn_ty.clone());
+            fn_ty
+        },
+
         ExprNode::Slice(inner) if inner.len() == 0 => {
             return Err(Error {
                 msg: "Cannot infer type of empty slice literal".to_string(),

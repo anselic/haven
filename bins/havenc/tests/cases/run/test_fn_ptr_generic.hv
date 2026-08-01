@@ -1,0 +1,47 @@
+// A monomorphized generic function taken by value as a function pointer:
+// `foo::<T>` with no call. Covers (1) a generic fn-pointer in a const-global
+// initializer, (2) one built inside a generic body, and (3) two instantiations
+// minting distinct instances that dispatch a trait method differently.
+
+trait Node { proc value(*self) i32; }
+
+struct A { n: i32 }
+extend A: Node { proc value(*self) i32 { return self.n + 100; } }
+struct B { n: i32 }
+extend B: Node { proc value(*self) i32 { return self.n * 2; } }
+
+@repr(C)
+struct Vt { call: proc(*void) i32 }
+
+// a generic wrapper: recover the concrete type and dispatch its trait method.
+proc wrap<P: Node>(p: *void) i32 {
+    let self: *P = ptr_cast::<*P>(p);
+    return self.value();
+}
+
+// build a vtable inside a generic body (fn-pointer value position).
+proc vt_of<P: Node>() Vt {
+    return Vt { call: wrap::<P> };
+}
+
+// a plain (non-generic) callback, referenced as a const fn-pointer.
+proc plain(p: *void) i32 { return 7; }
+const CONST_VT: Vt = Vt { call: plain };
+
+// a generic fn-pointer in a *const* initializer (turbofish fully concrete).
+const A_VT: Vt = Vt { call: wrap::<A> };
+
+@export
+proc main() i32 {
+    let a: A = A { n: 5 };
+    let b: B = B { n: 5 };
+
+    printf::<i32>("const=%d\n", CONST_VT.call(ptr_cast::<*void>(&a)));   // 7
+    printf::<i32>("const-generic=%d\n", A_VT.call(ptr_cast::<*void>(&a))); // 105
+
+    let va: Vt = vt_of::<A>();
+    let vb: Vt = vt_of::<B>();
+    printf::<i32>("A=%d\n", va.call(ptr_cast::<*void>(&a)));  // 105
+    printf::<i32>("B=%d\n", vb.call(ptr_cast::<*void>(&b)));  // 10
+    return 0;
+}

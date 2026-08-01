@@ -137,6 +137,11 @@ fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), 
         ExprNode::Var(name)
             if matches!(cx.lookup(name), Some((_, Type::Function { .. })))
                 && !cx.global_consts.contains(name) => Ok(()),
+        // a generic function taken by value (`foo::<T>`): its monomorphized
+        // instance's address is a link-time constant, exactly like a bare fn name.
+        // The turbofish/arity is validated by the type pass; here we only certify
+        // constant-ness.
+        ExprNode::FnRef { .. } => Ok(()),
         // a struct literal is constant iff every field initializer is constant
         // (nested structs recurse). field names/types are checked by check_expr.
         ExprNode::Struct { fields, .. } => {

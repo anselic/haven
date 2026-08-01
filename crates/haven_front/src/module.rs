@@ -1101,6 +1101,19 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 }
                 for a in args { self.expr(a, gparams); }
             }
+            // a generic fn taken by value: resolve the name like a callee (so an
+            // imported/module-qualified generic proc collapses to its mangled
+            // template name, which typecheck/mono key on) and resolve the
+            // turbofish types. The name lives in `name.path`, rewritten in place.
+            ExprNode::FnRef { name, type_args } => {
+                let span = e.span.clone();
+                if let Some(resolved) = self.value_path(name, &span, true) {
+                    name.path = Path { segments: vec![resolved] };
+                }
+                for ga in type_args {
+                    if let GenericArg::Type(t) = ga { self.ty(t, gparams); }
+                }
+            }
             ExprNode::Struct { name, type_args, fields } => {
                 if let Some(one) = name.path.as_single() {
                     match self.scopes.types.get(one) {

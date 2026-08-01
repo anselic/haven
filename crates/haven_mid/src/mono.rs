@@ -823,6 +823,27 @@ impl<'p, 'a> Mono<'p, 'a> {
                     ExprNode::Call { func: Box::new(new_func), type_args: subst_targs, args: new_args }
                 }
             }
+            // a generic fn taken by value: mint its instance (the turbofish fully
+            // determines it) and become a bare `Var` of the mangled symbol - a
+            // function pointer. Mirrors the user-generic-call arm, minus the call.
+            ExprNode::FnRef { name, type_args } => {
+                let fname = name.path.as_single()
+                    .expect("FnRef name resolved to a single symbol");
+                let subst_targs: Vec<GenericArg<'a>> =
+                    type_args.iter().map(|ga| self.subst_targ(ga, b)).collect();
+                if self.templates.contains_key(fname) {
+                    let concrete: Vec<ConcreteArg<'a>> = subst_targs.iter().map(|ga| match ga {
+                        GenericArg::Type(t) => ConcreteArg::Type(t.clone()),
+                        GenericArg::Const(cv) => ConcreteArg::Const(cv.expect_lit()),
+                    }).collect();
+                    let mangled = self.request(fname, concrete, expr.span.clone());
+                    ExprNode::Var(mangled)
+                } else {
+                    // typecheck guarantees a generic fn here; a non-template name is
+                    // unreachable, but stay total and emit the bare name.
+                    ExprNode::Var(fname)
+                }
+            }
             ExprNode::Slice(elems) =>
                 ExprNode::Slice(elems.iter().map(|e| self.rebuild_expr(e, b)).collect()),
             ExprNode::Struct { name, type_args, fields } => {
@@ -1099,6 +1120,7 @@ pub fn monomorphize<'a>(
     // queues drain below - means those requests are picked up in the same drain.
     let mut concrete: HashMap<usize, TopLevel<'a>> = HashMap::new();
     let mut concrete_aggregates: HashMap<usize, TopLevel<'a>> = HashMap::new();
+    let mut concrete_globals: HashMap<usize, TopLevel<'a>> = HashMap::new();
     for (i, tl) in program.iter().enumerate() {
         match &tl.value {
             TopLevelNode::Function { generics, .. } if !generics.is_empty() => {} // template
@@ -1114,7 +1136,21 @@ pub fn monomorphize<'a>(
             TopLevelNode::Enum { .. } => {
                 concrete_aggregates.insert(i, m.rebuild_enum(tl, &empty));
             }
-            TopLevelNode::Extern { .. } | TopLevelNode::Global { .. } => {}
+            // a global's initializer can reference a generic fn by value
+            // (`const clap_entry = ... entry_init::<Gain> ...`); rebuild it so that
+            // reference mints its instance (seeding the drain below) and is
+            // rewritten to the mangled symbol. Globals are never generic themselves,
+            // so `empty` bindings suffice.
+            TopLevelNode::Global { name, def, is_pub, attributes, ty, value } => {
+                concrete_globals.insert(i, Metadata::new(
+                    TopLevelNode::Global {
+                        name, def: *def, is_pub: *is_pub, attributes: attributes.clone(),
+                        ty: ty.clone(), value: m.rebuild_expr(value, &empty),
+                    },
+                    tl.span.clone(),
+                ));
+            }
+            TopLevelNode::Extern { .. } => {}
             // traits emit no code; they're dropped from the monomorphized output.
             TopLevelNode::Trait { .. } => {}
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before mono"),
@@ -1346,7 +1382,8 @@ pub fn monomorphize<'a>(
             // generic-instance field types were collapsed and requested up front.
             TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } =>
                 output.push(concrete_aggregates.remove(&i).unwrap()),
-            TopLevelNode::Extern { .. } | TopLevelNode::Global { .. } => output.push(tl.clone()),
+            TopLevelNode::Global { .. } => output.push(concrete_globals.remove(&i).unwrap()),
+            TopLevelNode::Extern { .. } => output.push(tl.clone()),
             // traits emit no code and are not carried into the concrete program.
             TopLevelNode::Trait { .. } => {}
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before mono"),

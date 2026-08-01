@@ -461,6 +461,24 @@ fn parse_expr<'tks, 'src: 'tks>()
                 ),
             ),
 
+            // A generic function taken *by value* (a function pointer):
+            // `entry_init::<Gain>` with no call following. `path_of!` rewinds the
+            // trailing `::<...>`, and the call postfix above fails without a `(`,
+            // so this postfix (listed after it, same precedence) claims the bare
+            // turbofish. Only a name can carry one, so the base is always a `Path`.
+            postfix(
+                300,
+                turbofish.clone(),
+                |base: Expr<'src>, type_args, e| {
+                    let name = match base.value {
+                        ExprNode::Path(nr) => nr,
+                        // unreachable in practice: only a path can precede `::<`.
+                        _ => NameRef::new(Path { segments: Vec::new() }),
+                    };
+                    Metadata::new(ExprNode::FnRef { name, type_args }, e.span())
+                },
+            ),
+
             // Index
             postfix(
                 290,

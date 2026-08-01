@@ -275,6 +275,10 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             Value::Const(Const::GlobalStr(idx))
         }
 
+        // a generic fn reference `foo::<T>` is rewritten to a bare `Var` of the
+        // mangled instance by monomorphization, so none survives to MIL.
+        ExprNode::FnRef { .. } => unreachable!("FnRef eliminated by monomorphization"),
+
         ExprNode::Var(name) => {
             // locals/params (env) shadow module-level globals. resolution picked
             // the exact binding for this use, so shadowing is already decided.

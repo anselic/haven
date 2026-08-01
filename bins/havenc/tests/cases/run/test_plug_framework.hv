@@ -1,0 +1,120 @@
+// Drive the std/plug framework in-process like a tiny CLAP host: pull the
+// factory from the entry callback, create a plugin, query its descriptor and
+// params extension, and run `process` over a real buffer — proving the whole
+// monomorphized bridge chain (entry -> factory -> descriptor -> vtable ->
+// params -> process) works at runtime, not just that `clap_entry` links.
+
+import std/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
+import std/clap/events { ClapInputEvents, ClapOutputEvents, ClapEventHeader, ClapEventTransport }
+import std/clap/plugin {
+    ClapPlugin, ClapPluginFactory, ClapPluginDescriptor, ClapHost,
+    CLAP_PLUGIN_FACTORY_ID,
+}
+import std/clap/ext { ClapPluginParams, ClapParamInfo, CLAP_EXT_PARAMS }
+import std/plug { Plugin, FloatParam, plug_entry_get_factory }
+
+// A plugin that doubles its input (gain defaults to 2.0).
+struct Doubler { gain: f64 }
+extend Doubler: Plugin {
+    proc id(*self) str { return "com.haven.doubler"; }
+    proc name(*self) str { return "Doubler"; }
+    proc vendor(*self) str { return "Haven"; }
+    proc version(*self) str { return "1.0.0"; }
+    proc category(*self) str { return "audio-effect"; }
+    proc channels(*self) u32 { return 1u32; }
+    proc init(*self) { self.gain = 2.0f64; }
+    proc activate(*self, sample_rate: f64) { }
+    proc param_count(*self) u32 { return 1u32; }
+    proc param(*self, index: u32) FloatParam {
+        return FloatParam::new(0u32, "Gain", 0.0f64, 4.0f64, 1.0f64);
+    }
+    proc param_get(*self, id: u32) f64 { return self.gain; }
+    proc param_set(*self, id: u32, value: f64) { self.gain = value; }
+    proc process(*self, ctx: *ClapProcess) ClapProcessStatus {
+        let g: f64 = self.gain;
+        let frames: u32 = ctx.frames_count;
+        let outs: *ClapAudioBuffer = ctx.audio_outputs;
+        let ins: *ClapAudioBuffer = ctx.audio_inputs;
+        let src: *f32 = ins.data32[0];
+        let dst: *f32 = outs.data32[0];
+        let i: u32 = 0u32;
+        while (i < frames) {
+            dst[i] = numerical_cast::<f32>(numerical_cast::<f64>(src[i]) * g);
+            i = i + 1u32;
+        }
+        return ClapProcessStatus::Continue;
+    }
+}
+
+// a minimal input-event queue: zero events.
+proc ev_size(e: *ClapInputEvents) u32 { return 0u32; }
+proc ev_get(e: *ClapInputEvents, i: u32) *ClapEventHeader { return null::<*ClapEventHeader>(); }
+
+@export
+proc main() i32 {
+    // 1. get the factory through the framework entry callback.
+    let fac_raw: *void = plug_entry_get_factory::<Doubler>(CLAP_PLUGIN_FACTORY_ID);
+    let fac: *ClapPluginFactory = ptr_cast::<*ClapPluginFactory>(fac_raw);
+    printf::<u32>("plugins=%u\n", fac.get_plugin_count(fac));
+
+    // 2. descriptor metadata (queried before any instance exists).
+    let desc: *ClapPluginDescriptor = fac.get_plugin_descriptor(fac, 0u32);
+    println(desc.id);
+    println(desc.name);
+
+    // 3. create a plugin instance.
+    let host: *ClapHost = null::<*ClapHost>();
+    let plug: *ClapPlugin = fac.create_plugin(fac, host, desc.id);
+    if (!plug.init(plug)) { return 1; }
+
+    // 4. params extension: count, info, current value.
+    let pex_raw: *void = plug.get_extension(plug, CLAP_EXT_PARAMS);
+    let pex: *ClapPluginParams = ptr_cast::<*ClapPluginParams>(pex_raw);
+    printf::<u32>("params=%u\n", pex.count(plug));
+    let val: f64 = 0.0f64;
+    if (pex.get_value(plug, 0u32, &val)) {
+        printf::<i32>("gain=%d\n", numerical_cast::<i32>(val));
+    }
+
+    // 5. run process over a 4-sample mono buffer; expect each sample doubled.
+    let inbuf: [f32; 4] = [1.0f32, 2.0f32, 3.0f32, 4.0f32];
+    let outbuf: [f32; 4] = [0.0f32, 0.0f32, 0.0f32, 0.0f32];
+    let inch: [*f32; 1] = [&inbuf[0]];
+    let outch: [*f32; 1] = [&outbuf[0]];
+    let inab: ClapAudioBuffer = ClapAudioBuffer {
+        data32: &inch[0], data64: null::<**f64>(),
+        channel_count: 1u32, latency: 0u32, constant_mask: 0u64,
+    };
+    let outab: ClapAudioBuffer = ClapAudioBuffer {
+        data32: &outch[0], data64: null::<**f64>(),
+        channel_count: 1u32, latency: 0u32, constant_mask: 0u64,
+    };
+    let inev: ClapInputEvents = ClapInputEvents {
+        ctx: null::<*void>(), size: ev_size, get: ev_get,
+    };
+    let ctx: ClapProcess = ClapProcess {
+        steady_time: 0i64,
+        frames_count: 4u32,
+        transport: null::<*ClapEventTransport>(),
+        audio_inputs: &inab,
+        audio_outputs: &outab,
+        audio_inputs_count: 1u32,
+        audio_outputs_count: 1u32,
+        in_events: &inev,
+        out_events: null::<*ClapOutputEvents>(),
+    };
+
+    match (plug.process(plug, &ctx)) {
+        ClapProcessStatus::Continue -> { println("continue"); }
+        _ -> { println("other"); }
+    }
+
+    let j: u32 = 0u32;
+    while (j < 4u32) {
+        printf::<i32>("out=%d\n", numerical_cast::<i32>(outbuf[j]));
+        j = j + 1u32;
+    }
+
+    plug.destroy(plug);
+    return 0;
+}

@@ -624,6 +624,17 @@ pub enum ExprNode<'a> {
         type_args: Vec<GenericArg<'a>>,
         args: Vec<Expr<'a>>,
     },
+    /// A reference to a generic function *as a value* (a function pointer),
+    /// carrying its turbofish but no call: `entry_init::<Gain>`. The turbofish
+    /// fully determines the instance, so monomorphization mints it and rewrites
+    /// this node to a plain `Var(mangled_symbol)` - no `FnRef` survives past mono,
+    /// which is why the later passes (own/safecheck/mil) need no arm for it. A
+    /// *non*-generic function taken by value stays a bare `Var`/`Path`, as before;
+    /// this node exists only to carry the type arguments a bare name cannot.
+    FnRef {
+        name: NameRef<'a>,
+        type_args: Vec<GenericArg<'a>>,
+    },
 }
 
 impl<'a> Display for ExprNode<'a> {
@@ -680,6 +691,14 @@ impl<'a> Display for ExprNode<'a> {
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "{}{}({})", func.value, turbofish, args_str)
+            }
+            ExprNode::FnRef { name, type_args } => {
+                let turbofish = if type_args.is_empty() {
+                    String::new()
+                } else {
+                    format!("::<{}>", type_args.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "))
+                };
+                write!(f, "{}{}", name, turbofish)
             }
         }
     }
