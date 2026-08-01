@@ -17,26 +17,26 @@ pub struct ClapEventHeader {
 
 // The core event space. An event's `space_id` must equal this to be a core
 // (note/param/transport/midi) event.
-pub proc CLAP_CORE_EVENT_SPACE_ID() u16 { return 0u16; }
+pub const CLAP_CORE_EVENT_SPACE_ID: u16 = 0u16;
 
 // clap_event_type
-pub proc CLAP_EVENT_NOTE_ON() u16 { return 0u16; }
-pub proc CLAP_EVENT_NOTE_OFF() u16 { return 1u16; }
-pub proc CLAP_EVENT_NOTE_CHOKE() u16 { return 2u16; }
-pub proc CLAP_EVENT_NOTE_END() u16 { return 3u16; }
-pub proc CLAP_EVENT_NOTE_EXPRESSION() u16 { return 4u16; }
-pub proc CLAP_EVENT_PARAM_VALUE() u16 { return 5u16; }
-pub proc CLAP_EVENT_PARAM_MOD() u16 { return 6u16; }
-pub proc CLAP_EVENT_PARAM_GESTURE_BEGIN() u16 { return 7u16; }
-pub proc CLAP_EVENT_PARAM_GESTURE_END() u16 { return 8u16; }
-pub proc CLAP_EVENT_TRANSPORT() u16 { return 9u16; }
-pub proc CLAP_EVENT_MIDI() u16 { return 10u16; }
-pub proc CLAP_EVENT_MIDI_SYSEX() u16 { return 11u16; }
-pub proc CLAP_EVENT_MIDI2() u16 { return 12u16; }
+pub const CLAP_EVENT_NOTE_ON: u16 = 0u16;
+pub const CLAP_EVENT_NOTE_OFF: u16 = 1u16;
+pub const CLAP_EVENT_NOTE_CHOKE: u16 = 2u16;
+pub const CLAP_EVENT_NOTE_END: u16 = 3u16;
+pub const CLAP_EVENT_NOTE_EXPRESSION: u16 = 4u16;
+pub const CLAP_EVENT_PARAM_VALUE: u16 = 5u16;
+pub const CLAP_EVENT_PARAM_MOD: u16 = 6u16;
+pub const CLAP_EVENT_PARAM_GESTURE_BEGIN: u16 = 7u16;
+pub const CLAP_EVENT_PARAM_GESTURE_END: u16 = 8u16;
+pub const CLAP_EVENT_TRANSPORT: u16 = 9u16;
+pub const CLAP_EVENT_MIDI: u16 = 10u16;
+pub const CLAP_EVENT_MIDI_SYSEX: u16 = 11u16;
+pub const CLAP_EVENT_MIDI2: u16 = 12u16;
 
 // clap_event_flags
-pub proc CLAP_EVENT_IS_LIVE() u32 { return 1u32; }     // 1 << 0
-pub proc CLAP_EVENT_DONT_RECORD() u32 { return 2u32; } // 1 << 1
+pub const CLAP_EVENT_IS_LIVE: u32 = 1u32;     // 1 << 0
+pub const CLAP_EVENT_DONT_RECORD: u32 = 2u32; // 1 << 1
 
 // typedef struct clap_event_note — note on/off/choke/end.
 @repr(C)
@@ -96,18 +96,18 @@ pub struct ClapEventTransport {
 }
 
 // clap_transport flags
-pub proc CLAP_TRANSPORT_HAS_TEMPO() u32 { return 1u32; }          // 1 << 0
-pub proc CLAP_TRANSPORT_HAS_BEATS_TIMELINE() u32 { return 2u32; } // 1 << 1
-pub proc CLAP_TRANSPORT_HAS_SECONDS_TIMELINE() u32 { return 4u32; }
-pub proc CLAP_TRANSPORT_HAS_TIME_SIGNATURE() u32 { return 8u32; }
-pub proc CLAP_TRANSPORT_IS_PLAYING() u32 { return 16u32; }        // 1 << 4
-pub proc CLAP_TRANSPORT_IS_RECORDING() u32 { return 32u32; }
-pub proc CLAP_TRANSPORT_IS_LOOP_ACTIVE() u32 { return 64u32; }
-pub proc CLAP_TRANSPORT_IS_WITHIN_PRE_ROLL() u32 { return 128u32; }
+pub const CLAP_TRANSPORT_HAS_TEMPO: u32 = 1u32;          // 1 << 0
+pub const CLAP_TRANSPORT_HAS_BEATS_TIMELINE: u32 = 2u32; // 1 << 1
+pub const CLAP_TRANSPORT_HAS_SECONDS_TIMELINE: u32 = 4u32;
+pub const CLAP_TRANSPORT_HAS_TIME_SIGNATURE: u32 = 8u32;
+pub const CLAP_TRANSPORT_IS_PLAYING: u32 = 16u32;        // 1 << 4
+pub const CLAP_TRANSPORT_IS_RECORDING: u32 = 32u32;
+pub const CLAP_TRANSPORT_IS_LOOP_ACTIVE: u32 = 64u32;
+pub const CLAP_TRANSPORT_IS_WITHIN_PRE_ROLL: u32 = 128u32;
 
 // clap_beattime / clap_sectime fixed-point factor (1 << 31).
-pub proc CLAP_BEATTIME_FACTOR() i64 { return 2147483648i64; }
-pub proc CLAP_SECTIME_FACTOR() i64 { return 2147483648i64; }
+pub const CLAP_BEATTIME_FACTOR: i64 = 2147483648i64;
+pub const CLAP_SECTIME_FACTOR: i64 = 2147483648i64;
 
 // typedef struct clap_input_events — the host's ordered input event queue.
 @repr(C)

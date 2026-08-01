@@ -115,7 +115,8 @@ pub enum TyConstraint {
     /// A numeric scalar (`iN`/`uN`/`fN`) - also exactly the set of valid SIMD
     /// element types.
     Numeric,
-    /// Any pointer type (`*T`). Used by `ptr_cast`.
+    /// Any pointer type: `*T`, or `str` (a raw `const char*`). Used by
+    /// `null`/`ptr_cast`.
     Pointer,
 }
 

@@ -1,0 +1,46 @@
+// Regression: a top-level `const str` global (its initializer is the address of
+// a read-only blob, a link-time constant), plus `null::<str>()` and `ptr_cast`
+// treating `str` as the raw `const char*` it is (both directions).
+
+import std/alloc { alloc, dealloc }
+
+extern strlen(s: str) u64;
+
+// a `str` initializer in a const global — previously rejected as non-constant.
+const GREETING: str = "hello, world";
+
+// a const of a struct that *contains* a str field, to prove nested lowering.
+@repr(C)
+struct Named { id: u32, label: str }
+const THING: Named = Named { id: 7u32, label: "widget" };
+
+// walk a NULL-terminated char** (built with `null::<str>()`) and count entries —
+// exactly how a CLAP `features` list is consumed.
+proc count_until_null(arr: *str) u32 {
+    let n: u32 = 0u32;
+    while (ptr_cast::<*void>(arr[n]) != null::<*void>()) {
+        n = n + 1u32;
+    }
+    return n;
+}
+
+@export
+proc main() i32 {
+    println(GREETING);
+    printf::<u32>("id=%u\n", THING.id);
+    println(THING.label);
+
+    // a null-terminated list: two entries then a null `str`.
+    let arr: *str = alloc::<str>(3u64).expect("arr");
+    arr[0] = "audio-effect";
+    arr[1] = "stereo";
+    arr[2] = null::<str>();
+    printf::<u32>("count=%u\n", count_until_null(arr));
+    dealloc::<str>(arr);
+
+    // str -> *u8 -> str round trip; strlen proves the pointer survived intact.
+    let raw: *u8 = ptr_cast::<*u8>(GREETING);
+    let back: str = ptr_cast::<str>(raw);
+    printf::<u64>("len=%llu\n", strlen(back));
+    return 0;
+}

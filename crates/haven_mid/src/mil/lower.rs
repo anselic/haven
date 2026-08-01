@@ -402,6 +402,10 @@ fn lower_const_init<'a>(
         ExprNode::Uint64(n)  => ConstInit::Scalar(Const::Uint64(*n)),
         ExprNode::Float32(f) => ConstInit::Scalar(Const::Float32(*f)),
         ExprNode::Float64(f) => ConstInit::Scalar(Const::Float64(*f)),
+        // a string literal: intern the blob and take its address (`@.str.N`), a
+        // link-time-constant `ptr` - the same value `ExprNode::Str` lowers to in
+        // expression position.
+        ExprNode::Str(s) => ConstInit::Scalar(Const::GlobalStr(cx.intern_string(s))),
         ExprNode::Unary { op: UnaryOp::Neg, operand } => match &operand.value {
             ExprNode::Int8(n)    => ConstInit::Scalar(Const::Int8(-*n)),
             ExprNode::Int16(n)   => ConstInit::Scalar(Const::Int16(-*n)),

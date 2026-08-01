@@ -232,7 +232,8 @@ fn typecheck_intrinsic<'a>(
             // by bind_generics) is the result type, the argument must be a pointer
             let target_ty = tys[0].clone();
             let value_ty = infer(cx, &args[0])?;
-            if !matches!(value_ty, Type::Pointer(_)) {
+            // `str` is a raw pointer too, so it may be reinterpreted like any other.
+            if !matches!(value_ty, Type::Pointer(_) | Type::Str) {
                 return Err(Error {
                     msg: format!("ptr_cast() argument must be a pointer, got {}", cx.show(&value_ty)),
                     span,

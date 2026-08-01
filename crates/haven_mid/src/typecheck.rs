@@ -121,6 +121,9 @@ fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), 
         | ExprNode::Int8(_) | ExprNode::Int16(_) | ExprNode::Int32(_) | ExprNode::Int64(_)
         | ExprNode::Uint8(_) | ExprNode::Uint16(_) | ExprNode::Uint32(_) | ExprNode::Uint64(_)
         | ExprNode::Float32(_) | ExprNode::Float64(_) => Ok(()),
+        // a string literal is the address of a read-only global blob (`@.str.N`),
+        // a link-time constant - exactly like a function's address below.
+        ExprNode::Str(_) => Ok(()),
         // a negated numeric literal, e.g. `-1.0`, is still a constant
         ExprNode::Unary { op: UnaryOp::Neg, operand }
             if matches!(operand.value,
@@ -150,7 +153,7 @@ fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), 
             Ok(())
         }
         _ => Err(Error {
-            msg: "global initializer must be a constant (a literal, a struct/array literal of constants, or a function name)".into(),
+            msg: "global initializer must be a constant (a literal, a string, a struct/array literal of constants, or a function name)".into(),
             span: expr.span.clone(),
         }),
     }

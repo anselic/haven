@@ -59,7 +59,7 @@ pub struct ClapPlugin {
 }
 
 // factory/plugin-factory.h
-pub proc CLAP_PLUGIN_FACTORY_ID() str { return "clap.plugin-factory"; }
+pub const CLAP_PLUGIN_FACTORY_ID: str = "clap.plugin-factory";
 
 // typedef struct clap_plugin_factory — enumerates and instantiates plugins.
 @repr(C)

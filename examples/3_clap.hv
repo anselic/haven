@@ -84,9 +84,9 @@ proc gain_ap_count(p: *ClapPlugin, is_input: bool) u32 { return 1u32; }
 
 proc gain_ap_get(p: *ClapPlugin, index: u32, is_input: bool, info: *ClapAudioPortInfo) bool {
     info.id = 0u32;
-    info.flags = CLAP_AUDIO_PORT_IS_MAIN();
+    info.flags = CLAP_AUDIO_PORT_IS_MAIN;
     info.channel_count = 2u32;
-    info.port_type = CLAP_PORT_STEREO();
+    info.port_type = CLAP_PORT_STEREO;
     info.in_place_pair = 0u32;
     return true;
 }
@@ -106,7 +106,7 @@ proc gain_params_count(p: *ClapPlugin) u32 { return 1u32; }
 
 proc gain_params_get_info(p: *ClapPlugin, idx: u32, info: *ClapParamInfo) bool {
     info.id = 0u32;
-    info.flags = CLAP_PARAM_IS_AUTOMATABLE();
+    info.flags = CLAP_PARAM_IS_AUTOMATABLE;
     info.cookie = null::<*void>();
     info.min_value = 0.0f64;
     info.max_value = 2.0f64;
@@ -142,27 +142,23 @@ proc gain_params() *ClapPluginParams {
 extern strcmp(a: str, b: str) i32;
 
 proc gain_get_extension(p: *ClapPlugin, id: str) *void {
-    if (strcmp(id, CLAP_EXT_AUDIO_PORTS()) == 0i32) {
+    if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0i32) {
         return ptr_cast::<*void>(gain_audio_ports());
     }
-    if (strcmp(id, CLAP_EXT_PARAMS()) == 0i32) {
+    if (strcmp(id, CLAP_EXT_PARAMS) == 0i32) {
         return ptr_cast::<*void>(gain_params());
     }
     return null::<*void>();
 }
 
 // --- descriptor -------------------------------------------------------------
-// `features` is a NULL-terminated char** (CLAP walks it until a null entry).
-// haven can't yet spell a null `str` directly (null/ptr_cast reject the bare
-// `str` pointee), so we allocate the array *zeroed* via calloc: the trailing
-// unset slot is already a null pointer — exactly the terminator CLAP expects.
-extern calloc(count: u64, size: u64) *void;
-
+// `features` is a NULL-terminated char** (CLAP walks it until a null entry), so
+// the last slot is an explicit null `str`.
 proc gain_features() *str {
-    let arr: *str = ptr_cast::<*str>(calloc(3u64, sizeof::<str>()));
+    let arr: *str = alloc::<str>(3u64).expect("features alloc");
     arr[0] = "audio-effect";
     arr[1] = "stereo";
-    // arr[2] stays zero -> the NULL terminator.
+    arr[2] = null::<str>();   // the NULL terminator
     return arr;
 }
 
@@ -226,7 +222,7 @@ proc entry_init(path: str) bool { return true; }
 proc entry_deinit() void { }
 
 proc entry_get_factory(id: str) *void {
-    if (strcmp(id, CLAP_PLUGIN_FACTORY_ID()) == 0i32) {
+    if (strcmp(id, CLAP_PLUGIN_FACTORY_ID) == 0i32) {
         return ptr_cast::<*void>(gain_factory());
     }
     return null::<*void>();

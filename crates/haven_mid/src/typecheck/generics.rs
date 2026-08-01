@@ -31,7 +31,10 @@ fn check_type_arg<'a>(
             }
         }
         TyConstraint::Pointer => {
-            if !matches!(ty, Type::Pointer(_) | Type::Param(_)) {
+            // `str` is a raw `const char*` - a single machine pointer - so it is a
+            // valid pointer type for `null`/`ptr_cast` (e.g. a null C string, or
+            // casting a `*u8` to `str` and back).
+            if !matches!(ty, Type::Pointer(_) | Type::Param(_) | Type::Str) {
                 return Err(Error {
                     msg: format!("{}() expects a pointer type, got `{}`", intrinsic, cx.show(&ty)),
                     span: span.clone(),
