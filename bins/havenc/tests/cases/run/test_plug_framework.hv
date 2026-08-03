@@ -26,7 +26,7 @@ extend Doubler: Plugin {
     proc param(index: u32) FloatParam {
         return FloatParam::new(0u32, "Gain", 0.0f64, 4.0f64, 1.0f64);
     }
-    proc new() Doubler { return Doubler { gain: 2.0f64 }; }
+    proc new() Self { return Self { gain: 2.0f64 }; }
     proc activate(*self, sample_rate: f64) { }
     proc param_get(*self, id: u32) f64 { return self.gain; }
     proc param_set(*self, id: u32, value: f64) { self.gain = value; }

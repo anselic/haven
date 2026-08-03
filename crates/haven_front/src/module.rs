@@ -545,6 +545,145 @@ fn target_key(ty: &Type<'_>) -> String {
     }
 }
 
+/// Rewrite every `Self` written inside a desugared `extend` method to the block's
+/// target type. `extend` is desugared before name resolution, so `Self` is still
+/// a plain single-segment `Path` (in type position) or path head (in expression
+/// position), and the target is the type exactly as written after `extend`. After
+/// this runs the synthesized free function names the concrete type only, so name
+/// resolution and typecheck treat it like any hand-written function.
+///
+/// Without it, `Self` survives resolution as an unbound `Type::Param("Self")`
+/// (which has no definition), and a method like `proc new() Self` fails to unify
+/// its concrete `return` value against that opaque param. The receiver's own
+/// `self` type is handled separately at desugar time; this covers every *other*
+/// occurrence: return/param types, `let x: Self`, turbofish (`null::<Self>()`),
+/// `Self { .. }` struct literals, and `Self::assoc()` paths.
+///
+/// `head` is the target's path (its segments replace a leading `Self` in an
+/// expression path); it is `None` when the target is not a nominal path (a
+/// primitive, slice, or pointer), for which an expression-position `Self` is
+/// meaningless anyway — type positions are still substituted with the full type.
+fn self_subst_type<'a>(ty: &mut Type<'a>, target: &Type<'a>) {
+    match ty {
+        Type::Path { path, args } => {
+            if path.segments.as_slice() == ["Self"] {
+                *ty = target.clone();
+                return;
+            }
+            for a in args {
+                if let GenericArg::Type(t) = a { self_subst_type(t, target); }
+            }
+        }
+        Type::Pointer(inner) | Type::Slice(inner) => self_subst_type(inner, target),
+        Type::Array(inner, _) | Type::Simd(inner, _) => self_subst_type(inner, target),
+        Type::Function { params, return_type } => {
+            for p in params { self_subst_type(p, target); }
+            self_subst_type(return_type, target);
+        }
+        _ => {}
+    }
+}
+
+fn self_subst_args<'a>(args: &mut [GenericArg<'a>], target: &Type<'a>) {
+    for a in args {
+        if let GenericArg::Type(t) = a { self_subst_type(t, target); }
+    }
+}
+
+/// Replace a leading `Self` segment of an expression/pattern path with the
+/// target's segments, so `Self { .. }` becomes `Gain { .. }` and `Self::make()`
+/// becomes `Gain::make()`. A no-op when the head isn't `Self` or the target has
+/// no path form.
+fn self_subst_head<'a>(path: &mut Path<'a>, head: Option<&Path<'a>>) {
+    if path.segments.first() == Some(&"Self") {
+        if let Some(h) = head {
+            let mut segs = h.segments.clone();
+            segs.extend_from_slice(&path.segments[1..]);
+            path.segments = segs;
+        }
+    }
+}
+
+fn self_subst_expr<'a>(e: &mut Expr<'a>, target: &Type<'a>, head: Option<&Path<'a>>) {
+    match &mut e.value {
+        ExprNode::Path(nr) => self_subst_head(&mut nr.path, head),
+        ExprNode::Struct { name, type_args, fields } => {
+            self_subst_head(&mut name.path, head);
+            self_subst_args(type_args, target);
+            for (_, v) in fields { self_subst_expr(v, target, head); }
+        }
+        ExprNode::FnRef { name, type_args } => {
+            self_subst_head(&mut name.path, head);
+            self_subst_args(type_args, target);
+        }
+        ExprNode::Call { func, type_args, args } => {
+            self_subst_expr(func, target, head);
+            self_subst_args(type_args, target);
+            for a in args { self_subst_expr(a, target, head); }
+        }
+        ExprNode::Slice(elems) => for el in elems { self_subst_expr(el, target, head); },
+        ExprNode::Access { base, .. } => self_subst_expr(base, target, head),
+        ExprNode::Index { slice, index } => {
+            self_subst_expr(slice, target, head);
+            self_subst_expr(index, target, head);
+        }
+        ExprNode::Unary { operand, .. } => self_subst_expr(operand, target, head),
+        ExprNode::Binary { left, right, .. } => {
+            self_subst_expr(left, target, head);
+            self_subst_expr(right, target, head);
+        }
+        _ => {}
+    }
+}
+
+fn self_subst_pat<'a>(p: &mut Pattern<'a>, head: Option<&Path<'a>>) {
+    match &mut p.value {
+        PatternNode::Path(nr) => self_subst_head(&mut nr.path, head),
+        PatternNode::Variant { path, fields } => {
+            self_subst_head(&mut path.path, head);
+            for f in fields { self_subst_pat(f, head); }
+        }
+        PatternNode::StructVariant { path, fields } => {
+            self_subst_head(&mut path.path, head);
+            for (_, f) in fields { self_subst_pat(f, head); }
+        }
+        _ => {}
+    }
+}
+
+fn self_subst_stmt<'a>(s: &mut Stmt<'a>, target: &Type<'a>, head: Option<&Path<'a>>) {
+    match &mut s.value {
+        StmtNode::Expr(e) => self_subst_expr(e, target, head),
+        StmtNode::Block(stmts) => for st in stmts { self_subst_stmt(st, target, head); },
+        StmtNode::Declare { ty, value, .. } => {
+            self_subst_type(ty, target);
+            self_subst_expr(value, target, head);
+        }
+        StmtNode::Assign { left, value } => {
+            self_subst_expr(left, target, head);
+            self_subst_expr(value, target, head);
+        }
+        StmtNode::If { condition, then_branch, else_branch } => {
+            self_subst_expr(condition, target, head);
+            self_subst_stmt(then_branch, target, head);
+            if let Some(e) = else_branch { self_subst_stmt(e, target, head); }
+        }
+        StmtNode::While { condition, body } => {
+            self_subst_expr(condition, target, head);
+            self_subst_stmt(body, target, head);
+        }
+        StmtNode::Match { scrutinee, arms } => {
+            self_subst_expr(scrutinee, target, head);
+            for (pat, body) in arms {
+                self_subst_pat(pat, head);
+                self_subst_stmt(body, target, head);
+            }
+        }
+        StmtNode::Return(e) => self_subst_expr(e, target, head),
+        StmtNode::Continue | StmtNode::Break => {}
+    }
+}
+
 fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
     -> (Vec<Error>, Vec<RawImpl<'a>>, Vec<RawMethod<'a>>)
 {
@@ -597,6 +736,20 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 Receiver::Pointer => params.push(("self", Type::Pointer(Box::new(self_ty)))),
             }
             params.extend(mnode.params.iter().cloned());
+            // rewrite every `Self` in the (non-receiver) param types, the return
+            // type, and the body to the concrete target, so the synthesized free
+            // function mentions no `Self`. `head` lets an expression-position
+            // `Self` (`Self { .. }`, `Self::make()`) take the target's path; it is
+            // `None` for a non-nominal target, where only type positions apply.
+            let head = match target {
+                Type::Path { path, .. } => Some(path),
+                _ => None,
+            };
+            for (_, pty) in params.iter_mut() { self_subst_type(pty, target); }
+            let mut return_type = mnode.return_type.clone();
+            self_subst_type(&mut return_type, target);
+            let mut body = mnode.body.clone();
+            for st in body.iter_mut() { self_subst_stmt(st, target, head); }
             // the synthesized name only has to be unique within the module - it is
             // never reconstructed by a consumer, since the member record below is
             // what makes this method findable.
@@ -625,8 +778,8 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                     // the impl's own parameters are prepended in `load_and_merge`.
                     generics: mnode.generics.clone(),
                     params,
-                    return_type: mnode.return_type.clone(),
-                    body: mnode.body.clone(),
+                    return_type,
+                    body,
                 },
                 m.span.clone(),
             ));

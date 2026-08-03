@@ -33,10 +33,9 @@ extend Gain: Plugin {
     proc param(index: u32) FloatParam {
         return FloatParam::new(0u32, "Gain", 0.0f64, 2.0f64, 1.0f64);
     }
-    // construct fresh state (the return is spelled `Gain`, not `Self`, since
-    // `Self` in a method body isn't substituted yet).
-    proc new() Gain {
-        return Gain { gain: 1.0f64, sample_rate: 44100.0f64 };
+    // construct fresh state (`Self` in a method body resolves to `Gain`).
+    proc new() Self {
+        return Self { gain: 1.0f64, sample_rate: 44100.0f64 };
     }
 
     // --- live state (self) ---

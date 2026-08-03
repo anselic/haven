@@ -1,0 +1,38 @@
+// `Self` inside an `extend` method body/signature now resolves to the target
+// type. Exercises every position it can appear: an associated `new() Self`
+// returning a `Self { .. }` literal, a `let x: Self` annotation, a `Self::make()`
+// associated-call, a turbofish `sizeof::<Self>()`, and a param typed `Self`.
+
+struct Vec2 { x: i32, y: i32 }
+
+extend Vec2 {
+    // associated constructor: return type + struct literal both spelled `Self`.
+    proc make(x: i32, y: i32) Self {
+        return Self { x: x, y: y };
+    }
+    // another associated fn that builds via `Self::make` and a `let x: Self`.
+    proc zero() Self {
+        let v: Self = Self::make(0, 0);
+        return v;
+    }
+    // instance method taking another `Self` by value + a turbofish `Self`.
+    proc add(*self, other: Self) Vec2 {
+        let n: u64 = sizeof::<Self>();
+        return Self::make(self.x + other.x + numerical_cast::<i32>(n) - numerical_cast::<i32>(n),
+                          self.y + other.y);
+    }
+}
+
+@export
+proc main() i32 {
+    let a: Vec2 = Vec2::make(3, 4);
+    let b: Vec2 = Vec2::zero();
+    let c: Vec2 = a.add(Vec2::make(10, 20));
+    printf::<i32>("a.x=%d\n", a.x);
+    printf::<i32>("a.y=%d\n", a.y);
+    printf::<i32>("b.x=%d\n", b.x);
+    printf::<i32>("b.y=%d\n", b.y);
+    printf::<i32>("c.x=%d\n", c.x);
+    printf::<i32>("c.y=%d\n", c.y);
+    return 0;
+}

@@ -51,8 +51,8 @@ pub struct FloatParam {
     default: f64,
 }
 extend FloatParam {
-    pub proc new(id: u32, name: str, min: f64, max: f64, default: f64) FloatParam {
-        return FloatParam { id: id, name: name, min: min, max: max, default: default };
+    pub proc new(id: u32, name: str, min: f64, max: f64, default: f64) Self {
+        return Self { id: id, name: name, min: min, max: max, default: default };
     }
     // map a plain value to the host's normalized [0, 1] domain and back.
     pub proc normalize(*self, v: f64) f64 { return (v - self.min) / (self.max - self.min); }
