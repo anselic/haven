@@ -1,0 +1,9 @@
+// An associated call through a type parameter whose bound does not provide it
+// (here the param is unbounded) is an error.
+//
+//@ error: no associated function 'a' on type parameter 'P'
+
+proc f<P>() str { return P::a(); }
+
+@export
+proc main() i32 { return 0; }

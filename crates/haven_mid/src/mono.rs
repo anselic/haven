@@ -791,7 +791,36 @@ impl<'p, 'a> Mono<'p, 'a> {
                         ExprNode::Call { func: Box::new(new_func), type_args: subst_targs, args: new_args }
                     }
                 } else if let ExprNode::Path(path) = &func.value {
-                    if self.enum_templates.contains_key(&path.def) {
+                    if path.path.segments.len() == 2 && b.types.contains_key(path.path.segments[0]) {
+                        // an associated call through a type param, `P::new(args)`:
+                        // substitute `P` to the concrete type and re-mangle to that
+                        // type's associated function (`Gain$new`). The typechecker
+                        // already validated it dispatches through `P`'s bound.
+                        let subst = self.subst_ty(&Type::Param(path.path.segments[0]), b);
+                        let concrete = self.deinstance(&subst);
+                        let (m, u, _) = member_of(&self.members, &concrete, path.path.segments[1])
+                            .expect("bounded associated fn resolves after substitution");
+                        // an associated fn on a *generic* impl is itself a template
+                        // (its instance carries the impl's bound params); a concrete
+                        // impl's is already a final symbol.
+                        let name = if self.templates.contains_key(m.name) {
+                            let cargs: Vec<ConcreteArg<'a>> = m.generics.iter().map(|g| match g {
+                                GenericParam::Type { name, .. } => ConcreteArg::Type(
+                                    self.subst_ty(u.types.get(name)
+                                        .expect("impl param bound by unification"), &Bindings::empty())),
+                                GenericParam::Const(name, _) => ConcreteArg::Const(
+                                    u.consts.get(name).expect("impl const bound").expect_lit()),
+                            }).collect();
+                            self.request(m.name, cargs, expr.span.clone())
+                        } else {
+                            m.name
+                        };
+                        ExprNode::Call {
+                            func: Box::new(Metadata::new(ExprNode::Var(name), func.span.clone())),
+                            type_args: Vec::new(),
+                            args: new_args,
+                        }
+                    } else if self.enum_templates.contains_key(&path.def) {
                         // a generic-enum tuple/unit variant constructor with
                         // turbofish (`Option::Some::<i32>(5)`, `Option::None::<i32>()`):
                         // mangle to the concrete instance and rewrite the path's enum

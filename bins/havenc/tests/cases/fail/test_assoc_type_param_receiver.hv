@@ -1,0 +1,13 @@
+// An *instance* trait method cannot be called associated-style through a type
+// parameter — it needs a receiver.
+//
+//@ error: 'P::a' takes a receiver; call it as a method
+
+trait T { proc a(*self) str; }
+struct S { n: i32 }
+extend S: T { proc a(*self) str { return "x"; } }
+
+proc f<P: T>() str { return P::a(); }
+
+@export
+proc main() i32 { return 0; }

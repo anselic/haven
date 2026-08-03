@@ -1,0 +1,36 @@
+// Calling an associated (no-`self`) trait method *through a type parameter*,
+// `P::tag()` / `P::scale(x)` / `P::make()`, dispatched via the param's bound and
+// monomorphized to the concrete `A$tag` / `B$tag`. Two instantiations prove each
+// dispatches to its own impl.
+
+trait Meta {
+    proc tag() str;
+    proc scale(x: i32) i32;
+    proc make() Self;
+    proc val(*self) i32;
+}
+struct A { n: i32 }
+extend A: Meta {
+    proc tag() str { return "A"; }
+    proc scale(x: i32) i32 { return x + 1; }
+    proc make() A { return A { n: 10 }; }
+    proc val(*self) i32 { return self.n; }
+}
+struct B { n: i32 }
+extend B: Meta {
+    proc tag() str { return "B"; }
+    proc scale(x: i32) i32 { return x * 10; }
+    proc make() B { return B { n: 20 }; }
+    proc val(*self) i32 { return self.n; }
+}
+proc describe<P: Meta>() void {
+    println(P::tag());
+    printf::<i32>("scale=%d\n", P::scale(5));
+    let v: P = P::make();
+    printf::<i32>("val=%d\n", v.val());
+}
+@export proc main() i32 {
+    describe::<A>();
+    describe::<B>();
+    return 0;
+}

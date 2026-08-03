@@ -966,7 +966,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// `ExprNode::Path` - the one shape that survives resolution is an enum
     /// variant, whose head segment has been rewritten to the enum's final name in
     /// place.
-    fn value_path(&mut self, r: &mut NameRef<'a>, span: &Span, in_call: bool) -> Option<&'a str> {
+    fn value_path(&mut self, r: &mut NameRef<'a>, span: &Span, in_call: bool, gparams: &HashSet<&str>) -> Option<&'a str> {
         let path = &mut r.path;
         if let Some(one) = path.as_single() {
             if self.is_local(one) {
@@ -1005,6 +1005,14 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         // left unresolved.
         let segs: Vec<&'a str> = path.segments.clone();
         if segs.len() == 2 {
+            // an associated call through a generic type parameter, `P::new()`:
+            // `P` is not a concrete type, so leave the path unresolved for the
+            // typechecker to dispatch through `P`'s trait bound (and mono to
+            // re-mangle to the concrete `Gain$new`). Checked before the module
+            // qualifier walk, which would otherwise read `P` as a module name.
+            if gparams.contains(segs[0]) {
+                return None;
+            }
             // a built-in type's associated function, `i32::from(x)`. Tried
             // first because the built-in names are keywords: `parse_type` maps
             // them before any user type can shadow them, so letting a `struct
@@ -1090,7 +1098,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             ExprNode::Call { func, type_args, args } => {
                 if let ExprNode::Path(path) = &mut func.value {
                     let span = func.span.clone();
-                    if let Some(name) = self.value_path(path, &span, true) {
+                    if let Some(name) = self.value_path(path, &span, true, gparams) {
                         func.value = ExprNode::Var(name);
                     }
                 } else {
@@ -1107,7 +1115,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // turbofish types. The name lives in `name.path`, rewritten in place.
             ExprNode::FnRef { name, type_args } => {
                 let span = e.span.clone();
-                if let Some(resolved) = self.value_path(name, &span, true) {
+                if let Some(resolved) = self.value_path(name, &span, true, gparams) {
                     name.path = Path { segments: vec![resolved] };
                 }
                 for ga in type_args {
@@ -1161,7 +1169,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // handled (or rejected) downstream, not here.
             ExprNode::Path(path) => {
                 let span = e.span.clone();
-                if let Some(name) = self.value_path(path, &span, false) {
+                if let Some(name) = self.value_path(path, &span, false, gparams) {
                     e.value = ExprNode::Var(name);
                 }
             }

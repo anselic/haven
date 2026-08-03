@@ -59,21 +59,23 @@ extend FloatParam {
     pub proc denormalize(*self, t: f64) f64 { return self.min + t * (self.max - self.min); }
 }
 
-// The trait an author implements. Metadata is by-instance (haven can't yet call
-// an associated method through a type parameter), so the framework reads it off a
-// throwaway instance when the host asks for a descriptor before any plugin has
-// been created.
+// The trait an author implements. Metadata and the static parameter descriptors
+// are *associated* (no `self`), so the framework reads them straight off the type
+// — `P::id()`, `P::param(i)` — even when the host queries a descriptor before any
+// plugin instance exists. Only the live-state operations take `*self`.
 pub trait Plugin {
-    proc id(*self) str;
-    proc name(*self) str;
-    proc vendor(*self) str;
-    proc version(*self) str;
-    proc category(*self) str;          // one CLAP feature tag, e.g. "audio-effect"
-    proc channels(*self) u32;          // channels on the single stereo-style port
-    proc init(*self);                  // fill defaults into freshly-allocated state
+    // metadata + static descriptors (no self)
+    proc id() str;
+    proc name() str;
+    proc vendor() str;
+    proc version() str;
+    proc category() str;               // one CLAP feature tag, e.g. "audio-effect"
+    proc channels() u32;               // channels on the single stereo-style port
+    proc param_count() u32;
+    proc param(index: u32) FloatParam;
+    proc new() Self;                   // construct fresh state with defaults
+    // live state (self)
     proc activate(*self, sample_rate: f64);
-    proc param_count(*self) u32;
-    proc param(*self, index: u32) FloatParam;
     proc param_get(*self, id: u32) f64;
     proc param_set(*self, id: u32, value: f64);
     proc process(*self, ctx: *ClapProcess) ClapProcessStatus;
@@ -135,7 +137,7 @@ proc plug_ap_count<P: Plugin>(p: *ClapPlugin, is_input: bool) u32 { return 1u32;
 proc plug_ap_get<P: Plugin>(p: *ClapPlugin, index: u32, is_input: bool, info: *ClapAudioPortInfo) bool {
     info.id = 0u32;
     info.flags = CLAP_AUDIO_PORT_IS_MAIN;
-    info.channel_count = plug_box::<P>(p).state.channels();
+    info.channel_count = P::channels();
     info.port_type = CLAP_PORT_STEREO;
     info.in_place_pair = 0u32;
     return true;
@@ -152,13 +154,12 @@ proc plug_audio_ports<P: Plugin>() *ClapPluginAudioPorts {
 
 // --- params extension ---
 proc plug_param_count<P: Plugin>(p: *ClapPlugin) u32 {
-    return plug_box::<P>(p).state.param_count();
+    return P::param_count();
 }
 
 proc plug_param_get_info<P: Plugin>(p: *ClapPlugin, index: u32, info: *ClapParamInfo) bool {
-    let b: *PlugBox<P> = plug_box::<P>(p);
-    if (index >= b.state.param_count()) { return false; }
-    let par: FloatParam = b.state.param(index);
+    if (index >= P::param_count()) { return false; }
+    let par: FloatParam = P::param(index);
     info.id = par.id;
     info.flags = CLAP_PARAM_IS_AUTOMATABLE;
     info.cookie = null::<*void>();
@@ -204,31 +205,28 @@ proc plug_get_extension<P: Plugin>(p: *ClapPlugin, id: str) *void {
     return null::<*void>();
 }
 
-// --- descriptor (metadata read off a throwaway instance) ---
-proc plug_features<P: Plugin>(state: *P) *str {
+// --- descriptor (metadata read straight off the type via `P::assoc()`) ---
+proc plug_features<P: Plugin>() *str {
     let arr: *str = alloc::<str>(2u64).expect("features");
-    arr[0] = state.category();
+    arr[0] = P::category();
     arr[1] = null::<str>();   // the NULL terminator CLAP walks to
     return arr;
 }
 
 proc plug_descriptor<P: Plugin>() *ClapPluginDescriptor {
-    let tmp: *P = alloc::<P>(1u64).expect("descriptor probe");
-    tmp.init();
     let d: *ClapPluginDescriptor = alloc::<ClapPluginDescriptor>(1u64).expect("descriptor");
     ptr_write::<ClapPluginDescriptor>(d, ClapPluginDescriptor {
         clap_version: ClapVersion { major: 1u32, minor: 2u32, revision: 2u32 },
-        id: tmp.id(),
-        name: tmp.name(),
-        vendor: tmp.vendor(),
+        id: P::id(),
+        name: P::name(),
+        vendor: P::vendor(),
         url: "",
         manual_url: "",
         support_url: "",
-        version: tmp.version(),
+        version: P::version(),
         description: "",
-        features: plug_features::<P>(tmp),
+        features: plug_features::<P>(),
     });
-    dealloc::<P>(tmp);
     return d;
 }
 
@@ -241,7 +239,7 @@ proc plug_factory_get_desc<P: Plugin>(f: *ClapPluginFactory, index: u32) *ClapPl
 
 proc plug_factory_create<P: Plugin>(f: *ClapPluginFactory, host: *ClapHost, id: str) *ClapPlugin {
     let b: *PlugBox<P> = alloc::<PlugBox<P>>(1u64).expect("plugin instance");
-    b.state.init();
+    ptr_write::<P>(&b.state, P::new());
     ptr_write::<ClapPlugin>(&b.clap_plugin, ClapPlugin {
         desc: plug_descriptor::<P>(),
         plugin_data: ptr_cast::<*void>(b),

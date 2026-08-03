@@ -22,27 +22,26 @@ struct Gain {
 }
 
 extend Gain: Plugin {
-    // --- metadata ---
-    proc id(*self) str { return "com.haven.gain"; }
-    proc name(*self) str { return "Haven Gain"; }
-    proc vendor(*self) str { return "Haven"; }
-    proc version(*self) str { return "1.0.0"; }
-    proc category(*self) str { return "audio-effect"; }
-    proc channels(*self) u32 { return 2u32; }
-
-    // --- lifecycle ---
-    proc init(*self) {
-        self.gain = 1.0f64;
-        self.sample_rate = 44100.0f64;
+    // --- metadata + static descriptors (associated, no self) ---
+    proc id() str { return "com.haven.gain"; }
+    proc name() str { return "Haven Gain"; }
+    proc vendor() str { return "Haven"; }
+    proc version() str { return "1.0.0"; }
+    proc category() str { return "audio-effect"; }
+    proc channels() u32 { return 2u32; }
+    proc param_count() u32 { return 1u32; }
+    proc param(index: u32) FloatParam {
+        return FloatParam::new(0u32, "Gain", 0.0f64, 2.0f64, 1.0f64);
     }
+    // construct fresh state (the return is spelled `Gain`, not `Self`, since
+    // `Self` in a method body isn't substituted yet).
+    proc new() Gain {
+        return Gain { gain: 1.0f64, sample_rate: 44100.0f64 };
+    }
+
+    // --- live state (self) ---
     proc activate(*self, sample_rate: f64) {
         self.sample_rate = sample_rate;
-    }
-
-    // --- parameters ---
-    proc param_count(*self) u32 { return 1u32; }
-    proc param(*self, index: u32) FloatParam {
-        return FloatParam::new(0u32, "Gain", 0.0f64, 2.0f64, 1.0f64);
     }
     proc param_get(*self, id: u32) f64 { return self.gain; }
     proc param_set(*self, id: u32, value: f64) { self.gain = value; }

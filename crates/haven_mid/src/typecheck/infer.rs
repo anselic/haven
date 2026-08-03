@@ -153,6 +153,78 @@ fn resolve_bounded_method<'a>(
     Ok(Some(subst_self(&return_type, &self_ty)))
 }
 
+/// Resolve an associated (no-`self`) call made *through a type parameter*,
+/// `P::assoc(args)`, dispatching through `P`'s trait bounds. The resolver leaves
+/// such a path unresolved (it can't name a concrete symbol); this checks it, and
+/// monomorphization later re-mangles `P::assoc` to the concrete `Gain$assoc`.
+/// `Ok(None)` when `cname` is not `Param::sym` for an in-scope type param (the
+/// caller then tries its other Path interpretations, e.g. an enum constructor).
+fn resolve_bounded_assoc<'a>(
+    cx: &mut Context<'a>,
+    cname: &NameRef<'a>,
+    type_args: &[GenericArg<'a>],
+    args: &[Expr<'a>],
+    span: &Span,
+) -> Result<Option<Type<'a>>, Error> {
+    let segs = &cname.path.segments;
+    if segs.len() != 2 || !cx.generics.contains(&segs[0]) {
+        return Ok(None);
+    }
+    let param = segs[0];
+    let method = segs[1];
+
+    // find the first bound trait that declares `method`.
+    let bounds = cx.generic_bounds.get(param).cloned().unwrap_or_default();
+    let mut sig = None;
+    for tr in &bounds {
+        if let Some(def) = cx.traits.get(tr) {
+            if let Some(m) = def.methods.get(method) {
+                sig = Some((m.receiver, m.params.clone(), m.return_type.clone()));
+                break;
+            }
+        }
+    }
+    let Some((receiver, params, return_type)) = sig else {
+        return Err(Error {
+            msg: format!(
+                "no associated function '{}' on type parameter '{}'; add a trait bound \
+                 that provides it (e.g. `<{}: SomeTrait>`)",
+                method, param, param),
+            span: span.clone(),
+        });
+    };
+    // `P::m()` names it without a receiver, so `m` must actually be associated.
+    if receiver != Receiver::Associated {
+        return Err(Error {
+            msg: format!(
+                "'{}::{}' takes a receiver; call it as a method, `x.{}(...)`",
+                param, method, method),
+            span: span.clone(),
+        });
+    }
+    if !type_args.is_empty() {
+        return Err(Error {
+            msg: format!("associated function '{}' takes no generic arguments", method),
+            span: span.clone(),
+        });
+    }
+
+    // `Self` in the trait signature is the param type `P` here.
+    let self_ty = Type::Param(param);
+    if args.len() != params.len() {
+        return Err(Error {
+            msg: format!("associated function '{}' expects {} argument(s), got {}",
+                method, params.len(), args.len()),
+            span: span.clone(),
+        });
+    }
+    for (pty, arg) in params.iter().zip(args) {
+        let expected = subst_self(pty, &self_ty);
+        check_expr(cx, &expected, arg)?;
+    }
+    Ok(Some(subst_self(&return_type, &self_ty)))
+}
+
 /// Check that `arg` is a `*T` for the turbofished element type `T`. Shared by
 /// the two intrinsics that address a slot rather than take one by value; both
 /// name the pointee in the turbofish, so the pointer type is derived, never
@@ -1040,6 +1112,16 @@ fn infer<'a>(
                     });
                     cx.node_types.insert(metadata.id, return_type.clone());
                     return Ok(return_type);
+                }
+            }
+
+            // an associated call through a type parameter, `P::new(args)`:
+            // dispatch through `P`'s trait bound. Tried before the enum path since
+            // a two-segment path headed by a type param is never an enum variant.
+            if let ExprNode::Path(cname) = &func.value {
+                if let Some(ret) = resolve_bounded_assoc(cx, cname, type_args, args, &span)? {
+                    cx.node_types.insert(expr.id, ret.clone());
+                    return Ok(ret);
                 }
             }
 
