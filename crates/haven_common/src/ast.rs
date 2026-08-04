@@ -109,6 +109,11 @@ pub enum Token<'a> {
     Uint8(u8), Uint16(u16), Uint32(u32), Uint64(u64),
     Float32(f32), Float64(f64),
     Str(&'a str),
+    /// An interpolated string literal `f"...{expr}..."`. Holds the raw inner
+    /// text (between the quotes, `f` stripped); the parser splits it into
+    /// literal chunks and `{...}` interpolations and desugars the whole thing
+    /// into `String`-building calls.
+    FStr(&'a str),
     Var(&'a str),
     BinaryOp(BinaryOp),
     UnaryOp(UnaryOp),
@@ -142,6 +147,7 @@ impl Display for Token<'_> {
             Token::Float32(n)   => write!(f, "{}f32", n),
             Token::Float64(n)   => write!(f, "{}f64", n),
             Token::Str(s)       => write!(f, "\"{:?}\"", s),
+            Token::FStr(s)      => write!(f, "f\"{}\"", s),
             Token::Var(s)       => write!(f, "{}", s),
             Token::BinaryOp(op) => write!(f, "{}", op),
             Token::UnaryOp(op)  => write!(f, "{}", op),

@@ -1,0 +1,12 @@
+// f-string interpolations are restricted to a variable, a `.field` access chain,
+// or a literal - deliberately, so any real computation is written out as a `let`
+// rather than hidden inside a string. An arithmetic expression is rejected at
+// parse time.
+//@ error: must be a variable, field access, or literal
+
+@export
+proc main() i32 {
+    let x: i32 = 1;
+    puts(f"{x + 1}");
+    return 0;
+}

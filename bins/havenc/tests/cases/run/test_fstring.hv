@@ -1,0 +1,43 @@
+// f-string interpolation `f"...{expr}..."`.
+//
+// Lexed as one token and desugared in the parser into `String`-building calls:
+//     String::new().fstr_lit("...").fstr_val(expr.display()).fstr_lit("...")
+// so every downstream pass sees ordinary AST. Each `{expr}` renders through the
+// `Display` trait, which the prelude re-exports, so `f"..."` needs no import and
+// works for any `Display` type, including user structs. Interpolations are
+// restricted to a variable, a `.field` access chain, or a literal (optionally
+// negated); anything with real computation must be bound to a `let` first.
+// `{{`/`}}` are literal braces. `put`/`puts` (prelude) print an owned String,
+// consuming it - needed because `.as_str()` cannot borrow the temporary an
+// f-string produces.
+//@ exit: 0
+
+struct Point { x: i32, y: i32 }
+
+// a user type is displayable, and its own impl is written with an f-string.
+extend Point: Display {
+    proc display(*self) String { return f"({self.x}, {self.y})"; }
+}
+
+@export
+proc main() i32 {
+    let name: str = "haven";
+    let n: i32 = 42;
+    let ok: bool = true;
+    let p: Point = Point { x: 3, y: 4 };
+
+    // variable, literal, bool, negative literal
+    puts(f"name={name} n={n} ok={ok} lit={7} neg={-5}");
+    // field access, and a nested Display (Point's own f-string)
+    puts(f"p={p} p.x={p.x}");
+    // brace escaping and a pure-literal f-string (no interpolation)
+    puts(f"braces {{ }} literal");
+    // bound to a `let`, then borrowed the ordinary way
+    let msg: String = f"bound={n}";
+    println(msg.as_str());
+    // `put` has no trailing newline
+    put(f"a");
+    put(f"b");
+    println("");
+    return 0;
+}

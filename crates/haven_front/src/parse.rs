@@ -120,10 +120,26 @@ fn lexer<'a> (
         none_of("\\\"").ignored(),        // any ordinary char
     ));
     let str_ = str_char
+        .clone()
         .repeated()
         .to_slice()
         .delimited_by(just('"'), just('"'))
         .map(Token::Str);
+
+    // Interpolated string literal `f"...{expr}..."`. The leading `f` must sit
+    // immediately against the opening quote; the inner text (including the
+    // `{...}` holes) is captured raw exactly like `str_`, and the parser splits
+    // and desugars it. Tried before `ident` so `f"..."` isn't lexed as the
+    // variable `f` followed by a string; an ordinary ident like `foo` fails the
+    // quote and backtracks to `ident`.
+    let fstr = just('f')
+        .ignore_then(
+            str_char
+                .repeated()
+                .to_slice()
+                .delimited_by(just('"'), just('"')),
+        )
+        .map(Token::FStr);
 
     let ident = text::ascii::ident().map(|ident: &str| match ident {
         "true"     => Token::Bool(true),
@@ -191,6 +207,7 @@ fn lexer<'a> (
     let token = float
         .or(int)
         .or(str_)
+        .or(fstr)
         .or(ident)
         .or(math)
         .or(delim);
@@ -230,6 +247,199 @@ pub fn lex<'a>(file: FileId, source: &'a str) -> (
             })
         })
         .collect())
+}
+
+// --- f-string desugaring -----------------------------------------------------
+//
+// `f"a {x} b"` is lexed as one `Token::FStr` holding the raw inner text, then
+// expanded here (at parse time) into ordinary `String`-building calls, so every
+// downstream pass sees only plain AST and needs no f-string arm:
+//
+//     String::new().fstr_lit("a ").fstr_val(x.display()).fstr_lit(" b")
+//
+// `fstr_lit`/`fstr_val` are `String` methods (see std/string) that thread the
+// owned accumulator through by value; `x.display()` does the per-type rendering
+// via the `Display` trait. `String` and `Display` are both re-exported by the
+// prelude, so `f"..."` needs no import. Interpolations are deliberately
+// restricted to a variable, a `.field` access chain, or a literal (optionally
+// negated) - any real computation must be bound to a `let` first, keeping the
+// work out of the string.
+
+/// One piece of a split f-string: literal text, or a built interpolation expr.
+enum FStrPart<'a> {
+    Lit(&'a str),
+    Interp(Expr<'a>),
+}
+
+fn leak_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// Expand an f-string's raw inner text into the desugared `String`-building
+/// `ExprNode`. Every synthesized node borrows the whole literal's `span`.
+fn expand_fstring<'src>(raw: &'src str, span: Span) -> Result<ExprNode<'src>, String> {
+    let mk = |node: ExprNode<'src>| Metadata::new(node, span);
+    let path = |segments: Vec<&'src str>| {
+        Metadata::new(ExprNode::Path(NameRef::new(Path { segments })), span)
+    };
+    let call = |func: Expr<'src>, args: Vec<Expr<'src>>| ExprNode::Call {
+        func: Box::new(func),
+        type_args: Vec::new(),
+        args,
+    };
+    // a method call `recv.name(arg)`, used for the `String` chaining helpers and
+    // for `expr.display()`.
+    let method = |recv: Expr<'src>, name: &'src str, args: Vec<Expr<'src>>| {
+        ExprNode::Call {
+            func: Box::new(Metadata::new(
+                ExprNode::Access { base: Box::new(recv), field: name },
+                span,
+            )),
+            type_args: Vec::new(),
+            args,
+        }
+    };
+
+    // seed: `String::new()`. String and Display are both re-exported by the
+    // prelude, and the `fstr_lit`/`fstr_val` chaining methods live on String, so
+    // the whole expansion resolves with no import at the use site.
+    let mut acc: Expr<'src> = mk(call(path(vec!["String", "new"]), Vec::new()));
+
+    for part in split_fstring(raw, span)? {
+        acc = match part {
+            FStrPart::Lit(text) => {
+                let chunk = mk(ExprNode::Str(text));
+                mk(method(acc, "fstr_lit", vec![chunk]))
+            }
+            FStrPart::Interp(expr) => {
+                // `expr.display()` -> owned String, then appended (and consumed).
+                let rendered = mk(method(expr, "display", Vec::new()));
+                mk(method(acc, "fstr_val", vec![rendered]))
+            }
+        };
+    }
+
+    Ok(acc.value)
+}
+
+/// Split raw f-string text into literal chunks and interpolations. `{{`/`}}`
+/// escape literal braces; a `\`-escape is passed through verbatim (resolved with
+/// the rest of the string's escapes during MIL lowering).
+fn split_fstring<'src>(raw: &'src str, span: Span) -> Result<Vec<FStrPart<'src>>, String> {
+    let mut parts = Vec::new();
+    let mut lit = String::new();
+    let mut chars = raw.char_indices().peekable();
+
+    while let Some((idx, c)) = chars.next() {
+        match c {
+            '{' => {
+                if matches!(chars.peek(), Some((_, '{'))) {
+                    chars.next();
+                    lit.push('{');
+                    continue;
+                }
+                if !lit.is_empty() {
+                    parts.push(FStrPart::Lit(leak_str(std::mem::take(&mut lit))));
+                }
+                let start = idx + 1;
+                let mut end = None;
+                for (j, cj) in chars.by_ref() {
+                    if cj == '}' {
+                        end = Some(j);
+                        break;
+                    }
+                    if cj == '{' {
+                        return Err("nested '{' in f-string interpolation".to_string());
+                    }
+                }
+                let end = end.ok_or_else(||
+                    "unterminated '{' in f-string; expected a closing '}'".to_string())?;
+                parts.push(FStrPart::Interp(build_interp(&raw[start..end], span)?));
+            }
+            '}' => {
+                if matches!(chars.peek(), Some((_, '}'))) {
+                    chars.next();
+                    lit.push('}');
+                    continue;
+                }
+                return Err("unmatched '}' in f-string; write '}}' for a literal brace".to_string());
+            }
+            '\\' => {
+                lit.push('\\');
+                if let Some((_, n)) = chars.next() {
+                    lit.push(n);
+                }
+            }
+            _ => lit.push(c),
+        }
+    }
+
+    if !lit.is_empty() {
+        parts.push(FStrPart::Lit(leak_str(lit)));
+    }
+    Ok(parts)
+}
+
+fn is_numeric(t: &Token) -> bool {
+    matches!(t,
+        Token::Int8(_) | Token::Int16(_) | Token::Int32(_) | Token::Int64(_) |
+        Token::Uint8(_) | Token::Uint16(_) | Token::Uint32(_) | Token::Uint64(_) |
+        Token::Float32(_) | Token::Float64(_))
+}
+
+fn literal_node<'src>(t: &Token<'src>) -> Option<ExprNode<'src>> {
+    Some(match *t {
+        Token::Bool(b) => ExprNode::Bool(b),
+        Token::Int8(n) => ExprNode::Int8(n),
+        Token::Int16(n) => ExprNode::Int16(n),
+        Token::Int32(n) => ExprNode::Int32(n),
+        Token::Int64(n) => ExprNode::Int64(n),
+        Token::Uint8(n) => ExprNode::Uint8(n),
+        Token::Uint16(n) => ExprNode::Uint16(n),
+        Token::Uint32(n) => ExprNode::Uint32(n),
+        Token::Uint64(n) => ExprNode::Uint64(n),
+        Token::Float32(f) => ExprNode::Float32(f),
+        Token::Float64(f) => ExprNode::Float64(f),
+        Token::Str(s) => ExprNode::Str(s),
+        _ => return None,
+    })
+}
+
+/// Build the restricted interpolation expression from one `{...}` body: a
+/// variable, a `.field` access chain, or a (possibly negated) literal.
+fn build_interp<'src>(inner: &'src str, span: Span) -> Result<Expr<'src>, String> {
+    let (toks, errs) = lex(span.file, inner);
+    if !errs.is_empty() {
+        return Err(format!("invalid f-string interpolation `{}`", inner.trim()));
+    }
+    let toks: Vec<Token<'src>> = toks.unwrap_or_default().into_iter().map(|m| m.value).collect();
+    let mk = |node: ExprNode<'src>| Metadata::new(node, span);
+    let unsupported = || Err(format!(
+        "f-string interpolation `{}` must be a variable, field access, or literal - \
+         bind a complex expression to a `let` first", inner.trim()));
+
+    match toks.as_slice() {
+        [] => Err("empty f-string interpolation `{}`".to_string()),
+        [t] if literal_node(t).is_some() => Ok(mk(literal_node(t).unwrap())),
+        [Token::BinaryOp(BinaryOp::Sub), t] if is_numeric(t) => Ok(mk(ExprNode::Unary {
+            op: UnaryOp::Neg,
+            operand: Box::new(mk(literal_node(t).unwrap())),
+        })),
+        [Token::Var(head), rest @ ..] => {
+            let mut expr = mk(ExprNode::Path(NameRef::new(Path { segments: vec![*head] })));
+            let mut it = rest.iter();
+            while let Some(t) = it.next() {
+                match (t, it.next()) {
+                    (Token::Dot, Some(Token::Var(field))) => {
+                        expr = mk(ExprNode::Access { base: Box::new(expr), field: *field });
+                    }
+                    _ => return unsupported(),
+                }
+            }
+            Ok(expr)
+        }
+        _ => unsupported(),
+    }
 }
 
 fn parse_expr<'tks, 'src: 'tks>()
@@ -345,6 +555,12 @@ fn parse_expr<'tks, 'src: 'tks>()
                 Token::Float64(f) => ExprNode::Float64(*f),
                 Token::Str(s)     => ExprNode::Str(*s),
             },
+
+            // an interpolated string `f"...{expr}..."`, desugared to String-
+            // building calls right here so nothing downstream sees an f-string.
+            select_ref! { Token::FStr(raw) => *raw }
+                .try_map(|raw, span| expand_fstring(raw, span)
+                    .map_err(|m| Rich::custom(span, m))),
 
             // Struct init, with an optional qualifier and an optional turbofish
             // for generic structs: `S { f: v }`, `geo::Point { f: v }`,

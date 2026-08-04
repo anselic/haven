@@ -3,7 +3,7 @@
 // The target binds its parameters implicitly - `extend Vec<T>`, never
 // `extend<T> Vec<T>` - so there is no binder to write a bound on, and a `where`
 // clause is the only place one can go. Without it a generic impl could not call
-// a trait method on its own element type, which is precisely what `Display for
+// a trait method on its own element type, which is precisely what `MyDisplay for
 // Vec<T>` needs, so this was the last thing blocking impls on generic containers.
 //
 // The bound is checked at the *call*, against whatever unifying the target
@@ -11,19 +11,19 @@
 // message: it decides whether `Pair<f64>` may reach this method at all.
 //@ exit: 0
 
-trait Display {
-    proc display(*self) str;
+trait MyDisplay {
+    proc my_display(*self) str;
 }
 
-extend i32: Display { proc display(*self) str { return "<i32>"; } }
-extend bool: Display { proc display(*self) str { return "<bool>"; } }
+extend i32: MyDisplay { proc my_display(*self) str { return "<i32>"; } }
+extend bool: MyDisplay { proc my_display(*self) str { return "<bool>"; } }
 
 struct Pair<T> { a: T, b: T }
 
-extend Pair<T>: Display where T: Display {
-    proc display(*self) str {
-        print(self.a.display());
-        return self.b.display();
+extend Pair<T>: MyDisplay where T: MyDisplay {
+    proc my_display(*self) str {
+        print(self.a.my_display());
+        return self.b.my_display();
     }
     // an associated function on the same block: its bound is checked from the
     // turbofish rather than from a receiver, since there is no receiver.
@@ -32,44 +32,44 @@ extend Pair<T>: Display where T: Display {
 
 // a structural target takes a clause just the same. `self` is a `*[T]`, so the
 // element comes out from behind the pointer first.
-extend [T]: Display where T: Display {
-    proc display(*self) str {
+extend [T]: MyDisplay where T: MyDisplay {
+    proc my_display(*self) str {
         let xs: [T] = *self;
-        return xs[0].display();
+        return xs[0].my_display();
     }
 }
 
 // two parameters, each with its own clause entry.
 struct Map<K, V> { k: K, v: V }
 
-extend Map<K, V>: Display where K: Display, V: Display {
-    proc display(*self) str {
-        print(self.k.display());
-        return self.v.display();
+extend Map<K, V>: MyDisplay where K: MyDisplay, V: MyDisplay {
+    proc my_display(*self) str {
+        print(self.k.my_display());
+        return self.v.my_display();
     }
 }
 
 // a bound written on the type's own parameter reaches its inherent methods -
-// the same clause an out-of-line `extend Boxed<T> where T: Display` would need.
-struct Boxed<T: Display> {
+// the same clause an out-of-line `extend Boxed<T> where T: MyDisplay` would need.
+struct Boxed<T: MyDisplay> {
     item: T,
 
-    proc show(*self) str { return self.item.display(); }
+    proc show(*self) str { return self.item.my_display(); }
 }
 
 @export
 proc main() i32 {
     let p: Pair<i32> = Pair::<i32>::twice(1);
-    println(p.display());
+    println(p.my_display());
 
     let q: Pair<bool> = Pair::<bool> { a: true, b: false };
-    println(q.display());
+    println(q.my_display());
 
     let xs: [i32] = [7, 8];
-    println(xs.display());
+    println(xs.my_display());
 
     let m: Map<i32, bool> = Map::<i32, bool> { k: 4, v: true };
-    println(m.display());
+    println(m.my_display());
 
     let b: Boxed<i32> = Boxed::<i32> { item: 9 };
     println(b.show());

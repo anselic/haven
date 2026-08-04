@@ -10,6 +10,7 @@ extern strlen(s: str) u64;
 // re-exports
 pub import std/string { String }
 pub import std/vec { Vec }
+pub import std/fmt { Display, display_print, display_println }
 
 /// A destructor. Implement it to give a type ownership of a resource:
 ///
@@ -66,6 +67,18 @@ extern rt_abort(msg: str) void;
 pub proc print(s: str) void { printf::<str>("%s", s); }
 /// Write `s` to stdout followed by a newline.
 pub proc println(s: str) void { printf::<str>("%s\n", s); }
+
+/// Write an owned `String` to stdout and free it - `put` with no trailing
+/// newline, `puts` with one. These *consume* the String, so they take the
+/// temporary produced by `f"..."` (or `x.display()`) directly:
+///
+///     puts(f"x = {x}, y = {y}");
+///
+/// `print(f"...".as_str())` cannot be written instead: `.as_str()` would borrow
+/// a temporary that owns its buffer, which would leak. Passing the String by
+/// value moves it in, and the borrow happens on the (real) parameter binding.
+pub proc put(s: String) void { print(s.as_str()); }
+pub proc puts(s: String) void { print(s.as_str()); println(""); }
 
 /// Print a single `f64` using the `printf` format `fmt` (e.g. `"%f\n"`).
 pub proc printf_f64(fmt: str, arg: f64) void {

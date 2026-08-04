@@ -1,0 +1,5 @@
+name=haven n=42 ok=true lit=7 neg=-5
+p=(3, 4) p.x=3
+braces { } literal
+bound=42
+ab

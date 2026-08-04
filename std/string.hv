@@ -86,6 +86,25 @@ pub struct String {
         }
     }
 
+    /// f-string desugaring helpers. `f"a {x} b"` lowers (in the parser) to
+    ///     String::new().fstr_lit("a ").fstr_val(x.display()).fstr_lit(" b")
+    /// Each takes the accumulator `self` by value and returns it, so the chain
+    /// threads one owned buffer through with no borrow of a temporary. `fstr_lit`
+    /// appends a literal chunk; `fstr_val` appends an already-rendered value
+    /// (from `x.display()`) and consumes that String. Living on `String` keeps
+    /// the mechanism self-contained - it needs nothing from std/fmt, though the
+    /// `.display()` in an interpolation resolves against `Display` (which the
+    /// prelude re-exports, so `f"..."` needs no import at all). Not meant to be
+    /// called by hand.
+    proc fstr_lit(self, piece: str) String {
+        self.push_str(piece);
+        return self;
+    }
+    proc fstr_val(self, piece: String) String {
+        self.push_str(piece.as_str());
+        return self;
+    }
+
     proc push_string(*self, other: *String) {
         let n: u64 = other.len();
         let src: *u8 = other.buf.get_ptr(0u64);

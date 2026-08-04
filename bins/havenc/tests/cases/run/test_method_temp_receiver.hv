@@ -2,7 +2,7 @@
 //
 // `self` needs an address and a temporary has none, so lowering spills the value
 // into a slot and borrows that. This is not an exotic case: it is what `extend
-// i32` is *for*. `7.display()` and `(a + b).display()` are the ordinary way to
+// i32` is *for*. `7.my_display()` and `(a + b).my_display()` are the ordinary way to
 // call a method on a builtin, and every one of these used to panic the compiler
 // in MIL lowering ("invalid lvalue").
 //
@@ -12,16 +12,16 @@
 // chained call whose own receiver is a temporary.
 //@ exit: 0
 
-trait Display {
-    proc display(*self) str;
+trait MyDisplay {
+    proc my_display(*self) str;
 }
 
-extend i32: Display {
-    proc display(*self) str { return "int"; }
+extend i32: MyDisplay {
+    proc my_display(*self) str { return "int"; }
 }
 
-extend f64: Display {
-    proc display(*self) str { return "float"; }
+extend f64: MyDisplay {
+    proc my_display(*self) str { return "float"; }
 }
 
 const G: i32 = 9;
@@ -44,13 +44,13 @@ proc origin() Point { return Point { x: 3, y: 4 }; }
 @export
 proc main() i32 {
     // literal, operator result, call result, float literal
-    println(7.display());
-    println((1 + 2).display());
-    println(five().display());
-    println(2.5f64.display());
+    println(7.my_display());
+    println((1 + 2).my_display());
+    println(five().my_display());
+    println(2.5f64.my_display());
 
     // a global has storage of its own; its symbol is the address.
-    println(G.display());
+    println(G.my_display());
 
     // a struct temporary is produced in a slot already, so the receiver is that
     // slot rather than a fresh one.
@@ -58,7 +58,7 @@ proc main() i32 {
     // ...including when the receiver is itself a method call's result.
     printf::<i32>("%d\n", origin().doubled().sum());
     // a field of a temporary is a place: it lives in the temporary's slot.
-    println(origin().x.display());
+    println(origin().x.my_display());
 
     // a global is a *constant*, so it is copied rather than borrowed in place.
     // `*self` says nothing about whether a method writes, and every global is
