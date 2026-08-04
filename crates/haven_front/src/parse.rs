@@ -357,9 +357,17 @@ fn parse_expr<'tks, 'src: 'tks>()
             path_of!(var)
                 .then(turbofish.clone().or_not().map(|t| t.unwrap_or_default()))
                 .then(
-                    var.map(|s| *s)
-                        .then_ignore(just(Token::Colon))
-                        .then(expr.clone())
+                    // `field: value`, or the shorthand `field` (equivalent to
+                    // `field: field` - a variable of the same name in scope).
+                    var.map_with(|s, e| (*s, e.span()))
+                        .then(just(Token::Colon).ignore_then(expr.clone()).or_not())
+                        .map(|((name, span), value)| {
+                            let value = value.unwrap_or_else(|| Metadata::new(
+                                ExprNode::Path(NameRef::new(Path { segments: vec![name] })),
+                                span,
+                            ));
+                            (name, value)
+                        })
                         .separated_by(just(Token::Comma))
                         .allow_trailing()
                         .collect::<Vec<_>>()

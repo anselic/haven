@@ -1,0 +1,22 @@
+struct Stereo {
+    l: f32,
+    r: f32,
+}
+
+@export
+proc main() i32 {
+    let l: f32 = 1.0f32;
+    let r: f32 = 0.25f32;
+
+    // shorthand `{ l, r }` == `{ l: l, r: r }`
+    let x: Stereo = Stereo { l, r };
+    printf32("%f\n", x.l); // expect 1.0
+    printf32("%f\n", x.r); // expect 0.25
+
+    // shorthand mixed with an explicit field
+    let y: Stereo = Stereo { l: 9.0f32, r };
+    printf32("%f\n", y.l); // expect 9.0
+    printf32("%f\n", y.r); // expect 0.25
+
+    return 0;
+}
