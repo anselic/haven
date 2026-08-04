@@ -1,0 +1,26 @@
+// The one place temporary lifetime extension deliberately does NOT reach: a
+// `while` condition. It is re-evaluated on every iteration, so a temporary
+// borrowed there would have to be created and destroyed inside the loop, which a
+// spill to a `let` before the loop cannot express. Rather than silently pick the
+// wrong lifetime, borrowing an owning temporary in a `while` condition stays an
+// error - the fix is to bind it with a `let` in the loop body.
+//@ error: owns a resource
+
+import std/alloc { alloc, dealloc }
+
+struct Buf { data: *i32 }
+
+extend Buf: Delete {
+    proc delete(*self) { dealloc::<i32>(self.data); }
+}
+
+extend Buf {
+    proc make() Buf { return Buf { data: alloc::<i32>(1u64).unwrap() }; }
+    proc done(*self) bool { return true; }
+}
+
+@export
+proc main() i32 {
+    while (Buf::make().done()) { return 0; }
+    return 1;
+}

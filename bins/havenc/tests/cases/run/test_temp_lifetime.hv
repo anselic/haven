@@ -1,0 +1,42 @@
+// Temporary lifetime extension.
+//
+// An owning temporary that is *borrowed* - as a `&self` method receiver, or by
+// `&` - is spilled into a hidden local and destroyed at the end of the enclosing
+// statement, exactly once, after the borrow is done. Borrowing such a temporary
+// used to be an error precisely because nothing would run its `delete`; the
+// spill fixes that leak. This is what lets `print(f"...".as_str())` work: the
+// f-string's buffer lives until the `print` returns, then is freed.
+//
+// The `drop N` lines below pin the timing down: each prints between the use of
+// the temporary and the *next* statement, so the destruction is neither early
+// (before the borrow) nor late (leaked past the statement).
+//@ exit: 0
+
+struct Res { id: i32 }
+
+extend Res: Delete {
+    proc delete(*self) { printf::<i32>("drop %d\n", self.id); }
+}
+
+extend Res {
+    proc make(id: i32) Res { return Res { id: id }; }
+    proc peek(*self) i32 { return self.id; }
+}
+
+proc show(p: *Res) void { printf::<i32>("show %d\n", p.id); }
+
+@export
+proc main() i32 {
+    // `&self` method on a temporary: borrowed, used, then dropped at the `;`.
+    printf::<i32>("peek %d\n", Res::make(1).peek());
+    println("between");
+    // `&` of a temporary, passed as a pointer and consumed within the statement.
+    show(&Res::make(2));
+    println("done");
+    // the motivating case: borrow the f-string temporary's buffer with `as_str`,
+    // then it is freed at the end of the statement.
+    let n: i32 = 7;
+    print(f"n={n}".as_str());
+    println("");
+    return 0;
+}

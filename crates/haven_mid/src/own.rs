@@ -59,6 +59,12 @@ const DELETE_METHOD: &str = "delete";
 /// collide with a user's local.
 const RET_TEMP: &str = "$ret";
 
+/// Name given to a borrowed owning temporary once it is spilled into a `let`
+/// whose scope ends with the enclosing statement (see `hoist_stmt`). Like the
+/// others, not a legal source identifier; the binding identity is the spill
+/// `Declare`'s node id, so any number of them in one statement stay distinct.
+const SPILL_TEMP: &str = "$tmp";
+
 /// Locals introduced by the `drop_in_place` expansion: the base pointer, the
 /// element count and the loop counter. Like `RET_TEMP` these are not legal
 /// source identifiers, and each gets a fresh `Binding::Local` from its own
@@ -333,8 +339,15 @@ impl<'a, 'c> Checker<'a, 'c> {
     /// Lowering gives the temporary a slot to be borrowed from, which is all a
     /// `Copy` receiver needs. An owning one is different: the slot is not a
     /// binding, so no scope lists it and nothing ever calls its `delete` - the
-    /// resource would leak, silently and every time. That is the one thing this
-    /// pass exists to prevent, so require a `let` instead of accepting it.
+    /// resource would leak, silently and every time.
+    ///
+    /// `hoist_stmt` spills such a temporary into a `let` dropped at the end of
+    /// the enclosing statement before this runs, so in every ordinary statement
+    /// the temporary is already a `Var` here and this is a no-op. The one place
+    /// it still fires is a `while` condition, which is not hoisted (it is
+    /// re-evaluated per iteration, so its temporary cannot be spilled to before
+    /// the loop) - there a borrowed owning temporary is still an error, and the
+    /// fix is to bind it with a `let` inside the loop body.
     fn borrowed_temp(&mut self, base: &Expr<'a>) {
         // a bare name reaches `Temp` only when it is a module-level global.
         // Lowering does copy one of those, but a constant's resource is static
@@ -349,6 +362,106 @@ impl<'a, 'c> Checker<'a, 'c> {
              belongs to no scope, so its '{}' would never run and the resource \
              would leak. Bind it with a `let` first, then borrow that",
             shown, DELETE_METHOD));
+    }
+
+    // --- temporary lifetime extension
+
+    /// Spill any borrowed owning temporary in this statement's own expressions
+    /// into a `let` (appended to `decls`), rewriting each such temporary in
+    /// place into a reference to its spill local. The caller wraps the statement
+    /// in a block that owns those `let`s, so the block's scope-end unwind runs
+    /// each temporary's `delete` - extending its life to the end of the
+    /// enclosing statement, which is late enough that any borrow taken from it
+    /// during the statement stays valid.
+    ///
+    /// The `while` condition is deliberately not hoisted: it is re-evaluated on
+    /// every iteration, so a temporary borrowed there must be created and
+    /// destroyed *inside* the loop, which a spill to before the loop cannot
+    /// express. `borrowed_temp` still reports it. Branch and loop bodies carry
+    /// no expression of their own here - they are separate statements, hoisted
+    /// as each is processed.
+    fn hoist_stmt(&mut self, value: &mut StmtNode<'a>, decls: &mut Vec<Stmt<'a>>) {
+        match value {
+            StmtNode::Expr(e) | StmtNode::Return(e) => self.hoist_temps(e, decls),
+            StmtNode::Declare { value, .. } => self.hoist_temps(value, decls),
+            StmtNode::Assign { left, value } => {
+                self.hoist_temps(left, decls);
+                self.hoist_temps(value, decls);
+            }
+            StmtNode::If { condition, .. } => self.hoist_temps(condition, decls),
+            StmtNode::While { .. } | StmtNode::Match { .. } | StmtNode::Block(_)
+            | StmtNode::Break | StmtNode::Continue => {}
+        }
+    }
+
+    /// Walk `e` for owning temporaries in borrow position - the operand of a `&`
+    /// and the receiver of a `&self` method call, exactly where `borrowed_temp`
+    /// would object - and spill each. Children are visited first, so a temporary
+    /// nested inside another is spilled before the one enclosing it and the
+    /// outer `let` refers to the inner's spill local, not to a live temporary.
+    fn hoist_temps(&mut self, e: &mut Expr<'a>, decls: &mut Vec<Stmt<'a>>) {
+        let id = e.id;
+        match &mut e.value {
+            ExprNode::Access { base, .. } => self.hoist_temps(base, decls),
+            ExprNode::Index { slice, index } => {
+                self.hoist_temps(slice, decls);
+                self.hoist_temps(index, decls);
+            }
+            ExprNode::Unary { op: UnaryOp::AddrOf, operand } => {
+                self.hoist_temps(operand, decls);
+                self.spill(operand, decls);
+            }
+            ExprNode::Unary { operand, .. } => self.hoist_temps(operand, decls),
+            ExprNode::Binary { left, right, .. } => {
+                self.hoist_temps(left, decls);
+                self.hoist_temps(right, decls);
+            }
+            ExprNode::Struct { fields, .. } => {
+                for (_, f) in fields { self.hoist_temps(f, decls); }
+            }
+            ExprNode::Slice(elements) => {
+                for x in elements { self.hoist_temps(x, decls); }
+            }
+            ExprNode::Call { func, args, .. } => {
+                // a method call borrows its receiver when the adjust is `&recv`;
+                // `func` is then the `recv.method` access whose base is that
+                // receiver. A plain call has nothing borrowed at this node.
+                match self.cx.method_calls.get(&id).map(|mc| matches!(mc.adjust, RecvAdjust::AddrOf)) {
+                    Some(borrows_recv) => {
+                        let ExprNode::Access { base, .. } = &mut func.value else {
+                            unreachable!("method call callee is always a field access")
+                        };
+                        self.hoist_temps(base, decls);
+                        if borrows_recv { self.spill(base, decls); }
+                    }
+                    None => self.hoist_temps(func, decls),
+                }
+                for a in args { self.hoist_temps(a, decls); }
+            }
+            _ => {}
+        }
+    }
+
+    /// Replace `e` with a `let $tmp = <e>` (appended to `decls`) and a `Var`
+    /// naming that local, when `e` is an owning temporary. Mirrors
+    /// `borrowed_temp`'s guards: a bare `Var` (a global constant) owns nothing
+    /// acquired here, and a `Copy` value needs no `delete`, so neither is
+    /// spilled. The new `let` is processed like any other when the wrapping
+    /// block runs, so its slot and drop fall out of the ordinary machinery.
+    fn spill(&mut self, e: &mut Expr<'a>, decls: &mut Vec<Stmt<'a>>) {
+        if matches!(e.value, ExprNode::Var(_)) { return; }
+        if !matches!(self.root(e), Root::Temp) { return; }
+        let Some(ty) = self.ty_of(e) else { return };
+        if self.model.is_copy(&ty) { return; }
+        let span = e.span;
+        // a typed placeholder to leave behind; it becomes the reference to the
+        // spill local once its binding is known.
+        let hole = self.expr(ExprNode::Var(SPILL_TEMP), ty.clone(), span);
+        let temp = std::mem::replace(e, hole);
+        let decl = Metadata::new(
+            StmtNode::Declare { name: SPILL_TEMP, ty: ty.clone(), value: temp }, span);
+        self.cx.resolved.insert(e.id, Binding::Local(decl.id));
+        decls.push(decl);
     }
 
     /// An expression in a position that takes its value: a `let` initializer, an
@@ -669,7 +782,18 @@ impl<'a, 'c> Checker<'a, 'c> {
     /// Process one statement, appending it (and any destruction around it) to
     /// `out`. Returns whether control definitely leaves here.
     fn one(&mut self, stmt: Stmt<'a>, out: &mut Vec<Stmt<'a>>) -> bool {
-        let Metadata { span, id, value } = stmt;
+        let Metadata { span, id, mut value } = stmt;
+
+        // spill borrowed owning temporaries into `let`s, then wrap the statement
+        // in a block that owns them: the block's scope-end unwind destroys each
+        // one at the end of the enclosing statement. Re-processing the wrapped
+        // statement finds nothing left to hoist, so this recurs exactly once.
+        let mut decls = Vec::new();
+        self.hoist_stmt(&mut value, &mut decls);
+        if !decls.is_empty() {
+            decls.push(Metadata { span, id, value });
+            return self.one(Metadata::new(StmtNode::Block(decls), span), out);
+        }
 
         match value {
             StmtNode::Expr(e) => {

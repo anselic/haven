@@ -1,0 +1,7 @@
+peek 1
+drop 1
+between
+show 2
+drop 2
+done
+n=7
