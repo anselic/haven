@@ -44,9 +44,10 @@ pub trait Delete {
 // `printf_f64`/`printf32` procs below, which use a fixed-prototype C helper.
 extern rt_printf<T>(fmt: str, arg: T) void;
 /// Print `arg` to stdout using the C `printf` format string `fmt`
-/// (e.g. `printf::<i32>("%d\n", 42)`). Exactly one argument is supported, and
-/// `T` must match the conversion specifier in `fmt`. For floats, use
-/// `printf_f64`/`printf32` instead.
+/// (e.g. `printf("%d\n", 42)`). `T` is inferred from `arg`, so the turbofish is
+/// optional (`printf::<i32>("%d\n", 42)` is the explicit form). Exactly one
+/// argument is supported, and `T` must match the conversion specifier in `fmt`.
+/// For floats, use `printf_f64`/`printf32` instead.
 pub proc printf<T>(fmt: str, arg: T) void {
     rt_printf::<T>(fmt, arg);
 }
@@ -64,9 +65,9 @@ extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];
 extern rt_abort(msg: str) void;
 
 /// Write `s` to stdout with no trailing newline.
-pub proc print(s: str) void { printf::<str>("%s", s); }
+pub proc print(s: str) void { printf("%s", s); }
 /// Write `s` to stdout followed by a newline.
-pub proc println(s: str) void { printf::<str>("%s\n", s); }
+pub proc println(s: str) void { printf("%s\n", s); }
 
 /// Print a single `f64` using the `printf` format `fmt` (e.g. `"%f\n"`).
 pub proc printf_f64(fmt: str, arg: f64) void {

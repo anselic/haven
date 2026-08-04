@@ -87,7 +87,7 @@ fn main() {
             // node: the post-mono pass below has no trait declarations left to
             // find it in.
             let delete_trait = cx.delete_trait;
-            let mut mono_ast = mono::monomorphize(&ast, &mut defs, &arena, &cx.node_types, &impls).unwrap_or_else(|e| {
+            let mut mono_ast = mono::monomorphize(&ast, &mut defs, &arena, &cx.node_types, &cx.inferred_type_args, &impls).unwrap_or_else(|e| {
                 diag::report_error("Monomorphization error", &e, &files);
                 std::process::exit(1);
             });

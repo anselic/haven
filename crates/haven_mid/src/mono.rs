@@ -134,6 +134,11 @@ struct Mono<'p, 'a> {
     /// so `subst_ty` with the current bindings turns one into the concrete
     /// receiver at this instantiation.
     node_types: &'p HashMap<usize, Type<'a>>,
+    /// Turbofish args the typechecker inferred for bare generic calls
+    /// (`printf(x)`), keyed by the call node's id. The AST node carries an empty
+    /// `type_args`, so `rebuild_expr` falls back to this to learn which instance
+    /// the call asks for. Keyed by template node ids, same as `node_types`.
+    inferred_type_args: &'p HashMap<usize, Vec<GenericArg<'a>>>,
     /// Every `extend T: Trait` in the program, for deciding whether a
     /// *conditional* impl covers the instance being minted — see
     /// [`Self::impl_applies`]. Only destructors consult this: they are the one
@@ -764,9 +769,16 @@ impl<'p, 'a> Mono<'p, 'a> {
                     }
                 }
                 // sub type params inside the turbofish (user generic calls +
-                // intrinsics like `sizeof::<T>()`)
+                // intrinsics like `sizeof::<T>()`). A bare generic call carries an
+                // empty turbofish on the node; the typechecker recovered its args
+                // by inference, so fall back to those.
+                let effective_targs: &[GenericArg<'a>] = if type_args.is_empty() {
+                    self.inferred_type_args.get(&expr.id).map_or(type_args, Vec::as_slice)
+                } else {
+                    type_args
+                };
                 let subst_targs: Vec<GenericArg<'a>> =
-                    type_args.iter().map(|ga| self.subst_targ(ga, b)).collect();
+                    effective_targs.iter().map(|ga| self.subst_targ(ga, b)).collect();
 
                 // user generic call: mangle to the concrete instance, drop the
                 // turbofish.
@@ -1099,6 +1111,7 @@ pub fn monomorphize<'a>(
     defs: &mut Defs<'a>,
     arena: &'a Bump,
     node_types: &HashMap<usize, Type<'a>>,
+    inferred_type_args: &HashMap<usize, Vec<GenericArg<'a>>>,
     impls: &[ImplDecl<'a>],
 ) -> Result<Vec<TopLevel<'a>>, Error> {
     // functions stay keyed by emitted name: a call site names its callee, and
@@ -1136,6 +1149,7 @@ pub fn monomorphize<'a>(
         members: defs.members().clone(),
         defs,
         node_types,
+        inferred_type_args,
         impls,
         instance_args: HashMap::new(),
     };

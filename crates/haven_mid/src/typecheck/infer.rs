@@ -555,7 +555,7 @@ pub(crate) fn check_expr<'a>(
     Ok(())
 }
 
-fn infer<'a>(
+pub(crate) fn infer<'a>(
     cx: &mut Context<'a>,
     expr: &Expr<'a>,
 ) -> Result<Type<'a>, Error> {
@@ -1180,7 +1180,13 @@ fn infer<'a>(
             if let ExprNode::Var(name) = &func.value {
                 if let Some(sig) = cx.generic_fns.get(*name).cloned() {
                     let name = *name;
-                    let ty = check_generic_call(cx, name, &sig, type_args, args, &span)?;
+                    let (ty, inferred) = check_generic_call(cx, name, &sig, type_args, args, &span)?;
+                    // a bare call with inferred turbofish keeps an empty `type_args`
+                    // on the AST node; record the recovered args so mono knows which
+                    // instance to mint (it reads this alongside `node_types`).
+                    if let Some(targs) = inferred {
+                        cx.inferred_type_args.insert(expr.id, targs);
+                    }
                     cx.node_types.insert(expr.id, ty.clone());
                     return Ok(ty);
                 }

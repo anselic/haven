@@ -85,6 +85,13 @@ pub struct Context<'a> {
     pub scopes: Vec<HashMap<&'a str, (Option<Binding<'a>>, Type<'a>)>>,
     /// Map from Expr/Stmt/TopLevel IDs to their inferred types, for use in later codegen
     pub node_types: HashMap<usize, Type<'a>>,
+    /// Turbofish arguments recovered by inference for a generic call written
+    /// without one (`printf(x)` instead of `printf::<T>(x)`), keyed by the call
+    /// node's id and in the callee's declared param order. The AST node still
+    /// carries an empty `type_args`, so monomorphization reads the inferred args
+    /// from here - exactly as it reads receiver types from `node_types` - to know
+    /// which instance a bare generic call asks for.
+    pub inferred_type_args: HashMap<usize, Vec<GenericArg<'a>>>,
     /// Name resolution: maps each `Var` use's node id to the specific param/local
     /// binding it refers to. Globals are absent (they fall back to the global
     /// namespace). Consumed by MIL lowering to key variable storage, which makes
@@ -207,6 +214,7 @@ impl<'a> Context<'a> {
         Self {
             scopes: vec![HashMap::new()], // global scope
             node_types: HashMap::new(),
+            inferred_type_args: HashMap::new(),
             resolved: HashMap::new(),
             types: TypeTable::new(),
             generic_structs: std::collections::HashMap::new(),

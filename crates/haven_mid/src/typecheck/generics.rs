@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
 use crate::intrinsics::{Intrinsic, IntrinsicSig, TyConstraint, ConstBound};
-use super::context::{Context, GenericFnSig};
-use super::infer::check_expr;
+use super::context::{Context, GenericFnSig, param_names};
+use super::infer::{check_expr, infer};
 
 /// Resolves a turbofish type argument (generic params → `Type::Param`), checks
 /// any referenced structs exist, then checks it against the parameter's kind
@@ -310,9 +310,15 @@ pub(crate) fn check_bounds<'a>(
     Ok(())
 }
 
-/// Typecheck a call to a user generic function: bind the turbofish type args to
-/// the callee's type params, substitute them into the sig, check the value args,
-/// and return the substituted result type. mono materializes the instance later.
+/// Typecheck a call to a user generic function: bind the callee's type params,
+/// substitute them into the sig, check the value args, and return the substituted
+/// result type. mono materializes the instance later.
+///
+/// The type params are bound one of two ways. An explicit turbofish
+/// (`printf::<str>(s)`) binds them positionally. An omitted one (`printf(s)`) is
+/// inferred from the argument types; when that happens the recovered args are
+/// returned as `Some(..)` so the caller can stash them for mono, which otherwise
+/// sees a bare call with nothing to instantiate.
 pub(crate) fn check_generic_call<'a>(
     cx: &mut Context<'a>,
     name: &'a str,
@@ -320,8 +326,27 @@ pub(crate) fn check_generic_call<'a>(
     type_args: &[GenericArg<'a>],
     args: &[Expr<'a>],
     span: &Span,
-) -> Result<Type<'a>, Error> {
-    if type_args.len() != sig.generics.len() {
+) -> Result<(Type<'a>, Option<Vec<GenericArg<'a>>>), Error> {
+    // value-arg arity is the same both ways, and the inference path relies on
+    // args lining up one-to-one with params, so check it once up front.
+    if args.len() != sig.params.len() {
+        return Err(Error {
+            msg: format!("{}() expects {} argument{}, got {}",
+                name, sig.params.len(), if sig.params.len() == 1 { "" } else { "s" }, args.len()),
+            span: span.clone(),
+        });
+    }
+
+    // Partial turbofish (some but not all args) stays an arity error: inference
+    // is all-or-nothing, either every param is written or every param is inferred.
+    let (type_bindings, const_bindings, inferred) = if type_args.is_empty() {
+        let (tb, cb) = infer_type_args(cx, name, sig, args, span)?;
+        let materialized = materialize_targs(name, &sig.generics, &tb, &cb, span)?;
+        (tb, cb, Some(materialized))
+    } else if type_args.len() == sig.generics.len() {
+        let (tb, cb) = bind_turbofish(cx, name, &sig.generics, type_args, span)?;
+        (tb, cb, None)
+    } else {
         return Err(Error {
             msg: format!(
                 "{}() expects {} generic argument{} in `::<...>`, got {}",
@@ -330,27 +355,87 @@ pub(crate) fn check_generic_call<'a>(
             ),
             span: span.clone(),
         });
-    }
-
-    let (type_bindings, const_bindings) =
-        bind_turbofish(cx, name, &sig.generics, type_args, span)?;
+    };
 
     let params: Vec<Type<'a>> = sig.params.iter()
         .map(|p| subst_param_type(&type_bindings, &const_bindings, p)).collect();
     let return_type = subst_param_type(&type_bindings, &const_bindings, &sig.return_type);
 
-    if args.len() != params.len() {
-        return Err(Error {
-            msg: format!("{}() expects {} argument{}, got {}",
-                name, params.len(), if params.len() == 1 { "" } else { "s" }, args.len()),
-            span: span.clone(),
-        });
-    }
     for (param_ty, arg) in params.iter().zip(args) {
         check_expr(cx, param_ty, arg)?;
     }
 
-    Ok(return_type)
+    Ok((return_type, inferred))
+}
+
+/// Recover the callee's type-param bindings from the argument types, for a call
+/// written without a turbofish (`printf(x)` rather than `printf::<T>(x)`). Each
+/// declared parameter type is a pattern over the callee's generics; unifying it
+/// against the inferred argument type binds whatever generics appear in it, so
+/// `arg: T` against an `str` argument binds `T = str`.
+///
+/// Unification is best-effort per argument: a param that shares no structure with
+/// its argument simply binds nothing (a generic that appears in *no* parameter is
+/// then caught by `materialize_targs`), and a structural mismatch on a param that
+/// *does* mention a generic is left for the `check_expr` pass to report against
+/// the substituted type, where the message names the concrete types rather than a
+/// bare "could not unify".
+fn infer_type_args<'a>(
+    cx: &mut Context<'a>,
+    name: &str,
+    sig: &GenericFnSig<'a>,
+    args: &[Expr<'a>],
+    span: &Span,
+) -> Result<(HashMap<&'a str, Type<'a>>, HashMap<&'a str, ConstVal<'a>>), Error> {
+    // the free names unify may bind are exactly the callee's own generics.
+    let params = param_names(&sig.generics);
+    let mut u = Unified::default();
+    for (param_ty, arg) in sig.params.iter().zip(args) {
+        let arg_ty = infer(cx, arg)?;
+        unify(param_ty, &arg_ty, &params, &mut u);
+    }
+    // check bounds on whatever we managed to bind; an unbound param is reported
+    // by `materialize_targs`, and `check_bounds` skips it in the meantime.
+    check_bounds(cx, name, &sig.generics, &u.types, span)?;
+    Ok((u.types, u.consts))
+}
+
+/// Assemble inferred bindings into a positional turbofish, in the callee's
+/// declared param order, so monomorphization consumes it exactly as if the user
+/// had written `name::<...>`. Errors if any generic went unbound.
+fn materialize_targs<'a>(
+    name: &str,
+    generics: &[GenericParam<'a>],
+    types: &HashMap<&'a str, Type<'a>>,
+    consts: &HashMap<&'a str, ConstVal<'a>>,
+    span: &Span,
+) -> Result<Vec<GenericArg<'a>>, Error> {
+    let mut out = Vec::with_capacity(generics.len());
+    for gp in generics {
+        let arg = match gp {
+            GenericParam::Type { name: pn, .. } =>
+                types.get(pn).cloned().map(GenericArg::Type),
+            GenericParam::Const(pn, _) =>
+                consts.get(pn).cloned().map(GenericArg::Const),
+        };
+        match arg {
+            Some(a) => out.push(a),
+            None => {
+                let pn = match gp {
+                    GenericParam::Type { name, .. } => *name,
+                    GenericParam::Const(name, _) => *name,
+                };
+                return Err(Error {
+                    msg: format!(
+                        "cannot infer type argument `{}` for `{}` from its arguments; \
+                         specify it explicitly, e.g. `{}::<...>(...)`",
+                        pn, name, name),
+                    span: span.clone(),
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Bind a generic struct's applied args to its declared params (`Buf<i32, 8>` ->
