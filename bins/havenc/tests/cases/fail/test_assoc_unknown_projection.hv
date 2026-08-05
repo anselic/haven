@@ -1,0 +1,16 @@
+// A `Self::X` projection in a trait method signature must name an associated
+// type the trait actually declares. `Self::Elem` names none, so resolution
+// reports it.
+//@ error: trait has no associated type 'Elem'
+
+enum Option<T> { None, Some(T) }
+
+trait Iterator {
+    type Item;
+    proc next(*self) Option<Self::Elem>;
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

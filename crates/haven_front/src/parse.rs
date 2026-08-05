@@ -1259,6 +1259,22 @@ fn parse_trait_method<'tks, 'src: 'tks>()
         .boxed()
 }
 
+/// One item inside a `trait` body: an associated-type requirement (`type Item;`)
+/// or a required method signature. Partitioned into the trait node's
+/// `assoc_types` / `methods` after parsing.
+enum TraitItem<'a> {
+    Assoc(&'a str),
+    Method(TraitMethod<'a>),
+}
+
+/// One item inside an `extend` body: an associated-type binding (`type Item =
+/// i32;`) or a method definition. Partitioned into the extend node's
+/// `assoc_bindings` / `methods` after parsing.
+enum ExtendItem<'a> {
+    Assoc(&'a str, Type<'a>),
+    Method(Method<'a>),
+}
+
 fn parse_toplevel<'tks, 'src: 'tks>()
 -> impl Parser<
     'tks,
@@ -1509,18 +1525,39 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .or_not()
         .map(|w| w.unwrap_or_default());
 
+    // an `extend` body item: an associated-type binding `type Item = Ty;` (tried
+    // first, since it is the only one that leads with `type`) or a method.
+    let assoc_binding = select_ref! { Token::Var(s) if *s == "type" => () }
+        .ignore_then(var.map(|s| *s))
+        .then_ignore(just(Token::Assign))
+        .then(parse_type())
+        .then_ignore(just(Token::Semicolon))
+        .map(|(n, ty)| ExtendItem::Assoc(n, ty));
+    let extend_item = choice((
+        assoc_binding,
+        parse_method().map(ExtendItem::Method),
+    ));
     let extend_ = select_ref! { Token::Var(s) if *s == "extend" => () }
         .ignore_then(parse_type())
         .then(just(Token::Colon).ignore_then(var.map(|s| *s)).or_not())
         .then(where_bounds)
         .then(
-            parse_method()
+            extend_item
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|(((target, trait_), where_bounds), methods)|
-            (TopLevelNode::Extend { target, trait_, where_bounds, methods }, Vec::new()));
+        .map(|(((target, trait_), where_bounds), items)| {
+            let mut assoc_bindings = Vec::new();
+            let mut methods = Vec::new();
+            for it in items {
+                match it {
+                    ExtendItem::Assoc(n, ty) => assoc_bindings.push((n, ty)),
+                    ExtendItem::Method(m) => methods.push(m),
+                }
+            }
+            (TopLevelNode::Extend { target, trait_, where_bounds, assoc_bindings, methods }, Vec::new())
+        });
 
     // `[pub] trait Name { proc m(...) Ret; ... }`. Like `extend`, `trait` lexes as
     // a `Var` (not a reserved keyword), so match it by text - which is why this
@@ -1530,21 +1567,36 @@ fn parse_toplevel<'tks, 'src: 'tks>()
     // put them. `pub` is real: trait names are module-namespaced like struct and
     // enum names, so a private trait is invisible to other modules rather than
     // merely un-importable.
+    // a `trait` body item: an associated-type requirement `type Item;` (tried
+    // first, since it is the only one that leads with `type`) or a method sig.
+    let assoc_decl = select_ref! { Token::Var(s) if *s == "type" => () }
+        .ignore_then(var.map(|s| *s))
+        .then_ignore(just(Token::Semicolon))
+        .map(TraitItem::Assoc);
+    let trait_item = choice((
+        assoc_decl,
+        parse_trait_method().map(TraitItem::Method),
+    ));
     let trait_ = just(Token::Pub).or_not().map(|o| o.is_some())
         .then_ignore(select_ref! { Token::Var(s) if *s == "trait" => () })
         .then(var.map(|s| *s))
         .then(
-            parse_trait_method()
+            trait_item
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|((is_pub, name), methods)| (TopLevelNode::Trait {
-            name,
-            def: DefId::UNRESOLVED,
-            is_pub,
-            methods,
-        }, Vec::new()));
+        .map(|((is_pub, name), items)| {
+            let mut assoc_types = Vec::new();
+            let mut methods = Vec::new();
+            for it in items {
+                match it {
+                    TraitItem::Assoc(n) => assoc_types.push(n),
+                    TraitItem::Method(m) => methods.push(m),
+                }
+            }
+            (TopLevelNode::Trait { name, def: DefId::UNRESOLVED, is_pub, assoc_types, methods }, Vec::new())
+        });
 
     choice((
         function,
@@ -1591,6 +1643,8 @@ fn parse_toplevel<'tks, 'src: 'tks>()
                                 GenericParam::Type { bounds, .. } if !bounds.is_empty()))
                             .cloned()
                             .collect(),
+                        // inherent methods carry no trait, hence no bindings.
+                        assoc_bindings: Vec::new(),
                         methods,
                     },
                     span,

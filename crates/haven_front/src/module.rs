@@ -358,6 +358,9 @@ struct RawImpl<'a> {
     generics: Vec<GenericParam<'a>>,
     where_bounds: Vec<GenericParam<'a>>,
     trait_: &'a str,
+    /// `type Item = Ty;` bindings, still unresolved: resolved in `load_and_merge`
+    /// through the module's scopes with the impl's inferred parameters in scope.
+    assoc_bindings: Vec<(&'a str, Type<'a>)>,
     span: Span,
 }
 
@@ -712,7 +715,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
     // symbols apart long enough to get there.
     let mut used_names: HashSet<String> = HashSet::new();
     for tl in items.drain(..) {
-        let TopLevelNode::Extend { target, trait_, where_bounds, methods } = &tl.value else {
+        let TopLevelNode::Extend { target, trait_, where_bounds, assoc_bindings, methods } = &tl.value else {
             kept.push(tl);
             continue;
         };
@@ -726,6 +729,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 generics: Vec::new(),
                 where_bounds: where_bounds.clone(),
                 trait_: tr,
+                assoc_bindings: assoc_bindings.clone(),
                 span: tl.span.clone(),
             });
         }
@@ -1035,6 +1039,49 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             Type::Function { params, return_type } => {
                 for p in params { self.ty(p, gparams); }
                 self.ty(return_type, gparams);
+            }
+            _ => {}
+        }
+    }
+
+    /// Rewrite a `Self::Item` projection inside a trait method signature to the
+    /// bare associated-type name, so the following `ty` pass resolves it to a
+    /// `Param("Item")` (the trait scope treats each associated type like an
+    /// implicit type parameter; conformance substitutes it per impl).
+    ///
+    /// Only `Self::<assoc>` is accepted here. `Self::<other>` names an
+    /// associated type the trait never declared, and a projection on anything
+    /// but `Self` (`T::Item` on a bounded parameter) is not supported yet; both
+    /// are reported. Every other path is left for `ty` to resolve normally, so a
+    /// module qualifier (`geo::Point`) is untouched.
+    fn self_assoc(&mut self, ty: &mut Type<'a>, assoc: &HashSet<&'a str>) {
+        match ty {
+            Type::Path { path, args } => {
+                let segs = &path.segments;
+                if segs.len() == 2 && segs[0] == "Self" {
+                    if assoc.contains(segs[1]) {
+                        if !args.is_empty() {
+                            self.error_here(format!(
+                                "associated type '{}' takes no arguments", segs[1]));
+                        }
+                        *path = Path::single(segs[1]);
+                    } else {
+                        self.error_here(format!(
+                            "trait has no associated type '{}'", segs[1]));
+                    }
+                    return;
+                }
+                for a in args.iter_mut() {
+                    if let GenericArg::Type(t) = a { self.self_assoc(t, assoc); }
+                }
+            }
+            Type::Pointer(inner)
+            | Type::Array(inner, _)
+            | Type::Slice(inner)
+            | Type::Simd(inner, _) => self.self_assoc(inner, assoc),
+            Type::Function { params, return_type } => {
+                for p in params { self.self_assoc(p, assoc); }
+                self.self_assoc(return_type, assoc);
             }
             _ => {}
         }
@@ -1492,15 +1539,29 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // be rewritten like any other - a `String` in `proc display(*self)
             // String` resolves to the imported struct's mangled name. `Self` is
             // left untouched (typecheck substitutes it per implementing type).
-            TopLevelNode::Trait { name, def, methods, .. } => {
-                let empty = HashSet::new();
+            // Each associated type (`type Item;`) is in scope for the signatures
+            // as an implicit type parameter: `Self::Item` is rewritten to the
+            // bare name first, then resolved to `Param("Item")` via `gparams`.
+            TopLevelNode::Trait { name, def, assoc_types, methods, .. } => {
                 let sym = *self.scopes.types.get(*name)
                     .expect("a module's own trait is always in its own scope");
                 *name = sym.name;
                 *def = sym.def;
+                let mut assoc: HashSet<&'a str> = HashSet::new();
+                for a in assoc_types.iter() {
+                    if *a == "Self" {
+                        self.error_here("an associated type cannot be named 'Self'".into());
+                    } else if !assoc.insert(*a) {
+                        self.error_here(format!("duplicate associated type '{}'", a));
+                    }
+                }
                 for m in methods.iter_mut() {
-                    for (_, ty) in m.params.iter_mut() { self.ty(ty, &empty); }
-                    self.ty(&mut m.return_type, &empty);
+                    for (_, ty) in m.params.iter_mut() {
+                        self.self_assoc(ty, &assoc);
+                        self.ty(ty, &assoc);
+                    }
+                    self.self_assoc(&mut m.return_type, &assoc);
+                    self.ty(&mut m.return_type, &assoc);
                 }
             }
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before name resolution"),
@@ -2086,6 +2147,17 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
                 resolve_extend_target(&imp.target, &imp.generics, scopes, &no_members, m.file),
                 scopes.types.get(imp.trait_),
             ) else { continue };
+            // resolve each `type Item = Ty` binding's right-hand side with the
+            // impl's inferred parameters in scope, so `type Item = T` in
+            // `extend Vec<T>: Iterator` binds to `Param("T")`. A binding to an
+            // unknown type is reported here (through `rw`'s error sink) rather
+            // than dropped, since nothing else revisits the binding.
+            let gp = generic_names(&imp.generics);
+            let assoc_bindings = imp.assoc_bindings.iter().map(|(n, ty)| {
+                let mut bty = ty.clone();
+                rw.ty(&mut bty, &gp);
+                (*n, bty)
+            }).collect();
             impls.push(ImplDecl {
                 self_ty,
                 head,
@@ -2097,6 +2169,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
                 // where T: Display`) never satisfies a bound on the whole `Vec<T>`.
                 generics: resolve_bound_defs(&imp.generics, scopes),
                 trait_: trait_.def,
+                assoc_bindings,
                 span: imp.span.clone(),
             });
         }

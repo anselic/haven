@@ -74,6 +74,10 @@ pub struct TraitMethodSig<'a> {
 #[derive(Clone, Debug)]
 pub struct TraitDef<'a> {
     pub methods: HashMap<&'a str, TraitMethodSig<'a>>,
+    /// Names of the trait's associated types (`type Item;`). Every conforming
+    /// impl must bind all of them; a method signature's `Self::Item` was
+    /// resolved to `Param("Item")`, substituted per impl during conformance.
+    pub assoc_types: Vec<&'a str>,
 }
 
 #[derive(Clone, Debug)]

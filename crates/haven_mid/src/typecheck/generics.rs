@@ -527,6 +527,43 @@ pub(crate) fn subst_self<'a>(ty: &Type<'a>, self_ty: &Type<'a>) -> Type<'a> {
     }
 }
 
+/// Like [`subst_self`], but also replaces each associated-type parameter with the
+/// implementing type's binding for it. Inside a trait method signature `Self`
+/// stands for the implementing type and a `Self::Item` projection was resolved to
+/// `Param("Item")`; `assoc` maps each such name (`"Item"`) to the type the impl
+/// bound it to. Used to turn a trait signature into the concrete signature the
+/// impl must match. A `Named` type's generic arguments are descended into so
+/// `Option<Self::Item>` becomes `Option<i32>`.
+pub(crate) fn subst_self_assoc<'a>(
+    ty: &Type<'a>,
+    self_ty: &Type<'a>,
+    assoc: &std::collections::HashMap<&'a str, Type<'a>>,
+) -> Type<'a> {
+    match ty {
+        Type::Param(name) if *name == "Self" => self_ty.clone(),
+        Type::Param(name) => match assoc.get(name) {
+            Some(bound) => bound.clone(),
+            None => ty.clone(),
+        },
+        Type::Pointer(inner)  => Type::Pointer(Box::new(subst_self_assoc(inner, self_ty, assoc))),
+        Type::Array(inner, n) => Type::Array(Box::new(subst_self_assoc(inner, self_ty, assoc)), n.clone()),
+        Type::Slice(inner)    => Type::Slice(Box::new(subst_self_assoc(inner, self_ty, assoc))),
+        Type::Simd(inner, n)  => Type::Simd(Box::new(subst_self_assoc(inner, self_ty, assoc)), n.clone()),
+        Type::Function { params, return_type } => Type::Function {
+            params: params.iter().map(|p| subst_self_assoc(p, self_ty, assoc)).collect(),
+            return_type: Box::new(subst_self_assoc(return_type, self_ty, assoc)),
+        },
+        Type::Named { def, args } => Type::Named {
+            def: *def,
+            args: args.iter().map(|a| match a {
+                GenericArg::Type(t) => GenericArg::Type(subst_self_assoc(t, self_ty, assoc)),
+                other => other.clone(),
+            }).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Verifies that every `ConstVal::Param` in `ty` names a const generic parameter
 /// in `in_scope`. Ignores type params/structs entirely - those are handled by
 /// `resolve_type`/`check_type_resolves` - so it can run on raw (unresolved) types.

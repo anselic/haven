@@ -11,7 +11,7 @@ mod infer;
 // Public surface re-exported for the rest of the crate (mil.rs) and the driver.
 pub use context::{Context, EnumDef, GenericFnSig, MethodCall, RecvAdjust, TraitDef, TraitMethodSig, ENUM_TAG_FIELD, ENUM_PAYLOAD_FIELD};
 
-use generics::{check_const_scope, check_type_resolves, subst_self};
+use generics::{check_const_scope, check_type_resolves, subst_self_assoc};
 use enums::{enum_variant, enum_repr, enum_agg_deps_ready, payload_blob_type};
 use infer::{check_stmt, check_expr, always_returns};
 
@@ -617,7 +617,7 @@ pub fn typecheck_program<'a>(
     // the struct, an enum name -> `Type::Enum`); `Self` is left symbolic and
     // substituted per-impl / per-bound later.
     for node in program {
-        if let TopLevelNode::Trait { def, name, methods, .. } = &node.value {
+        if let TopLevelNode::Trait { def, name, assoc_types, methods, .. } = &node.value {
             // the one trait the compiler itself knows about. Matched on the
             // *source* spelling and the declaring module, so a user's own
             // `trait Delete` stays an ordinary trait rather than quietly
@@ -645,7 +645,7 @@ pub fn typecheck_program<'a>(
                 ms.insert(m.name, TraitMethodSig { receiver: m.receiver, params, return_type });
             }
             if dup { continue; }
-            cx.traits.insert(*def, TraitDef { methods: ms });
+            cx.traits.insert(*def, TraitDef { methods: ms, assoc_types: assoc_types.clone() });
         }
     }
 
@@ -709,6 +709,35 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
         }
     };
 
+    // the associated-type bindings this impl supplies, keyed by name. Every
+    // associated type the trait declares must be bound exactly once; a binding
+    // naming a type the trait never declared is a mistake, not silently ignored.
+    let mut assoc: HashMap<&'a str, Type<'a>> = HashMap::new();
+    for (name, ty) in &imp.assoc_bindings {
+        if !trait_def.assoc_types.contains(name) {
+            errors.push(Error {
+                msg: format!("trait '{}' has no associated type '{}'", trait_, name),
+                span: imp.span.clone(),
+            });
+            continue;
+        }
+        if assoc.insert(*name, ty.clone()).is_some() {
+            errors.push(Error {
+                msg: format!("associated type '{}' is bound more than once", name),
+                span: imp.span.clone(),
+            });
+        }
+    }
+    for name in &trait_def.assoc_types {
+        if !assoc.contains_key(name) {
+            errors.push(Error {
+                msg: format!("type '{}' does not implement trait '{}': missing associated type '{}'",
+                    target, trait_, name),
+                span: imp.span.clone(),
+            });
+        }
+    }
+
     for (mname, sig) in &trait_def.methods {
         // the member table knows what the impl actually declared; this used to
         // rebuild `Target$method`, which missed entirely when the type's emitted
@@ -747,8 +776,8 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
             Receiver::Value => expected.push(self_ty.clone()),
             Receiver::Pointer => expected.push(Type::Pointer(Box::new(self_ty.clone()))),
         }
-        for p in &sig.params { expected.push(subst_self(p, &self_ty)); }
-        let expected_ret = subst_self(&sig.return_type, &self_ty);
+        for p in &sig.params { expected.push(subst_self_assoc(p, &self_ty, &assoc)); }
+        let expected_ret = subst_self_assoc(&sig.return_type, &self_ty, &assoc);
 
         if params.len() != expected.len()
             || params.iter().zip(&expected).any(|(a, b)| a != b)

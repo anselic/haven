@@ -1,0 +1,23 @@
+// An `extend T: Trait` must bind every associated type the trait declares.
+// Here `type Item = ...;` is missing, so conformance reports it.
+//@ error: missing associated type 'Item'
+
+enum Option<T> { None, Some(T) }
+
+trait Iterator {
+    type Item;
+    proc next(*self) Option<Self::Item>;
+}
+
+struct R { cur: i32 }
+
+extend R: Iterator {
+    proc next(*self) Option<i32> {
+        return Option::None::<i32>();
+    }
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

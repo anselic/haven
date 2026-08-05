@@ -1,0 +1,43 @@
+// Associated types in traits: `type Item;` in the trait, `type Item = i32;` in
+// the impl. The trait's method signature refers to the associated type as
+// `Self::Item`; conformance substitutes the impl's binding before comparing it
+// against the impl's own `next`, which spells the concrete `Option<i32>`. A
+// concrete call then dispatches to that impl, so the element type flows through
+// with no projection machinery. This is the shape a future iterator-based `for`
+// desugars onto.
+
+enum Option<T> { None, Some(T) }
+
+trait Iterator {
+    type Item;
+    proc next(*self) Option<Self::Item>;
+}
+
+struct RangeIter { cur: i32, end: i32 }
+
+extend RangeIter: Iterator {
+    type Item = i32;
+    proc next(*self) Option<i32> {
+        if (self.cur >= self.end) {
+            return Option::None::<i32>();
+        } else {}
+        let v: i32 = self.cur;
+        self.cur = self.cur + 1;
+        return Option::Some::<i32>(v);
+    }
+}
+
+@export
+proc main() i32 {
+    let it: RangeIter = RangeIter { cur: 0, end: 5 };
+    let sum: i32 = 0;
+    while (true) {
+        let step: Option<i32> = it.next();
+        match (step) {
+            Option::Some(v) -> { sum = sum + v; }
+            Option::None -> { break; }
+        }
+    }
+    println(sum);  // 0+1+2+3+4 = 10
+    return 0;
+}

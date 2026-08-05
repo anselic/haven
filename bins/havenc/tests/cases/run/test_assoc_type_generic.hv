@@ -1,0 +1,37 @@
+// Associated type bound to the impl's own parameter: `extend Once<T>: Iterator
+// { type Item = T; }`. Conformance is checked once, symbolically (`Self::Item`
+// substitutes to `Param("T")`, matching the impl's `Option<T>`); monomorphization
+// then specializes `Once<i32>` and the concrete `next` returns `Option<i32>`.
+
+enum Option<T> { None, Some(T) }
+
+trait Iterator {
+    type Item;
+    proc next(*self) Option<Self::Item>;
+}
+
+struct Once<T> { val: T, done: bool }
+
+extend Once<T>: Iterator {
+    type Item = T;
+    proc next(*self) Option<T> {
+        if (self.done) { return Option::None::<T>(); } else {}
+        self.done = true;
+        return Option::Some::<T>(self.val);
+    }
+}
+
+@export
+proc main() i32 {
+    let o: Once<i32> = Once::<i32> { val: 7, done: false };
+    let sum: i32 = 0;
+    while (true) {
+        let step: Option<i32> = o.next();
+        match (step) {
+            Option::Some(v) -> { sum = sum + v; }
+            Option::None -> { break; }
+        }
+    }
+    println(sum);  // 7
+    return 0;
+}

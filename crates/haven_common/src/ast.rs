@@ -987,6 +987,12 @@ pub struct ImplDecl<'a> {
     /// the free names in `self_ty`. Empty for a fully concrete target.
     pub generics: Vec<GenericParam<'a>>,
     pub trait_: DefId,
+    /// `type Item = i32;` bindings from the block, resolved. Keyed by the
+    /// associated type's name; the bound type is spelled in the impl's own
+    /// parameters (so `extend Vec<T>: Iterator { type Item = T; }` binds `Item`
+    /// to `Param("T")`). Conformance substitutes these for the trait's
+    /// `Self::Item` occurrences.
+    pub assoc_bindings: Vec<(&'a str, Type<'a>)>,
     pub span: Span,
 }
 
@@ -1145,16 +1151,24 @@ pub enum TopLevelNode<'a> {
         /// `target`, so by the time anything typechecks they are ordinary
         /// bounds on the desugared function's generics.
         where_bounds: Vec<GenericParam<'a>>,
+        /// `type Item = i32;` associated-type bindings written in the block, one
+        /// per associated type the trait declares. Consumed only when this is a
+        /// trait impl (`trait_` is `Some`): `check_impl_conformance` substitutes
+        /// each `Self::Item` in the trait's method signatures with the bound type
+        /// before comparing against the impl's methods. Empty for an inherent
+        /// `extend` and for a trait with no associated types.
+        assoc_bindings: Vec<(&'a str, Type<'a>)>,
         methods: Vec<Method<'a>>,
     },
 
-    /// A `trait Name { proc m(*self) Ret; ... }` declaration: a set of required
-    /// method signatures. Unlike `extend`, a trait is NOT desugared in the module
-    /// resolver - it survives to the typechecker, which registers it, checks that
-    /// every `extend T: Trait` conforms, and resolves a bounded type param's
-    /// method calls through it. Monomorphization drops trait nodes (they emit no
-    /// code); static dispatch falls out of substituting the concrete type and
-    /// re-resolving the method call on the concrete instance.
+    /// A `trait Name { type Item; proc m(*self) Ret; ... }` declaration: a set of
+    /// required associated types and method signatures. Unlike `extend`, a trait
+    /// is NOT desugared in the module resolver - it survives to the typechecker,
+    /// which registers it, checks that every `extend T: Trait` conforms, and
+    /// resolves a bounded type param's method calls through it. Monomorphization
+    /// drops trait nodes (they emit no code); static dispatch falls out of
+    /// substituting the concrete type and re-resolving the method call on the
+    /// concrete instance.
     Trait {
         name: &'a str,
         /// This item's identity, assigned by name resolution. Everything that
@@ -1163,6 +1177,12 @@ pub enum TopLevelNode<'a> {
         /// is only the symbol it happens to be emitted under.
         def: DefId,
         is_pub: bool,
+        /// Names of the associated types the trait requires (`type Item;`). Each
+        /// stands for a per-impl type that a method signature refers to as
+        /// `Self::Item` — resolved to `Type::Param(name)` inside the signature,
+        /// so it substitutes like a type parameter of the trait scope. Every
+        /// conforming impl must bind all of them.
+        assoc_types: Vec<&'a str>,
         methods: Vec<TraitMethod<'a>>,
     },
 }
@@ -1239,7 +1259,7 @@ impl<'a> Display for TopLevelNode<'a> {
 
                 write!(f, "{}{}enum {}{} {{\n{}}}", attrs_str, pub_str, name, generics_str, variants_str)
             },
-            TopLevelNode::Extend { target, trait_, where_bounds, methods } => {
+            TopLevelNode::Extend { target, trait_, where_bounds, assoc_bindings, methods } => {
                 let trait_str = match trait_ {
                     Some(t) => format!(": {}", t),
                     None => String::new(),
@@ -1250,6 +1270,8 @@ impl<'a> Display for TopLevelNode<'a> {
                     format!(" where {}", where_bounds.iter()
                         .map(|b| b.to_string()).collect::<Vec<_>>().join(", "))
                 };
+                let assoc_str = assoc_bindings.iter()
+                    .map(|(n, ty)| format!("    type {} = {};\n", n, ty)).collect::<String>();
                 let methods_str = methods.iter().map(|m| {
                     let m = &m.value;
                     let recv = match m.receiver {
@@ -1262,10 +1284,12 @@ impl<'a> Display for TopLevelNode<'a> {
                         .map(|(n, ty)| format!("{}: {}", n, ty)).collect::<Vec<_>>().join(", ");
                     format!("    proc {}({}{}{}) {} {{ ... }}\n", m.name, recv, sep, params_str, m.return_type)
                 }).collect::<String>();
-                write!(f, "extend {}{}{} {{\n{}}}", target, trait_str, where_str, methods_str)
+                write!(f, "extend {}{}{} {{\n{}{}}}", target, trait_str, where_str, assoc_str, methods_str)
             },
-            TopLevelNode::Trait { name, is_pub, methods, .. } => {
+            TopLevelNode::Trait { name, is_pub, assoc_types, methods, .. } => {
                 let pub_str = if *is_pub { "pub " } else { "" };
+                let assoc_str = assoc_types.iter()
+                    .map(|n| format!("    type {};\n", n)).collect::<String>();
                 let methods_str = methods.iter().map(|m| {
                     let recv = match m.receiver {
                         Receiver::Associated => String::new(),
@@ -1277,7 +1301,7 @@ impl<'a> Display for TopLevelNode<'a> {
                         .map(|(n, ty)| format!("{}: {}", n, ty)).collect::<Vec<_>>().join(", ");
                     format!("    proc {}({}{}{}) {};\n", m.name, recv, sep, params_str, m.return_type)
                 }).collect::<String>();
-                write!(f, "{}trait {} {{\n{}}}", pub_str, name, methods_str)
+                write!(f, "{}trait {} {{\n{}{}}}", pub_str, name, assoc_str, methods_str)
             },
         }
     }
