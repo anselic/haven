@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
-use haven_common::defs::{DefId, Defs, Member, MemberTable, TyHead};
+use haven_common::defs::{DefId, Defs, Member, MemberTable, ModId, TyHead};
 use haven_common::layout::TypeTable;
 
 /// The bare names of a generic parameter list, which is the form [`unify`] wants
@@ -169,6 +169,11 @@ pub struct Context<'a> {
     /// method's emitted name directly - so neither receiver-call resolution nor
     /// conformance checking has to rebuild `Type$method` and hope it exists.
     pub members: MemberTable<'a>,
+    /// The module owning the function currently being checked. A receiver call
+    /// `recv.method()` reaching a private method (see [`Member::is_pub`]) declared
+    /// in a different module is an error; this is the module the comparison is
+    /// against. Set before walking each top-level item's body.
+    pub current_module: ModId,
     /// Monomorphized instance -> the template it specializes. Recorded by
     /// `mono`; empty on the pre-mono pass, where no instance exists yet. Lets a
     /// match pattern, which always names the template, be matched against a
@@ -230,6 +235,8 @@ impl<'a> Context<'a> {
             impls: Vec::new(),
             generic_bounds: HashMap::new(),
             members: MemberTable::new(),
+            // overwritten before any body is walked; a placeholder until then.
+            current_module: ModId(u32::MAX),
             instances: HashMap::new(),
             payloads: HashMap::new(),
             names: HashMap::new(),

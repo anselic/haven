@@ -1,0 +1,12 @@
+// `pub` methods cross a module boundary; a private method (`Counter::step`) still
+// works when called from within its own module. `bump_twice` steps twice, so the
+// result is 2.
+//@ exit: 2
+
+import helpers/counter { Counter }
+
+@export
+proc main() i32 {
+    let c: Counter = Counter::make();
+    return c.bump_twice();
+}

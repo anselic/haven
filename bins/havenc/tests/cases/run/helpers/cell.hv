@@ -7,7 +7,7 @@
 pub struct Cell<T> {
     v: T,
 
-    proc of(v: T) Cell<T> { return Cell::<T> { v: v }; }
+    pub proc of(v: T) Cell<T> { return Cell::<T> { v: v }; }
 
-    proc get(*self) T { return self.v; }
+    pub proc get(*self) T { return self.v; }
 }

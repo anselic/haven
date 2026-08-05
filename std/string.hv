@@ -37,17 +37,17 @@ pub struct String {
     buf: Vec<u8>,  /// the raw bytes, without a trailing NUL
 
     /// An empty String that owns no allocation yet.
-    proc new() String {
+    pub proc new() String {
         return String { buf: Vec::<u8>::new() };
     }
 
     /// An empty String with room for `cap` bytes already reserved.
-    proc with_capacity(cap: u64) String {
+    pub proc with_capacity(cap: u64) String {
         return String { buf: Vec::<u8>::with_capacity(cap) };
     }
 
     /// A String seeded with a copy of the bytes of the `str` `text`.
-    proc from_str(text: str) String {
+    pub proc from_str(text: str) String {
         let s: String = String::new();
         s.push_str(text);
         return s;
@@ -56,25 +56,25 @@ pub struct String {
     /// A String that takes ownership of an existing `Vec<u8>` of bytes, with no
     /// copy. No UTF-8 validation is done: the bytes are adopted as-is. Used to
     /// wrap a buffer read from the outside world (e.g. `fs::read`).
-    proc from_bytes(bytes: Vec<u8>) String {
+    pub proc from_bytes(bytes: Vec<u8>) String {
         return String { buf: bytes };
     }
 
     /// The number of bytes in the String (not counting any scratch NUL).
-    proc len(*self) u64 { return self.buf.len(); }
+    pub proc len(*self) u64 { return self.buf.len(); }
     /// The number of bytes the buffer can hold before it must grow.
-    proc cap(*self) u64 { return self.buf.cap(); }
+    pub proc cap(*self) u64 { return self.buf.cap(); }
     /// Whether the String holds no bytes.
-    proc is_empty(*self) bool { return self.buf.is_empty(); }
+    pub proc is_empty(*self) bool { return self.buf.is_empty(); }
 
     /// Append a single raw byte, growing the buffer if it is full. No UTF-8
     /// checking is done.
-    proc push_byte(*self, b: u8) {
+    pub proc push_byte(*self, b: u8) {
         self.buf.push(b);
     }
 
     /// Append a copy of the bytes of the `str` `text`.
-    proc push_str(*self, text: str) {
+    pub proc push_str(*self, text: str) {
         let n: u64 = strlen(text);
         let src: *u8 = rt_str_as_bytes(text);
         // one reserve up front, then fill - avoids re-checking capacity per byte.
@@ -96,16 +96,16 @@ pub struct String {
     /// `.display()` in an interpolation resolves against `Display` (which the
     /// prelude re-exports, so `f"..."` needs no import at all). Not meant to be
     /// called by hand.
-    proc fstr_lit(self, piece: str) String {
+    pub proc fstr_lit(self, piece: str) String {
         self.push_str(piece);
         return self;
     }
-    proc fstr_val(self, piece: String) String {
+    pub proc fstr_val(self, piece: String) String {
         self.push_str(piece.as_str());
         return self;
     }
 
-    proc push_string(*self, other: *String) {
+    pub proc push_string(*self, other: *String) {
         let n: u64 = other.len();
         let src: *u8 = other.buf.get_ptr(0u64);
         self.buf.reserve(self.len() + n);
@@ -118,10 +118,10 @@ pub struct String {
 
     /// Logically empty the String without shrinking its buffer. The bytes own
     /// nothing, so this just resets the length.
-    proc clear(*self) { self.buf.clear(); }
+    pub proc clear(*self) { self.buf.clear(); }
 
     /// Whether this String and `other` hold exactly the same bytes.
-    proc eq(*self, other: *String) bool {
+    pub proc eq(*self, other: *String) bool {
         if (self.len() != other.len()) { return false; }
         let n: u64 = self.len();
         let i: u64 = 0u64;
@@ -138,7 +138,7 @@ pub struct String {
     /// so a leading/trailing `sep` produces an empty segment at that end and a run
     /// of `sep`s produces empty segments between them. Splitting an empty String
     /// yields a single empty segment. Each segment owns a fresh copy of its bytes.
-    proc split(*self, sep: u8) Vec<String> {
+    pub proc split(*self, sep: u8) Vec<String> {
         let result: Vec<String> = Vec::<String>::new();
         let n: u64 = self.len();
         let start: u64 = 0u64;
@@ -167,7 +167,7 @@ pub struct String {
     /// exactly `len` bytes are valid. Points into the buffer, so it is invalidated
     /// by the next mutation or free; for an empty String it is null. Pair it with
     /// `len` to hand the bytes to a byte-oriented sink like `fs::write`.
-    proc as_bytes(*self) *u8 {
+    pub proc as_bytes(*self) *u8 {
         return self.buf.get_ptr(0u64);
     }
 
@@ -175,7 +175,7 @@ pub struct String {
     /// mutation or free. Writes a scratch NUL one past the last byte (growing the
     /// buffer if needed) without changing the logical length, so the returned
     /// `str` stops exactly where the String's bytes do.
-    proc as_str(*self) str {
+    pub proc as_str(*self) str {
         self.buf.reserve(self.len() + 1u64);
         self.buf.set(self.len(), 0u8);
         return rt_bytes_as_str(self.buf.get_ptr(0u64));

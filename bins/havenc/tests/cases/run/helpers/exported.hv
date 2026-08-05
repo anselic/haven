@@ -9,6 +9,6 @@ pub struct Vec2 {
     x: i32,
     y: i32,
 
-    proc make(x: i32, y: i32) Vec2 { return Vec2 { x: x, y: y }; }
-    proc sum(*self) i32 { return self.x + self.y; }
+    pub proc make(x: i32, y: i32) Vec2 { return Vec2 { x: x, y: y }; }
+    pub proc sum(*self) i32 { return self.x + self.y; }
 }

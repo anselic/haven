@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use bumpalo::Bump;
 
 use crate::DocArgs;
-use haven_common::ast::{TopLevel, TopLevelNode, Type};
+use haven_common::ast::{Method, Receiver, TopLevel, TopLevelNode, Type};
 use haven_common::diag::Files;
 use haven_front::parse;
 
@@ -206,16 +206,123 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
         return Ok(md);
     }
 
+    // `extend`/inherent-method blocks were parsed into `Extend` items. Group each
+    // block's *visible* methods (public, or any method of a trait impl) under the
+    // type name they extend, so they render as a section of that type rather than
+    // as standalone blocks. A target with no declared type in this file (a
+    // builtin, or an imported type) keeps its own group, rendered after the
+    // declared items.
+    let mut method_groups: BTreeMap<String, Vec<&Method>> = BTreeMap::new();
     for item in &items {
-        // docs describe a module's public surface; private (non-`pub`) items are
-        // implementation details and are omitted entirely.
-        if !item_is_pub(&item.value) {
+        if let TopLevelNode::Extend { methods, trait_, target, .. } = &item.value {
+            let key = extend_target_key(target);
+            let group = method_groups.entry(key).or_default();
+            for m in methods {
+                if method_visible(&m.value, trait_.is_some()) {
+                    group.push(m);
+                }
+            }
+        }
+    }
+
+    for item in &items {
+        match &item.value {
+            // extend blocks are rendered as method sections under their type, not
+            // as items in their own right; handled above/below.
+            TopLevelNode::Extend { .. } => continue,
+            // docs describe a module's public surface; private (non-`pub`) items
+            // are implementation details and are omitted entirely.
+            node if !item_is_pub(node) => continue,
+            node => {
+                render_item(&mut md, item, &src, &lines);
+                // a type carries its methods directly beneath its declaration.
+                if let TopLevelNode::Struct { name, .. } | TopLevelNode::Enum { name, .. } = node {
+                    if let Some(methods) = method_groups.remove(*name) {
+                        render_methods(&mut md, &methods, &lines);
+                    }
+                }
+            }
+        }
+    }
+
+    // methods extending a type not declared here (`extend i32`, or an imported
+    // type). Only emitted when a group actually has visible methods.
+    for (target, methods) in &method_groups {
+        if methods.is_empty() {
             continue;
         }
-        render_item(&mut md, item, &src, &lines);
+        md.push_str(&format!("## `{}`\n\n", target));
+        md.push_str("_Methods on this type, declared in this module._\n\n");
+        render_methods(&mut md, methods, &lines);
     }
 
     Ok(md)
+}
+
+/// The group key for an `extend` target: the name a reader looks it up under. A
+/// named type keys on its bare name (`Vec<T>` -> `Vec`) so its methods attach to
+/// the struct/enum declared under that name; everything else keys on its written
+/// form (`i32`, `f32`, `str`, `*T`, `[T]`), so each primitive and structural
+/// target gets its own section instead of collapsing together.
+fn extend_target_key(target: &Type) -> String {
+    match target {
+        Type::Path { path, .. } => path.last().to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Whether a method is part of the module's public surface: declared `pub`, or a
+/// method of a trait impl (whose reachability follows the trait, so it carries no
+/// explicit `pub` yet is public). Mirrors the effective visibility the compiler
+/// records in `Member::is_pub`.
+fn method_visible(m: &haven_common::ast::MethodNode, in_trait_impl: bool) -> bool {
+    m.is_pub || in_trait_impl
+}
+
+/// Render a type's methods under a `### Methods` heading nested in the type's
+/// `##` section, each method its own `#### <name>` subsection: a heading, its
+/// `hv` signature block, then its `///` doc block if it has one.
+fn render_methods(md: &mut String, methods: &[&Method], lines: &LineIndex) {
+    if methods.is_empty() {
+        return;
+    }
+    md.push_str("### Methods\n\n");
+    for m in methods {
+        md.push_str(&format!("#### `{}`\n\n", m.value.name));
+        md.push_str("```hv\n");
+        md.push_str(&method_signature(&m.value));
+        md.push_str("\n```\n\n");
+        if let Some(doc) = lines.doc_above(m.span.start) {
+            md.push_str(&doc);
+            md.push_str("\n\n");
+        }
+    }
+}
+
+/// Render a method's signature without its body: `[attrs] pub proc name<gens>(recv,
+/// params) Ret`. The receiver renders as `self`/`*self`; an associated function
+/// has none.
+fn method_signature(m: &haven_common::ast::MethodNode) -> String {
+    let mut s = attr_prefix(&m.attributes);
+    if m.is_pub {
+        s.push_str("pub ");
+    }
+    let recv = match m.receiver {
+        Receiver::Associated => String::new(),
+        Receiver::Value => "self".to_string(),
+        Receiver::Pointer => "*self".to_string(),
+    };
+    let sep = if !recv.is_empty() && !m.params.is_empty() { ", " } else { "" };
+    s.push_str(&format!(
+        "proc {}{}({}{}{}) {}",
+        m.name,
+        fmt_generics(&m.generics),
+        recv,
+        sep,
+        fmt_params(&m.params),
+        m.return_type
+    ));
+    s
 }
 
 /// Whether a top-level item is `pub` (part of the module's public API).
@@ -227,7 +334,8 @@ fn item_is_pub(node: &TopLevelNode) -> bool {
         | TopLevelNode::Global { is_pub, .. }
         | TopLevelNode::Enum { is_pub, .. }
         | TopLevelNode::Trait { is_pub, .. } => *is_pub,
-        // method docs aren't rendered yet; skip `extend` blocks.
+        // `extend` blocks are rendered as method sections under their target type
+        // (see `render_file`), not as items here.
         TopLevelNode::Extend { .. } => false,
     }
 }

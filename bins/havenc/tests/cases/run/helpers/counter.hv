@@ -1,0 +1,16 @@
+// Helper for `run/test_pub_method_xmod.hv`. Exercises both sides of method
+// visibility: `make`/`bump_twice` are `pub` and called across the module
+// boundary, while `step` is private and reached only from within this module (by
+// `bump_twice`) - a same-module private call, which is always allowed.
+pub struct Counter { n: i32 }
+
+extend Counter {
+    pub proc make() Counter { return Counter { n: 0 }; }
+    // internal: never named outside this module.
+    proc step(*self) { self.n = self.n + 1; }
+    pub proc bump_twice(*self) i32 {
+        self.step();
+        self.step();
+        return self.n;
+    }
+}

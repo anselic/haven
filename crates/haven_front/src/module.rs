@@ -343,6 +343,10 @@ struct RawMethod<'a> {
     name: &'a str,
     fn_name: &'a str,
     receiver: Receiver,
+    /// Effective visibility: `pub` as written, or `true` unconditionally when the
+    /// method implements a trait (a trait-impl method's reachability follows the
+    /// trait, not an explicit marker). See [`Member::is_pub`].
+    is_pub: bool,
     span: Span,
 }
 
@@ -516,7 +520,11 @@ fn resolve_extend_target<'a>(
 ) -> Option<(Type<'a>, TyHead)> {
     let mut errs = Vec::new();
     let mut rw = Rewriter {
-        scopes, members, errs: &mut errs,
+        scopes, members,
+        // this rewriter only resolves a type, which never consults the member
+        // table, so the module never gates anything here.
+        module: ModId(u32::MAX),
+        errs: &mut errs,
         locals: Vec::new(),
         span: Span::new(file, 0, 0),
     };
@@ -767,6 +775,10 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 name: mnode.name,
                 fn_name: fname,
                 receiver: mnode.receiver,
+                // a trait-impl method is public regardless of what was written:
+                // its reachability follows the trait. An inherent method is
+                // private unless marked `pub`.
+                is_pub: mnode.is_pub || trait_.is_some(),
                 span: tl.span.clone(),
             });
             synthesized.push(Metadata::new(
@@ -913,6 +925,10 @@ struct Rewriter<'x, 'a> {
     /// every method in the program, keyed by `(final type name, method name)`.
     /// what makes `Point::new()` resolve for an imported `Point`.
     members: &'x MemberTable<'a>,
+    /// the module whose items are being rewritten. A `Type::method()` call
+    /// reaching a private method declared in a *different* module is an error;
+    /// this is the "here" that comparison is against.
+    module: ModId,
     errs: &'x mut Vec<Error>,
     /// names bound by params/`let`/match-arm patterns in the function being
     /// walked, innermost last. used as a stack: a block records `locals.len()` on
@@ -1225,9 +1241,26 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// the member table has one, otherwise an enum variant left for typecheck's
     /// constructor path (which is what `None` means to the caller).
     fn type_qualified(&mut self, r: &mut NameRef<'a>, ty: DefId, sym: &'a str) -> Option<&'a str> {
-        if let Some(m) = self.members.get(&(TyHead::Def(ty), sym)) { return Some(m.name); }
+        if let Some(m) = self.members.get(&(TyHead::Def(ty), sym)) {
+            self.check_member_visible(m, sym);
+            return Some(m.name);
+        }
         r.def = ty;
         None
+    }
+
+    /// Report a private method reached from another module. A method is
+    /// module-private unless `pub` (trait-impl methods are always public - see
+    /// [`Member::is_pub`]); a call in the declaring module always sees it. Same
+    /// rule top-level functions follow, enforced here rather than by scope
+    /// construction because methods live in one global table, not per-module
+    /// scopes.
+    fn check_member_visible(&mut self, m: &Member<'a>, sym: &str) {
+        if !m.is_pub && m.module != self.module {
+            self.error_here(format!(
+                "method '{}' is private to its module; mark it `pub` to call it \
+                 from another module", sym));
+        }
     }
 
     /// Resolve `sym` against a built-in type: `i32::from(x)`, `str::len(s)`.
@@ -1238,7 +1271,10 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// keeps the tree well-formed for the rest of the pass; the error already
     /// stops compilation.
     fn builtin_qualified(&mut self, head: TyHead, ty: &str, sym: &'a str, span: &Span) -> &'a str {
-        if let Some(m) = self.members.get(&(head, sym)) { return m.name; }
+        if let Some(m) = self.members.get(&(head, sym)) {
+            self.check_member_visible(m, sym);
+            return m.name;
+        }
         self.error(span, format!(
             "no associated function '{}' on built-in type '{}'; declare one with \
              `extend {} {{ proc {}(...) ... }}`", sym, ty, ty, sym));
@@ -2013,6 +2049,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
                 receiver: rm.receiver,
                 self_ty,
                 generics: resolve_bound_defs(&rm.generics, scopes),
+                is_pub: rm.is_pub,
+                module: m.mid,
             });
             // one impl per `(head, method)`: see `MemberTable`. Two `extend`
             // blocks reaching the same slot are ambiguous at every call site, so
@@ -2032,6 +2070,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
         let mut rw = Rewriter {
             scopes,
             members: defs.members(),
+            module: m.mid,
             errs: &mut errs,
             locals: Vec::new(),
             span: Span::new(m.file, 0, 0),

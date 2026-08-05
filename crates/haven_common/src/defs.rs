@@ -253,6 +253,19 @@ pub struct Member<'a> {
     /// `self_ty`. Empty for a target with no parameters (`i32`, `Point`), in
     /// which case unification degenerates to equality.
     pub generics: Vec<GenericParam<'a>>,
+    /// Whether this method may be reached from another module. A method is
+    /// module-private unless declared `pub` - the same rule top-level functions
+    /// follow, except methods bypass per-module scoping (they live in one global
+    /// table so a receiver call resolves without an import), so visibility has to
+    /// be recorded here and checked at each call site rather than falling out of
+    /// scope construction. A method that implements a trait is always public: its
+    /// reachability follows the trait, not an explicit marker (mirroring Rust,
+    /// where a trait-impl method takes no `pub`), so `lower_methods` folds
+    /// trait membership into this flag.
+    pub is_pub: bool,
+    /// The module that declared this method. A private method is reachable only
+    /// from calls in this same module; a cross-module call to it is an error.
+    pub module: ModId,
 }
 
 /// Methods and associated functions, keyed by `(receiver head, method name)`.

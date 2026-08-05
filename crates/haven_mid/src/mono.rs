@@ -524,13 +524,17 @@ impl<'p, 'a> Mono<'p, 'a> {
         // cover every instance. `Vec<u8>` gets no destructor, and so stays `Copy`;
         // minting one anyway would specialize a body that calls `u8::delete`.
         if !self.impl_applies(m, base, args) { return; }
-        let (name, receiver) = (m.name, m.receiver);
+        let (name, receiver, is_pub, module) = (m.name, m.receiver, m.is_pub, m.module);
         let mangled = self.request(name, args.to_vec(), self.cur_span.clone());
         self.defs.add_member(TyHead::Def(inst), DELETE_METHOD, Member {
             name: mangled,
             receiver,
             self_ty: Type::named(inst),
             generics: Vec::new(),
+            // inherited from the template's `Delete` impl (a trait method, so
+            // always public); the instance's destructor is as reachable as it.
+            is_pub,
+            module,
         });
     }
 

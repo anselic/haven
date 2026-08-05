@@ -8,7 +8,7 @@ pub trait Rank {
 }
 
 extend Kind: Rank {
-    proc rank(*self) i32 { return 40; }
+    pub proc rank(*self) i32 { return 40; }
 }
 
 proc via_bound<T: Rank>(x: *T) i32 { return x.rank(); }

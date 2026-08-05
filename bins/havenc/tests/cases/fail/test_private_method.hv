@@ -1,0 +1,12 @@
+// A non-`pub` method is unreachable from another module. `Counter::make` is
+// public and constructs the value fine, but `bump` is private to
+// `helpers/privmethod`, so the receiver call `c.bump()` here is rejected.
+//@ error: is private
+
+import helpers/privmethod { Counter }
+
+@export
+proc main() i32 {
+    let c: Counter = Counter::make();
+    return c.bump();
+}

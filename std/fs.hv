@@ -43,11 +43,11 @@ pub struct FsError {
     code: i32,
 
     /// The raw C `errno` for this error (e.g. `2` for "no such file").
-    proc errno(*self) i32 { return self.code; }
+    pub proc errno(*self) i32 { return self.code; }
 
     /// A borrowable, human-readable description of the error, from `strerror`.
     /// Valid until the next `strerror` call; copy it into a `String` to keep it.
-    proc message(*self) str { return rt_fs_strerror(self.code); }
+    pub proc message(*self) str { return rt_fs_strerror(self.code); }
 }
 
 /// Read the entire contents of the file at `path` into an owned `String` (with

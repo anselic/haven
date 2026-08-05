@@ -11,7 +11,7 @@ pub trait Rank {
 }
 
 extend Kind: Rank {
-    proc rank(*self) i32 {
+    pub proc rank(*self) i32 {
         match (*self) {
             Kind::Small -> { return 1; }
             Kind::Large -> { return 2; }

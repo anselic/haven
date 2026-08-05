@@ -1073,8 +1073,20 @@ pub(crate) fn infer<'a>(
                 // this used to be inferred by checking whether the first
                 // parameter looked like a `self` of the right type.
                 let resolved = match receiver_member(cx, &base_ty, field) {
-                    Some((m, u)) if m.receiver != Receiver::Associated =>
-                        method_signature(cx, &m, &u, field, type_args, &span)?,
+                    Some((m, u)) if m.receiver != Receiver::Associated => {
+                        // a private method is reachable only from its own module,
+                        // the same rule top-level functions follow (trait-impl
+                        // methods are always public - see `Member::is_pub`).
+                        if !m.is_pub && m.module != cx.current_module {
+                            return Err(Error {
+                                msg: format!(
+                                    "method '{}' is private to its module; mark it \
+                                     `pub` to call it from another module", field),
+                                span,
+                            });
+                        }
+                        method_signature(cx, &m, &u, field, type_args, &span)?
+                    }
                     _ => None,
                 };
                 if let Some((target, params, return_type)) = resolved {

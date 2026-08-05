@@ -659,12 +659,32 @@ pub fn typecheck_program<'a>(
 
     // --- typecheck pass
     for node in program {
+        // the module a receiver call inside this item belongs to, so a private
+        // method reached across a module boundary can be rejected. Items with no
+        // definition (none, currently) leave the placeholder in place.
+        if let Some(def) = toplevel_def(&node.value) {
+            cx.current_module = defs.get(def).module;
+        }
         if let Err(err) = check_toplevel(cx, node) {
             errors.push(err);
         }
     }
 
     errors
+}
+
+/// The definition identity of a top-level item, if it has one. Every item kind
+/// carries a `def`; `extend` is desugared before typecheck, so it never appears.
+fn toplevel_def(node: &TopLevelNode) -> Option<DefId> {
+    match node {
+        TopLevelNode::Function { def, .. }
+        | TopLevelNode::Extern { def, .. }
+        | TopLevelNode::Struct { def, .. }
+        | TopLevelNode::Global { def, .. }
+        | TopLevelNode::Enum { def, .. }
+        | TopLevelNode::Trait { def, .. } => Some(*def),
+        TopLevelNode::Extend { .. } => None,
+    }
 }
 
 /// Verify that `imp.target` implements every method of `imp.trait_` with a
