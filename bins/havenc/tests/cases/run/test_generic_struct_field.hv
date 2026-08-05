@@ -13,13 +13,13 @@ proc main() i32 {
     let p: Pair = Pair { xs: Vec::<i32>::new(), tag: 7 };
     p.xs.push(10);
     p.xs.push(20);
-    printf::<i32>("%d\n", p.xs.get(0u64) + p.tag); // 17
-    printf::<u64>("%llu\n", p.xs.len());           // 2
+    println(p.xs.get(0u64) + p.tag); // 17
+    println(p.xs.len());           // 2
 
     // pop yields Option<*T>: unwrap to the slot pointer, deref for the value
     let popped: Option<*i32> = p.xs.pop();
-    printf::<i32>("%d\n", *popped.unwrap()); // 20
-    printf::<u64>("%llu\n", p.xs.len()); // 1
+    println(*popped.unwrap()); // 20
+    println(p.xs.len()); // 1
 
     // no free: `Pair` owns through its `xs: Vec<i32>` field, so it is destroyed
     // - and the Vec's buffer released - when it goes out of scope here.

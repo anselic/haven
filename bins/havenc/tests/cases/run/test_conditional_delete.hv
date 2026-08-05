@@ -19,13 +19,13 @@ import std/vec { Vec }
 struct Res { id: i32 }
 
 extend Res: Delete {
-    proc delete(*self) { printf::<i32>("drop res %d\n", self.id); }
+    proc delete(*self) { print("drop res "); println(self.id); }
 }
 
 struct Holder<T> { item: T, tag: i32 }
 
 extend Holder<T>: Delete where T: Delete {
-    proc delete(*self) { printf::<i32>("drop holder %d\n", self.tag); }
+    proc delete(*self) { print("drop holder "); println(self.tag); }
 }
 
 @export
@@ -34,7 +34,7 @@ proc main() i32 {
     // stays `Copy` - the copy below would be a move error if it were covered.
     let plain: Holder<i32> = Holder::<i32> { item: 7, tag: 1 };
     let copied: Holder<i32> = plain;
-    printf::<i32>("copied tag %d\n", copied.tag);
+    print("copied tag "); println(copied.tag);
 
     // `String` holds a `Vec<u8>`; u8 owns nothing, so std's `Vec` destructor
     // frees the bytes without dropping any element, and the String is untouched
@@ -47,12 +47,12 @@ proc main() i32 {
     let owned: Vec<Res> = Vec::<Res>::new();
     owned.push(Res { id: 10 });
     owned.push(Res { id: 11 });
-    printf::<u64>("owned %llu\n", owned.len());
+    print("owned "); println(owned.len());
 
     // note the golden shows no "drop res 5": a `Holder<Res>` implements `Delete`
     // itself, so its `item` field is that method's business, not auto-dropped.
     let holder: Holder<Res> = Holder::<Res> { item: Res { id: 5 }, tag: 2 };
-    printf::<i32>("holder tag %d\n", holder.tag);
+    print("holder tag "); println(holder.tag);
 
     return 0;
 }

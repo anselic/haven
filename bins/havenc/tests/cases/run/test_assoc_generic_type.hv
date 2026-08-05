@@ -42,7 +42,7 @@ proc main() i32 {
     // turbofish in the middle of them.
     let d: cell::Cell<i32> = cell::Cell::<i32>::of(-1);
 
-    printf::<u64>("%llu\n", b.get());
+    println(b.get());
 
     return a.get() + c.get() + d.get() + 31;   // 7 + 5 - 1 + 31
 }

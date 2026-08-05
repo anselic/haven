@@ -35,8 +35,8 @@ proc main() i32 {
     let b: Box<u64> = box_of::<u64>(100u64);
 
     let old: i32 = a.replace(5);          // 4, and `a` now holds 5
-    printf::<i32>("%d\n", old);
-    printf::<u64>("%llu\n", b.get());     // 100
+    println(old);
+    println(b.get());     // 100
 
     return old + a.get();                 // 4 + 5 = 9
 }

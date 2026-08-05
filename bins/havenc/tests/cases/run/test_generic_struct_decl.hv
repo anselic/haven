@@ -22,7 +22,7 @@ struct Vec2 { x: f32, y: f32 }
 proc main() i32 {
     // no generic struct is instantiated here; the templates above are dropped.
     let v: Vec2 = Vec2 { x: 3.0f32, y: 4.0f32 };
-    printf32("%f\n", v.x); // 3.0
-    printf32("%f\n", v.y); // 4.0
+    println(v.x); // 3.0
+    println(v.y); // 4.0
     return 0;
 }

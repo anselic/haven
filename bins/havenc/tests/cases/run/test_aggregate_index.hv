@@ -26,32 +26,32 @@ proc main() i32 {
         V3 { x: 4, y: 5, z: 6 },
         V3 { x: 7, y: 8, z: 9 },
     ];
-    printf::<i32>("arr %d", arr[0].x);
-    printf::<i32>(" %d", arr[1].y);
-    printf::<i32>(" %d\n", arr[2].z);
+    print("arr "); print(arr[0].x);
+    print(" "); print(arr[1].y);
+    print(" "); println(arr[2].z);
 
     // value semantics: a copy out of the array does not alias it
     let c: V3 = arr[1];
     c.x = 99;
-    printf::<i32>("copy %d", c.x);
-    printf::<i32>(" orig %d\n", arr[1].x);
+    print("copy "); print(c.x);
+    print(" orig "); println(arr[1].x);
 
     // an element passed by value
-    printf::<i32>("sum %d\n", sum(arr[2]));
+    print("sum "); println(sum(arr[2]));
 
     // --- a pointer into that stack array, then walked as a buffer: the element
     // stride and the field offsets must agree with the array's own layout.
     let q: *V3 = &arr[0];
-    printf::<i32>("q0 %d", q[0].x);
-    printf::<i32>(" q1 %d", q[1].x);
-    printf::<i32>(" q2 %d\n", q[2].x);
+    print("q0 "); print(q[0].x);
+    print(" q1 "); print(q[1].x);
+    print(" q2 "); println(q[2].x);
     // a bare element pointer, no index: reads inline fields directly
-    printf::<i32>("qdirect %d\n", q.y);
+    print("qdirect "); println(q.y);
 
     // --- a slice over the same storage
     let s: [V3] = arr;
-    printf::<i32>("slice %d", s[1].x);
-    printf::<i32>(" %d\n", s[2].y);
+    print("slice "); print(s[1].x);
+    print(" "); println(s[2].y);
 
     // --- a raw heap buffer: inline elements, same as the stack ones
     let buf: *V3 = realloc::<V3>(null::<*V3>(), 4u64).unwrap();
@@ -61,16 +61,16 @@ proc main() i32 {
         buf[i] = V3 { x: n, y: n * 10, z: n * 100 };
         i = i + 1u64;
     }
-    printf::<i32>("buf %d", buf[0].x);
-    printf::<i32>(" %d", buf[3].y);
-    printf::<i32>(" %d\n", buf[3].z);
+    print("buf "); print(buf[0].x);
+    print(" "); print(buf[3].y);
+    print(" "); println(buf[3].z);
     // write through an index, then read back
     buf[2].y = 777;
-    printf::<i32>("wrote %d\n", buf[2].y);
+    print("wrote "); println(buf[2].y);
     dealloc::<V3>(buf);
 
     // --- write through a stack-array index too
     arr[0].x = 42;
-    printf::<i32>("arr wrote %d\n", arr[0].x);
+    print("arr wrote "); println(arr[0].x);
     return 0;
 }

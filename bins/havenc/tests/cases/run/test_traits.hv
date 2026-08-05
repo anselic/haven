@@ -48,8 +48,8 @@ proc main() i32 {
     let sq: Square = Square::make(5);
     let r: Rect = Rect::make(3, 4);
 
-    printf::<i32>("%d\n", describe::<Square>(&sq)); // 25
-    printf::<i32>("%d\n", describe::<Rect>(&r));    // 12
+    println(describe::<Square>(&sq)); // 25
+    println(describe::<Rect>(&r));    // 12
 
     return describe::<Square>(&sq) + describe::<Rect>(&r); // 25 + 12 = 37
 }

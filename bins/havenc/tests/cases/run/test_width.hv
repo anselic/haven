@@ -6,25 +6,25 @@
 @export
 proc main() i32 {
     // float -> int truncates toward zero (not floor): -2.7 -> -2, not -3
-    printf::<i32>("%d\n", numerical_cast::<i32>(3.9f64));   // 3
-    printf::<i32>("%d\n", numerical_cast::<i32>(-2.7f32));  // -2
+    println(numerical_cast::<i32>(3.9f64));   // 3
+    println(numerical_cast::<i32>(-2.7f32));  // -2
 
     // int -> float
-    printf32("%f\n", numerical_cast::<f32>(5i32));   // 5.000000
-    printf_f64("%f\n", numerical_cast::<f64>(-3i32)); // -3.000000
+    println(numerical_cast::<f32>(5i32));   // 5.000000
+    println(numerical_cast::<f64>(-3i32)); // -3.000000
 
     // widen then narrow, back to the start: i32 -> i64 -> i32
-    printf::<i32>("%d\n", numerical_cast::<i32>(numerical_cast::<i64>(7i32))); // 7
+    println(numerical_cast::<i32>(numerical_cast::<i64>(7i32))); // 7
 
     // float narrow/widen round-trip: f32 -> f64 -> f32 (1.5 is exact in binary)
-    printf32("%f\n", numerical_cast::<f32>(numerical_cast::<f64>(1.5f32))); // 1.500000
+    println(numerical_cast::<f32>(numerical_cast::<f64>(1.5f32))); // 1.500000
 
     // i16 widen/narrow round-trip: i32 -> i16 -> i32 (value fits in i16)
-    printf::<i32>("%d\n", numerical_cast::<i32>(numerical_cast::<i16>(1000i32))); // 1000
+    println(numerical_cast::<i32>(numerical_cast::<i16>(1000i32))); // 1000
     // i16 narrowing truncates to the low 16 bits: 70000 & 0xFFFF = 4464
-    printf::<i32>("%d\n", numerical_cast::<i32>(numerical_cast::<i16>(70000i32))); // 4464
+    println(numerical_cast::<i32>(numerical_cast::<i16>(70000i32))); // 4464
     // i16 -> f32
-    printf32("%f\n", numerical_cast::<f32>(numerical_cast::<i16>(12i32))); // 12.000000
+    println(numerical_cast::<f32>(numerical_cast::<i16>(12i32))); // 12.000000
 
     // compile-only coverage for the casts that have no printer:
     // unsigned and 64-bit destinations (zext / uitofp / fptoui / fptrunc).

@@ -11,7 +11,7 @@ proc main() i32 {
     let n: Box<Option<i32>> = Box::<Option<i32>> {
         inner: Option::<i32> { present: true, value: 8 },
     };
-    printf::<i32>("%d\n", n.inner.value);   // 8
-    printf::<i32>("%d\n", n.inner.value + 1); // 9
+    println(n.inner.value);   // 8
+    println(n.inner.value + 1); // 9
     return 0;
 }

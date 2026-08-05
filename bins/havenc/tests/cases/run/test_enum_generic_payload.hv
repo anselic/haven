@@ -24,8 +24,8 @@ proc main() i32 {
     let xs: Vec<i32> = Vec::<i32>::new();
     xs.push(42);
     xs.push(7);
-    printf::<i32>("%d\n", bag_first(Bag::Full(xs))); // 42
-    printf::<i32>("%d\n", bag_first(Bag::Empty));    // -1
+    println(bag_first(Bag::Full(xs))); // 42
+    println(bag_first(Bag::Empty));    // -1
 
     // generic enum: the concrete-instance payload
     let ys: Vec<i32> = Vec::<i32>::new();
@@ -33,17 +33,17 @@ proc main() i32 {
     ys.push(200);
     let w: Wrap<i32> = Wrap::Many::<i32>(ys);
     match (w) {
-        Wrap::Nil -> { printf::<i32>("%d\n", 0); }
-        Wrap::One(x) -> { printf::<i32>("%d\n", x); }
-        Wrap::Many(v) -> { printf::<i32>("%d\n", v.get(1u64)); } // 200
+        Wrap::Nil -> { println(0); }
+        Wrap::One(x) -> { println(x); }
+        Wrap::Many(v) -> { println(v.get(1u64)); } // 200
     }
 
     // generic enum: the type-param payload
     let single: Wrap<i32> = Wrap::One::<i32>(9);
     match (single) {
-        Wrap::Nil -> { printf::<i32>("%d\n", 0); }
-        Wrap::One(x) -> { printf::<i32>("%d\n", x); } // 9
-        Wrap::Many(v) -> { printf::<i32>("%d\n", numerical_cast::<i32>(v.len())); }
+        Wrap::Nil -> { println(0); }
+        Wrap::One(x) -> { println(x); } // 9
+        Wrap::Many(v) -> { println(numerical_cast::<i32>(v.len())); }
     }
     return 0;
 }

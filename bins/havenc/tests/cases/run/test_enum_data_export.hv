@@ -30,13 +30,13 @@ proc main() i32 {
     // sizeof::<Ptrish>(): tag (i32, 4/4) padded up to the pointer's 8-byte
     // alignment, then the 8-byte pointer payload - 16, not the 12 a naive
     // `[8 x i8]` byte-blob placement would give.
-    printf::<u64>("%llu\n", sizeof::<Ptrish>()); // 16
+    println(sizeof::<Ptrish>()); // 16
 
-    printf::<i32>("%d\n", take(Msg::Stop));          // -1
-    printf::<i32>("%d\n", take(Msg::Note(5u8, 6.0f32))); // 11
+    println(take(Msg::Stop));          // -1
+    println(take(Msg::Note(5u8, 6.0f32))); // 11
 
     let m: Msg = make(7u8, 8.0f32);
-    printf::<i32>("%d\n", take(m));                  // 15
+    println(take(m));                  // 15
 
     return 0;
 }

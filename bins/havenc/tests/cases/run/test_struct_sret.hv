@@ -24,22 +24,22 @@ proc gain(s: Stereo, g: f32) Stereo {
 proc main() i32 {
     // basic struct return: storage belongs to main, not to make()
     let a: Stereo = make(3.0f32, 4.0f32);
-    printf32("%f\n", a.l); // expect 3.0
-    printf32("%f\n", a.r); // expect 4.0
+    println(a.l); // expect 3.0
+    println(a.r); // expect 4.0
 
     // chained sret: forward() returns make()'s result
     let b: Stereo = forward(1.0f32, 2.0f32);
-    printf32("%f\n", b.l); // expect 1.0
-    printf32("%f\n", b.r); // expect 2.0
+    println(b.l); // expect 1.0
+    println(b.r); // expect 2.0
 
     // pass-by-value into a struct-returning function
     let c: Stereo = gain(b, 3.0f32);
-    printf32("%f\n", c.l); // expect 3.0
-    printf32("%f\n", c.r); // expect 6.0
-    printf32("%f\n", b.l); // expect 1.0 (gain must NOT mutate b)
+    println(c.l); // expect 3.0
+    println(c.r); // expect 6.0
+    println(b.l); // expect 1.0 (gain must NOT mutate b)
 
     // field access directly on a call result (no intermediate binding)
-    printf32("%f\n", make(7.0f32, 8.0f32).r); // expect 8.0
+    println(make(7.0f32, 8.0f32).r); // expect 8.0
 
     return 0;
 }

@@ -36,7 +36,7 @@ extend Maybe<T> {
 struct Owner { id: i32, cell: *i32 }
 extend Owner: Delete {
     proc delete(*self) {
-        printf::<i32>("drop %d\n", (*self).id);
+        print("drop "); println((*self).id);
         dealloc::<i32>((*self).cell);
     }
 }

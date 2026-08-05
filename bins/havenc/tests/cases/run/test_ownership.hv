@@ -21,7 +21,7 @@ struct Buf {
 
 extend Buf: Delete {
     proc delete(*self) {
-        printf::<i32>("  delete %d\n", self.tag);
+        print("  delete "); println(self.tag);
         dealloc::<i32>(self.data);
     }
 }
@@ -35,7 +35,7 @@ struct Pair {
 
 // a by-value owner is moved into the call, so the callee destroys it.
 proc consume(b: Buf) i32 {
-    printf::<i32>("  consume %d\n", b.tag);
+    print("  consume "); println(b.tag);
     return b.tag;
 }
 
@@ -60,13 +60,13 @@ proc main() i32 {
     print("scope\n");
     if (one > 0) {
         let a: Buf = Buf::make(1);
-        printf::<i32>("  peek %d\n", peek(&a));
+        print("  peek "); println(peek(&a));
     } // 1 dies here, at the end of the block that owns it
 
     print("move\n");
     let b: Buf = Buf::make(2);
     let c: Buf = b;              // moved: `b` is dead, only `c` is destroyed
-    printf::<i32>("  peek %d\n", peek(&c));
+    print("  peek "); println(peek(&c));
 
     print("consume\n");
     let d: Buf = Buf::make(3);
@@ -78,14 +78,14 @@ proc main() i32 {
 
     print("field\n");
     let p: Pair = make_pair(6);
-    printf::<i32>("  pair %d\n", p.n);
+    print("  pair "); println(p.n);
 
     print("weigh\n");
-    printf::<i32>("  = %d\n", weigh(Buf::make(7)));
+    let w: i32 = weigh(Buf::make(7)); print("  = "); println(w);
 
     print("relabel\n");
     let m: Buf = relabel(Buf::make(8));
-    printf::<i32>("  = %d\n", m.tag);
+    print("  = "); println(m.tag);
 
     print("end\n");
     // everything still live is destroyed here, latest declaration first

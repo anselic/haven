@@ -23,16 +23,16 @@ proc main() i32 {
     let data: **f32 = &channels[0];
 
     // nested read: data[ch][i]
-    printf::<i32>("%d\n", numerical_cast::<i32>(data[1][2])); // 6
-    printf::<i32>("%d\n", numerical_cast::<i32>(data[0][0])); // 1
+    println(numerical_cast::<i32>(data[1][2])); // 6
+    println(numerical_cast::<i32>(data[0][0])); // 1
 
     // nested write, then read back through the same path
     data[0][1] = 9.0;
-    printf::<i32>("%d\n", numerical_cast::<i32>(data[0][1])); // 9
+    println(numerical_cast::<i32>(data[0][1])); // 9
 
     // through a `*AudioBuffer` field: buf.data32[ch][i]
     let buf: AudioBuffer = AudioBuffer { data32: data, channels: 2u32 };
-    printf::<i32>("%d\n", numerical_cast::<i32>(read_buf(&buf, 1, 0))); // 4
+    println(numerical_cast::<i32>(read_buf(&buf, 1, 0))); // 4
 
     return 0;
 }

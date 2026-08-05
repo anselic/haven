@@ -8,18 +8,18 @@ proc main() i32 {
     let a: i32 = 12;
     let b: i32 = 10;
 
-    printf::<i32>("%d\n", a & b);   // 8   (and)
-    printf::<i32>("%d\n", a | b);   // 14  (or)
-    printf::<i32>("%d\n", a ^ b);   // 6   (xor)
-    printf::<i32>("%d\n", a << 2);  // 48  (shl)
-    printf::<i32>("%d\n", a >> 1);  // 6   (ashr, positive)
-    printf::<i32>("%d\n", -16 >> 2);// -4  (ashr, sign-preserving)
+    println(a & b);   // 8   (and)
+    println(a | b);   // 14  (or)
+    println(a ^ b);   // 6   (xor)
+    println(a << 2);  // 48  (shl)
+    println(a >> 1);  // 6   (ashr, positive)
+    println(-16 >> 2);// -4  (ashr, sign-preserving)
 
     // precedence (C order): shift tighter than |, & tighter than |,
     // additive tighter than shift.
-    printf::<i32>("%d\n", 2 | 1 << 2); // 6   = 2 | (1<<2)
-    printf::<i32>("%d\n", 6 & 3 | 8);  // 10  = (6&3) | 8
-    printf::<i32>("%d\n", 1 + 1 << 2); // 8   = (1+1) << 2
+    println(2 | 1 << 2); // 6   = 2 | (1<<2)
+    println(6 & 3 | 8);  // 10  = (6&3) | 8
+    println(1 + 1 << 2); // 8   = (1+1) << 2
 
     // compile-only: unsigned `>>` must emit `lshr`, not `ashr`.
     let u: u32 = 128u32;

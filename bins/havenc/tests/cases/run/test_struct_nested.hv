@@ -30,27 +30,27 @@ proc bump_lo(b: *Box) {
 proc main() i32 {
     // layout is inlined: %Box = type { %Vec2, %Vec2 }
     let b: Box = make_box(1.0f32, 2.0f32);
-    printf32("%f\n", b.lo.x); // expect 1.0
-    printf32("%f\n", b.lo.y); // expect 2.0
-    printf32("%f\n", b.hi.x); // expect 2.0
-    printf32("%f\n", b.hi.y); // expect 3.0
+    println(b.lo.x); // expect 1.0
+    println(b.lo.y); // expect 2.0
+    println(b.hi.x); // expect 2.0
+    println(b.hi.y); // expect 3.0
 
     // deep copy: c must be independent of b through all levels
     let c: Box = b;
     c.lo.x = 9.0f32;
-    printf32("%f\n", b.lo.x); // expect 1.0 (b unchanged)
-    printf32("%f\n", c.lo.x); // expect 9.0
+    println(b.lo.x); // expect 1.0 (b unchanged)
+    println(c.lo.x); // expect 9.0
 
     // pass a nested sub-struct by value
-    printf32("%f\n", sum2(b.lo)); // expect 3.0
+    println(sum2(b.lo)); // expect 3.0
 
     // mutate a nested field through a pointer to the whole struct
     bump_lo(&b);
-    printf32("%f\n", b.lo.x); // expect 101.0
+    println(b.lo.x); // expect 101.0
 
     // write directly to a nested field
     b.hi.y = 42.0f32;
-    printf32("%f\n", b.hi.y); // expect 42.0
+    println(b.hi.y); // expect 42.0
 
     return 0;
 }

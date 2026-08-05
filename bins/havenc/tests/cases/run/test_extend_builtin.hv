@@ -13,7 +13,7 @@ trait Display {
 // definitions.
 extend i32: Display {
     proc show(*self) i32 {
-        printf::<i32>("i32 %d\n", *self);
+        print("i32 "); println(*self);
         return *self;
     }
 }
@@ -23,7 +23,7 @@ extend i32: Display {
 extend [T]: Display {
     proc show(*self) i32 {
         let n: u64 = slice_len::<T>(self);
-        printf::<u64>("slice of %llu\n", n);
+        print("slice of "); println(n);
         return numerical_cast::<i32>(n);
     }
 }

@@ -50,14 +50,14 @@ enum Dir {
 @export
 proc main() i32 {
     let p: Point = Point::new(3, 4);
-    printf::<i32>("%d\n", p.sum());       // 7   (autoref: &p)
-    printf::<i32>("%d\n", p.doubled());   // 14
+    println(p.sum());       // 7   (autoref: &p)
+    println(p.doubled());   // 14
 
     let q: Point = p.shifted(1, 1);       // (4, 5)
-    printf::<i32>("%d\n", q.sum());       // 9
+    println(q.sum());       // 9
 
     let d: Dir = Dir::West;
-    printf::<i32>("%d\n", d.turn_cost()); // 4
+    println(d.turn_cost()); // 4
 
     return p.sum() + q.sum();             // 7 + 9 = 16
 }

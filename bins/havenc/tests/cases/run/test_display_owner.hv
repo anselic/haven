@@ -17,7 +17,7 @@ struct Res { data: *i32 }
 
 extend Res: Delete {
     proc delete(*self) {
-        printf::<i32>("drop res %d\n", *self.data);
+        print("drop res "); println(*self.data);
         dealloc::<i32>(self.data);
     }
 }
@@ -47,7 +47,7 @@ proc main() i32 {
 
     // borrows each element to render it - no move, so the Vec still owns them.
     display_println::<Vec<Res>>(&v);   // [Res(10), Res(20), Res(30)]
-    printf::<i32>("displayed %d\n", 0);
+    print("displayed "); println(0);
 
     // `v` drops here: its three elements are destroyed in index order, then the
     // buffer is freed.

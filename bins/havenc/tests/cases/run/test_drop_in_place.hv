@@ -29,7 +29,7 @@ struct Owner { data: *i32 }
 
 extend Owner: Delete {
     proc delete(*self) {
-        printf::<i32>("  drop owner %d\n", *self.data);
+        print("  drop owner "); println(*self.data);
         dealloc::<i32>(self.data);
     }
 }
@@ -39,7 +39,7 @@ struct Wide { a: i32, b: i32, c: i32, owned: Owner }
 
 extend Wide: Delete {
     proc delete(*self) {
-        printf::<i32>("  drop wide %d\n", self.a);
+        print("  drop wide "); println(self.a);
         // its own field is this method's business, so destroy it by hand here.
         drop_in_place::<Owner>(&self.owned, 1u64);
     }
@@ -53,7 +53,7 @@ struct Bag<T> { data: *T, len: u64, cap: u64 }
 
 extend Bag<T>: Delete {
     proc delete(*self) {
-        printf::<u64>("bag of %llu\n", self.len);
+        print("bag of "); println(self.len);
         drop_in_place::<T>(self.data, self.len);
         if (self.cap != 0u64) { dealloc::<T>(self.data); }
     }
@@ -88,8 +88,8 @@ proc main() i32 {
     let nums: Bag<i32> = bag_new::<i32>();
     bag_push::<i32>(&nums, 10);
     bag_push::<i32>(&nums, 20);
-    printf::<i32>("nums %d", nums.data[0]);
-    printf::<i32>(" %d\n", nums.data[1]);
+    print("nums "); print(nums.data[0]);
+    print(" "); println(nums.data[1]);
 
     // `String` holds a `Vec<u8>`; nothing here may perturb it. It owns its
     // buffer and is dropped automatically at end of scope.
@@ -107,14 +107,14 @@ proc main() i32 {
     let wides: Bag<Wide> = bag_new::<Wide>();
     bag_push::<Wide>(&wides, Wide { a: 1, b: 2, c: 3, owned: owner(10) });
     bag_push::<Wide>(&wides, Wide { a: 4, b: 5, c: 6, owned: owner(11) });
-    printf::<i32>("wide0 %d", wides.data[0].a);
-    printf::<i32>(" wide1 %d\n", wides.data[1].a);
+    print("wide0 "); print(wides.data[0].a);
+    print(" wide1 "); println(wides.data[1].a);
 
     // `T` owns through a field: the expansion walks to `.held` for each element.
     let nested: Bag<Nested> = bag_new::<Nested>();
     bag_push::<Nested>(&nested, Nested { tag: 7, held: owner(20) });
     bag_push::<Nested>(&nested, Nested { tag: 8, held: owner(21) });
 
-    printf::<i32>("end of scope %d\n", 0);
+    print("end of scope "); println(0);
     return 0;
 }

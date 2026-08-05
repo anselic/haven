@@ -15,7 +15,7 @@
 struct Res { id: i32 }
 
 extend Res: Delete {
-    proc delete(*self) { printf::<i32>("drop %d\n", self.id); }
+    proc delete(*self) { print("drop "); println(self.id); }
 }
 
 extend Res {
@@ -23,12 +23,12 @@ extend Res {
     proc peek(*self) i32 { return self.id; }
 }
 
-proc show(p: *Res) void { printf::<i32>("show %d\n", p.id); }
+proc show(p: *Res) void { print("show "); println(p.id); }
 
 @export
 proc main() i32 {
     // `&self` method on a temporary: borrowed, used, then dropped at the `;`.
-    printf::<i32>("peek %d\n", Res::make(1).peek());
+    print("peek "); println(Res::make(1).peek());
     println("between");
     // `&` of a temporary, passed as a pointer and consumed within the statement.
     show(&Res::make(2));

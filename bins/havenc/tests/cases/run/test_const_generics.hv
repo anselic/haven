@@ -31,23 +31,23 @@ proc simd_copy<const N: u64>(dst: [f32], src: [f32]) {
 
 @export
 proc main() i32 {
-    printf::<i32>("%d\n", lane_count::<8>()); // 8   (instance lane_count$8)
-    printf::<i32>("%d\n", lane_count::<3>()); // 3   (distinct instance lane_count$3)
-    printf::<i32>("%d\n", scaled::<10>(4));   // 40
+    println(lane_count::<8>()); // 8   (instance lane_count$8)
+    println(lane_count::<3>()); // 3   (distinct instance lane_count$3)
+    println(scaled::<10>(4));   // 40
 
     // exercise the simd<T, N> type position end-to-end and observe the result
     let buf: [f32] = [0.0f32, 0.0f32, 0.0f32, 0.0f32];
     let v: simd<f32, 4> = simd_splat::<f32, 4>(2.0f32);
     let w: simd<f32, 4> = id_simd::<f32, 4>(v);
     simd_store::<f32, 4>(buf, 0u64, w);
-    printf32("%f\n", buf[0]);            // 2.000000
+    println(buf[0]);            // 2.000000
 
     // forward the const param through the simd_load/simd_store wrappers
     let src: [f32] = [7.0f32, 8.0f32, 9.0f32, 10.0f32];
     let dst: [f32] = [0.0f32, 0.0f32, 0.0f32, 0.0f32];
     simd_copy::<4>(dst, src);
-    printf32("%f\n", dst[0]);            // 7.000000
-    printf32("%f\n", dst[3]);            // 10.000000
+    println(dst[0]);            // 7.000000
+    println(dst[3]);            // 10.000000
 
     return 0;
 }

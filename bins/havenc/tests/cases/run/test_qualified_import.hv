@@ -8,13 +8,13 @@ import std/dsp/osc
 
 @export
 proc main() i32 {
-    printf_f64("%f\n", math::square(3.0f64)); // 9.0
+    println(math::square(3.0f64)); // 9.0
 
     let o: osc::Osc = osc::Osc::new(1.0, 4.0);
-    printf32("%f\n", o.square());       // phase 0 -> 1.0
+    println(o.square());       // phase 0 -> 1.0
 
     let o2: osc::Osc = osc::Osc { phase: 0.0, inc: 0.0 };
-    printf32("%f\n", o2.square());       // phase 0 -> 1.0
+    println(o2.square());       // phase 0 -> 1.0
 
     return 0;
 }

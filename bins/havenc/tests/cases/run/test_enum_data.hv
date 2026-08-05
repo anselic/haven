@@ -32,17 +32,17 @@ proc main() i32 {
     let b: Msg = Msg::Vol(7);
     let c: Msg = Msg::Stop;
 
-    printf::<i32>("%d\n", pitch_of(a)); // 60
-    printf::<i32>("%d\n", pitch_of(b)); // 7
-    printf::<i32>("%d\n", pitch_of(c)); // -1
+    println(pitch_of(a)); // 60
+    println(pitch_of(b)); // 7
+    println(pitch_of(c)); // -1
 
     // pass by value, return by value
     let d: Msg = bump(b);               // Vol(8)
-    printf::<i32>("%d\n", pitch_of(d)); // 8
+    println(pitch_of(d)); // 8
 
-    // the f32 payload field round-trips; cast to int to avoid float printf.
+    // the f32 payload field round-trips; cast to int to keep output stable.
     match (a) {
-        Msg::Note(p, v) -> { printf::<i32>("%d\n", numerical_cast::<i32>(v)); } // 1
+        Msg::Note(p, v) -> { println(numerical_cast::<i32>(v)); } // 1
         _               -> {}
     }
     return 0;

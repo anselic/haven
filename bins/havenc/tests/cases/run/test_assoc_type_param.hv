@@ -25,9 +25,9 @@ extend B: Meta {
 }
 proc describe<P: Meta>() void {
     println(P::tag());
-    printf::<i32>("scale=%d\n", P::scale(5));
+    print("scale="); println(P::scale(5));
     let v: P = P::make();
-    printf::<i32>("val=%d\n", v.val());
+    print("val="); println(v.val());
 }
 @export proc main() i32 {
     describe::<A>();

@@ -55,7 +55,7 @@ proc main() i32 {
     // 1. get the factory through the framework entry callback.
     let fac_raw: *void = plug_entry_get_factory::<Doubler>(CLAP_PLUGIN_FACTORY_ID);
     let fac: *ClapPluginFactory = ptr_cast::<*ClapPluginFactory>(fac_raw);
-    printf::<u32>("plugins=%u\n", fac.get_plugin_count(fac));
+    print("plugins="); println(fac.get_plugin_count(fac));
 
     // 2. descriptor metadata (queried before any instance exists).
     let desc: *ClapPluginDescriptor = fac.get_plugin_descriptor(fac, 0u32);
@@ -70,10 +70,10 @@ proc main() i32 {
     // 4. params extension: count, info, current value.
     let pex_raw: *void = plug.get_extension(plug, CLAP_EXT_PARAMS);
     let pex: *ClapPluginParams = ptr_cast::<*ClapPluginParams>(pex_raw);
-    printf::<u32>("params=%u\n", pex.count(plug));
+    print("params="); println(pex.count(plug));
     let val: f64 = 0.0f64;
     if (pex.get_value(plug, 0u32, &val)) {
-        printf::<i32>("gain=%d\n", numerical_cast::<i32>(val));
+        print("gain="); println(numerical_cast::<i32>(val));
     }
 
     // 5. run process over a 4-sample mono buffer; expect each sample doubled.
@@ -111,7 +111,7 @@ proc main() i32 {
 
     let j: u32 = 0u32;
     while (j < 4u32) {
-        printf::<i32>("out=%d\n", numerical_cast::<i32>(outbuf[j]));
+        print("out="); println(numerical_cast::<i32>(outbuf[j]));
         j = j + 1u32;
     }
 

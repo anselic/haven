@@ -29,12 +29,12 @@ proc stub_process(p: *ClapPlugin, ctx: *ClapProcess) ClapProcessStatus {
 @export
 proc main() i32 {
     // ABI sizes — must equal the C layout exactly.
-    printf::<u64>("%llu\n", sizeof::<ClapPlugin>());       // 96
-    printf::<u64>("%llu\n", sizeof::<ClapProcess>());      // 64
-    printf::<u64>("%llu\n", sizeof::<ClapParamInfo>());    // 1320
-    printf::<u64>("%llu\n", sizeof::<ClapEventNote>());    // 40
-    printf::<u64>("%llu\n", sizeof::<ClapEventHeader>());  // 16
-    printf::<u64>("%llu\n", sizeof::<ClapPluginEntry>());  // 40 (12 + 4 pad + 3*8)
+    println(sizeof::<ClapPlugin>());       // 96
+    println(sizeof::<ClapProcess>());      // 64
+    println(sizeof::<ClapParamInfo>());    // 1320
+    println(sizeof::<ClapEventNote>());    // 40
+    println(sizeof::<ClapEventHeader>());  // 16
+    println(sizeof::<ClapPluginEntry>());  // 40 (12 + 4 pad + 3*8)
 
     // version compatibility helper
     let v: ClapVersion = ClapVersion { major: 1u32, minor: 2u32, revision: 2u32 };

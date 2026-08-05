@@ -15,7 +15,7 @@ proc sum(p: Pair<i32, i32>) i32 {
 proc main() i32 {
     let p: Pair<i32, i32> = Pair::Both::<i32, i32> { first: 3, second: 4 };
     let e: Pair<i32, i32> = Pair::Empty::<i32, i32>();
-    printf::<i32>("%d\n", sum(p)); // 7
-    printf::<i32>("%d\n", sum(e)); // -1
+    println(sum(p)); // 7
+    println(sum(e)); // -1
     return 0;
 }

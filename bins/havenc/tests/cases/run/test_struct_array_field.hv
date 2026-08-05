@@ -11,8 +11,8 @@ struct Grid {
 @export
 proc main() i32 {
     let s: Grid = Grid { data: [100, 200, 300], tag: 9 };
-    printf::<i32>("%d\n", s.data[0]);  // 100
-    printf::<i32>("%d\n", s.data[2]);  // 300
-    printf::<i32>("%d\n", s.tag);      // 9
+    println(s.data[0]);  // 100
+    println(s.data[2]);  // 300
+    println(s.tag);      // 9
     return 0;
 }

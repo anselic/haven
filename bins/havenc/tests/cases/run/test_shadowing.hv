@@ -7,16 +7,16 @@
 // a local shadowing a parameter must not disturb the parameter's slot.
 proc shadow_param(a: i32) i32 {
     print("param a=");
-    printf::<i32>("%d\n", a);        // 7
+    println(a);        // 7
     print("\n");
     if (a > 0) {
         let a: i32 = 100; // shadows the param
         print("inner a=");
-        printf::<i32>("%d\n", a);     // 100
+        println(a);     // 100
         print("\n");
     }
     print("after a=");
-    printf::<i32>("%d\n", a);         // 7 - param slot untouched
+    println(a);         // 7 - param slot untouched
     print("\n");
     return a;
 }
@@ -28,11 +28,11 @@ proc main() i32 {
     if (1 == 1) {
         let x: i32 = 99;
         print("inner x=");
-        printf::<i32>("%d\n", x);     // 99
+        println(x);     // 99
         print("\n");
     }
     print("outer x=");
-    printf::<i32>("%d\n", x);         // 1
+    println(x);         // 1
     print("\n");
 
     // 2) sibling-scope shadows with DIFFERENT types. Each `y` gets its own slot;
@@ -40,13 +40,13 @@ proc main() i32 {
     if (1 == 1) {
         let y: i32 = 5;
         print("y i32=");
-        printf::<i32>("%d\n", y);     // 5
+        println(y);     // 5
         print("\n");
     }
     if (1 == 1) {
         let y: f32 = 2.5f32;
         print("y f32=");
-        printf32("%f\n", y);   // 2.500000
+        println(y);   // 2.500000
         print("\n");
     }
 

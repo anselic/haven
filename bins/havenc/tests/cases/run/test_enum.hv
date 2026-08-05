@@ -34,18 +34,18 @@ proc classify(p: ProcessStatus) u32 {
 
 @export
 proc main() i32 {
-    printf::<i32>("%d\n", step(Status::Continue)); // 1
-    printf::<i32>("%d\n", step(Status::Error));    // -1
-    printf::<i32>("%d\n", step(Status::Sleep));    // 0
+    println(step(Status::Continue)); // 1
+    println(step(Status::Error));    // -1
+    println(step(Status::Sleep));    // 0
 
     // enum local, then cast to its int discriminant
     let ps: ProcessStatus = ProcessStatus::ContinueIfNotQuiet;
-    printf::<i32>("%d\n", numerical_cast::<i32>(classify(ps)));                    // 2
-    printf::<i32>("%d\n", numerical_cast::<i32>(classify(ProcessStatus::Sleep)));  // 100
+    println(numerical_cast::<i32>(classify(ps)));                    // 2
+    println(numerical_cast::<i32>(classify(ProcessStatus::Sleep)));  // 100
 
     // enum as a struct field, read back through the field
     let c: Cell = Cell { k: Kind::On, n: 7 };
-    printf::<i32>("%d\n", numerical_cast::<i32>(c.k)); // 5
-    printf::<i32>("%d\n", c.n);                        // 7
+    println(numerical_cast::<i32>(c.k)); // 5
+    println(c.n);                        // 7
     return 0;
 }

@@ -28,14 +28,14 @@ proc apply2(f: proc(f64, f64) Vec2, a: f64, b: f64) Vec2 {
 proc main() i32 {
     // take a bare top-level function by value; `g` is a local fn pointer
     let g: proc(f64) f64 = sq;
-    printf_f64("%f\n", g(5.0f64));          // expect 25.0 (direct call through local ptr)
-    printf_f64("%f\n", apply1(g, 6.0f64));  // expect 36.0 (ptr passed as param, called)
+    println(g(5.0f64));          // expect 25.0 (direct call through local ptr)
+    println(apply1(g, 6.0f64));  // expect 36.0 (ptr passed as param, called)
 
     // sret through a function pointer: struct result must land in main's slot
     let h: proc(f64, f64) Vec2 = make;
     let v: Vec2 = apply2(h, 3.0f64, 4.0f64);
-    printf_f64("%f\n", v.x);                // expect 3.0
-    printf_f64("%f\n", v.y);                // expect 4.0
+    println(v.x);                // expect 3.0
+    println(v.y);                // expect 4.0
 
     return 0;
 }

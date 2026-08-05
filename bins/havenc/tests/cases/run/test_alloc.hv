@@ -26,8 +26,8 @@ proc main() i32 {
 
     let w: *Vec2 = vec2_add(v, u);
 
-    printf32("%f\n", w.x);
-    printf32("%f\n", w.y);
+    println(w.x);
+    println(w.y);
 
     return 0;
 }

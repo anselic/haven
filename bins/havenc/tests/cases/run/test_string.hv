@@ -16,25 +16,25 @@ proc main() i32 {
     s.push_byte(32u8);  // ' '
     s.push_str("world");
     s.push_byte(33u8);  // '!'
-    printf::<str>("%s\n", s.as_str()); // Hello, world!
-    printf::<u64>("%llu\n", s.len());  // 13
+    println(s.as_str()); // Hello, world!
+    println(s.len());  // 13
 
     // seed from a literal
     let greet: String = String::from_str("hi");
-    printf::<str>("%s\n", greet.as_str());       // hi
-    printf::<i32>("%d\n", yn(greet.is_empty())); // 0
+    println(greet.as_str());       // hi
+    println(yn(greet.is_empty())); // 0
 
     // equality compares bytes, not identity
     let a: String = String::from_str("abc");
     let b: String = String::from_str("abc");
     let c: String = String::from_str("abd");
-    printf::<i32>("%d\n", yn(a.eq(&b))); // 1
-    printf::<i32>("%d\n", yn(a.eq(&c))); // 0
+    println(yn(a.eq(&b))); // 1
+    println(yn(a.eq(&c))); // 0
 
     // clear empties the logical length without freeing the buffer
     a.clear();
-    printf::<i32>("%d\n", yn(a.is_empty())); // 1
-    printf::<u64>("%llu\n", a.len());        // 0
+    println(yn(a.is_empty())); // 1
+    println(a.len());        // 0
 
     // the buffer doubles to absorb many pushes past its initial capacity
     let big: String = String::with_capacity(4u64);
@@ -43,8 +43,8 @@ proc main() i32 {
         big.push_byte(120u8); // 'x'
         i = i + 1;
     }
-    printf::<u64>("%llu\n", big.len());             // 100
-    printf::<i32>("%d\n", yn(big.cap() >= 100u64)); // 1
+    println(big.len());             // 100
+    println(yn(big.cap() >= 100u64)); // 1
 
     // no frees: every String above owns its buffer through a `Vec<u8>` field and
     // is destroyed automatically at the end of this scope.

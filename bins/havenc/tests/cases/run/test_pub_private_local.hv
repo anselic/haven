@@ -7,6 +7,6 @@ proc dbl(x: i32) i32 { return x + x; }   // no `pub`: private to this module
 
 @export
 proc main() i32 {
-    printf::<i32>("%d\n", dbl(21)); // 42
+    println(dbl(21)); // 42
     return 0;
 }

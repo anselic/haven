@@ -24,7 +24,7 @@ proc buf_new<T>(n: u64) Buf<T> {
 
 extend Buf<T>: Delete {
     proc delete(*self) {
-        printf::<u64>("free %llu\n", self.cap);
+        print("free "); println(self.cap);
         dealloc::<T>(self.data);
     }
 }
@@ -32,9 +32,9 @@ extend Buf<T>: Delete {
 @export
 proc main() i32 {
     let a: Buf<i32> = buf_new::<i32>(4u64);
-    printf::<u64>("size %llu\n", a.size());
+    print("size "); println(a.size());
     let b: Buf<f64> = buf_new::<f64>(2u64);
-    printf::<u64>("size %llu\n", b.size());
+    print("size "); println(b.size());
     // both are destroyed here, in reverse declaration order.
     return 0;
 }

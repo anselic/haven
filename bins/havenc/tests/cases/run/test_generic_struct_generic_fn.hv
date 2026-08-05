@@ -15,14 +15,14 @@ proc get<T>(o: Option<T>) T { return o.value; }
 @export
 proc main() i32 {
     let a: Option<i32> = some::<i32>(11);
-    printf::<i32>("%d\n", get::<i32>(a));    // 11
+    println(get::<i32>(a));    // 11
 
     let b: Option<f32> = some::<f32>(2.5f32);
-    printf32("%f\n", get::<f32>(b));  // 2.500000
+    println(get::<f32>(b));  // 2.500000
 
     // pointer type arg: Option<*i32>, exactly the alloc<T> -> Option<*T> shape.
     let n: i32 = 7;
     let p: Option<*i32> = some::<*i32>(&n);
-    printf::<i32>("%d\n", *get::<*i32>(p));   // 7
+    println(*get::<*i32>(p));   // 7
     return 0;
 }

@@ -35,12 +35,12 @@ proc bucket(n: i32) i32 {
 
 @export
 proc main() i32 {
-    printf::<i32>("%d\n", code(Status::Continue)); // 1
-    printf::<i32>("%d\n", code(Status::Sleep));    // 0
-    printf::<i32>("%d\n", label(Status::Error));   // -1
-    printf::<i32>("%d\n", label(Status::Continue));// 0
-    printf::<i32>("%d\n", bucket(1));              // 200
-    printf::<i32>("%d\n", bucket(-1));             // 300
-    printf::<i32>("%d\n", bucket(42));             // 0
+    println(code(Status::Continue)); // 1
+    println(code(Status::Sleep));    // 0
+    println(label(Status::Error));   // -1
+    println(label(Status::Continue));// 0
+    println(bucket(1));              // 200
+    println(bucket(-1));             // 300
+    println(bucket(42));             // 0
     return 0;
 }

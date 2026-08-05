@@ -9,7 +9,8 @@ extern strlen(s: str) u64;
 
 // re-exports
 pub import std/clone { Clone }
-pub import std/fmt { Display, display_print, display_println }
+pub import std/fmt { Display }
+import std/fmt { display_print, display_println }
 pub import std/string { String }
 pub import std/vec { Vec }
 
@@ -36,26 +37,7 @@ pub trait Delete {
     proc delete(*self);
 }
 
-// fixed to one format arg + one value.
-// TODO: a `Display`-style trait or a `format!`-style macro like Rust's.
-// NOTE: this generic path only works for integer/pointer/`str` args. A float
-// arg does NOT print correctly through it - the erased type-param slot forces a
-// variadic C callee, but the language emits a plain fixed-arity call, so the
-// float never reaches the callee (it prints 0). Print floats with the dedicated
-// `printf_f64`/`printf32` procs below, which use a fixed-prototype C helper.
-extern rt_printf<T>(fmt: str, arg: T) void;
-/// Print `arg` to stdout using the C `printf` format string `fmt`
-/// (e.g. `printf("%d\n", 42)`). `T` is inferred from `arg`, so the turbofish is
-/// optional (`printf::<i32>("%d\n", 42)` is the explicit form). Exactly one
-/// argument is supported, and `T` must match the conversion specifier in `fmt`.
-/// For floats, use `printf_f64`/`printf32` instead.
-pub proc printf<T>(fmt: str, arg: T) void {
-    rt_printf::<T>(fmt, arg);
-}
-
-// Fixed-prototype float printer: a concrete `double` param travels in an XMM
-// register the callee reads directly, so it needs no variadic-call ABI.
-extern rt_printf_f64(fmt: str, arg: f64) void;
+extern rt_puts(s: str) void;
 
 extern rt_slice_len<T>(slice: *[T]) u64;
 extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];
@@ -66,19 +48,12 @@ extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];
 extern rt_abort(msg: str) void;
 
 /// Write `s` to stdout with no trailing newline.
-pub proc print(s: str) void { printf("%s", s); }
-/// Write `s` to stdout followed by a newline.
-pub proc println(s: str) void { printf("%s\n", s); }
-
-/// Print a single `f64` using the `printf` format `fmt` (e.g. `"%f\n"`).
-pub proc printf_f64(fmt: str, arg: f64) void {
-    rt_printf_f64(fmt, arg);
+pub proc print<T: Display>(x: T) void {
+    rt_puts(x.display().as_str());
 }
-
-/// Print a single `f32` using the `printf` format `fmt` (e.g. `"%f\n"`). Widened
-/// to `f64` because C's `%f` conversion reads a `double`.
-pub proc printf32(fmt: str, arg: f32) void {
-    rt_printf_f64(fmt, numerical_cast::<f64>(arg));
+/// Write `s` to stdout followed by a newline.
+pub proc println<T: Display>(x: T) void {
+    print(x); print("\n");
 }
 
 /// The number of elements in the runtime slice `slice`.

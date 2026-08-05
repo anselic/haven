@@ -40,13 +40,13 @@ proc main() i32 {
     let b: Msg = Msg::Note(60u8, 1.5f32);
     let c: Msg = Msg::Stop;
 
-    printf::<i32>("%d\n", score(a));    // 5 + 10 = 15
-    printf::<i32>("%d\n", score(b));    // 60
-    printf::<i32>("%d\n", score(c));    // -1
-    printf::<i32>("%d\n", just_id(a));  // 5
+    println(score(a));    // 5 + 10 = 15
+    println(score(b));    // 60
+    println(score(c));    // -1
+    println(just_id(a));  // 5
 
     // pass a struct-variant by value, return one by value
     let d: Msg = retune(a);             // Cc { id: 5, val: 110 }
-    printf::<i32>("%d\n", score(d));    // 5 + 110 = 115
+    println(score(d));    // 5 + 110 = 115
     return 0;
 }

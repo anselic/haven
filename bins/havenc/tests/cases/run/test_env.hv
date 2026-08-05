@@ -15,11 +15,11 @@ import std/vec { Vec }
 proc main() i32 {
     match (env::set_var("HV_ENV_PROBE", "payload")) {
         Result::Ok(_)  -> { println("set"); }
-        Result::Err(e) -> { printf::<str>("set err: %s\n", e.message()); }
+        Result::Err(e) -> { print("set err: "); println(e.message()); }
     }
 
     match (env::var("HV_ENV_PROBE")) {
-        Option::Some(v) -> { printf::<str>("got %s\n", v.as_str()); }
+        Option::Some(v) -> { print("got "); println(v.as_str()); }
         Option::None    -> { println("missing"); }
     }
 
@@ -36,7 +36,7 @@ proc main() i32 {
     // current_dir succeeds in an ordinary process.
     match (env::current_dir()) {
         Result::Ok(_)  -> { println("cwd ok"); }
-        Result::Err(e) -> { printf::<str>("cwd err: %s\n", e.message()); }
+        Result::Err(e) -> { print("cwd err: "); println(e.message()); }
     }
 
     // exit diverges: "before exit" prints, the process ends with code 3, and the

@@ -40,13 +40,13 @@ proc widen(v: i32) i64 { return 70i64; }
 proc main() i32 {
     let a: Box<i32> = Box::<i32> { value: 7 };
     let b: Box<i64> = a.mapped::<i64>(widen);
-    printf::<i64>("%lld\n", b.get());
+    println(b.get());
 
     let xs: [i32] = [1, 2, 3];
-    printf::<u64>("%llu\n", xs.len_or::<u64>(9u64));
+    println(xs.len_or::<u64>(9u64));
 
     let t: Tag = Tag { n: 1 };
-    printf::<i32>("%d\n", t.echo::<i32>(5));
+    println(t.echo::<i32>(5));
 
     return a.get() + t.echo::<i32>(18);   // 7 + 18
 }

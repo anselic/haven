@@ -4,7 +4,7 @@ outer x=1
 
 y i32=5
 
-y f32=2.500000
+y f32=2.5
 
 param a=7
 

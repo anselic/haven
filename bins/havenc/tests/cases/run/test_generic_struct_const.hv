@@ -11,16 +11,16 @@ struct Buf<T, const N: u32> {
 @export
 proc main() i32 {
     let b: Buf<i32, 4> = Buf::<i32, 4> { data: [10, 20, 30, 40], len: 4u32 };
-    printf::<i32>("%d\n", b.data[0]);             // 10
-    printf::<i32>("%d\n", b.data[3]);             // 40
-    printf::<i32>("%d\n", b.data[1] + b.data[2]); // 50
+    println(b.data[0]);             // 10
+    println(b.data[3]);             // 40
+    println(b.data[1] + b.data[2]); // 50
 
     // a distinct instance: same T, different N.
     let c: Buf<i32, 2> = Buf::<i32, 2> { data: [7, 8], len: 2u32 };
-    printf::<i32>("%d\n", c.data[0] + c.data[1]); // 15
+    println(c.data[0] + c.data[1]); // 15
 
     // a distinct instance: different T.
     let d: Buf<f32, 2> = Buf::<f32, 2> { data: [1.5f32, 2.5f32], len: 2u32 };
-    printf32("%f\n", d.data[0] + d.data[1]); // 4.000000
+    println(d.data[0] + d.data[1]); // 4.000000
     return 0;
 }

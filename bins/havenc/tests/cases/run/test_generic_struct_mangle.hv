@@ -11,10 +11,10 @@ struct Wrap<T> { inner: T }
 proc main() i32 {
     let x: i32 = 5;
     let w1: Wrap<*i32> = Wrap::<*i32> { inner: &x };
-    printf::<i32>("%d\n", *w1.inner);                // 5
+    println(*w1.inner);                // 5
 
     let s: p_i32 = p_i32 { a: 3, b: 7 };
     let w2: Wrap<p_i32> = Wrap::<p_i32> { inner: s };
-    printf::<i32>("%d\n", w2.inner.a + w2.inner.b);  // 10
+    println(w2.inner.a + w2.inner.b);  // 10
     return 0;
 }

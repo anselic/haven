@@ -27,20 +27,20 @@ proc main() i32 {
     let c: *i32 = &five();        // call result
     let s: *str = &"hello";       // string literal
     let g: *i32 = &G;             // global: its symbol is the real address
-    printf::<i32>("%d\n", *a);    // 42
-    printf::<i32>("%d\n", *b);    // 42
-    printf::<i32>("%d\n", *c);    // 5
+    println(*a);    // 42
+    println(*b);    // 42
+    println(*c);    // 5
     println(*s);                  // hello
-    printf::<i32>("%d\n", *g);    // 9
+    println(*g);    // 9
 
     // a struct temporary is produced in storage already, so `&` is that storage.
     let p: *Point = &origin();
-    printf::<i32>("%d\n", p.x);   // 3 (auto-deref field access)
-    printf::<i32>("%d\n", p.y);   // 4
+    println(p.x);   // 3 (auto-deref field access)
+    println(p.y);   // 4
 
     // a field of a temporary is a place inside the temporary's slot.
     let fx: *i32 = &origin().x;
-    printf::<i32>("%d\n", *fx);   // 3
+    println(*fx);   // 3
 
     return 0;
 }

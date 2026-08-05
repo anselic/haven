@@ -30,8 +30,8 @@ proc main() i32 {
     let p: i32 = i32::pick::<i32>(5, 9);
 
     if (bool::yes()) {
-        printf::<u64>("%llu\n", w);
-        printf::<i32>("%d\n", p);
+        println(w);
+        println(p);
     }
     return z + 12;
 }

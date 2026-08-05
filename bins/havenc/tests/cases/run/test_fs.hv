@@ -17,28 +17,28 @@ proc main() i32 {
     let content: String = String::from_str("fs probe payload");
 
     match (fs::write(path, &content)) {
-        Result::Ok(n)  -> { printf::<i32>("wrote %d\n", numerical_cast::<i32>(n)); }
-        Result::Err(e) -> { printf::<str>("write err: %s\n", e.message()); }
+        Result::Ok(n)  -> { print("wrote "); println(numerical_cast::<i32>(n)); }
+        Result::Err(e) -> { print("write err: "); println(e.message()); }
     }
 
     if (fs::exists(path)) { println("exists"); } else { println("missing"); }
 
     match (fs::read(path)) {
         Result::Ok(s)  -> {
-            printf::<i32>("read %d\n", numerical_cast::<i32>(s.len()));
+            print("read "); println(numerical_cast::<i32>(s.len()));
             if (s.eq(&content)) { println("match"); } else { println("differ"); }
         }
-        Result::Err(e) -> { printf::<str>("read err: %s\n", e.message()); }
+        Result::Err(e) -> { print("read err: "); println(e.message()); }
     }
 
     match (fs::copy(path, dst)) {
-        Result::Ok(n)  -> { printf::<i32>("copied %d\n", numerical_cast::<i32>(n)); }
-        Result::Err(e) -> { printf::<str>("copy err: %s\n", e.message()); }
+        Result::Ok(n)  -> { print("copied "); println(numerical_cast::<i32>(n)); }
+        Result::Err(e) -> { print("copy err: "); println(e.message()); }
     }
 
     match (fs::mkdir(dir)) {
         Result::Ok(_)  -> { println("mkdir"); }
-        Result::Err(e) -> { printf::<str>("mkdir err: %s\n", e.message()); }
+        Result::Err(e) -> { print("mkdir err: "); println(e.message()); }
     }
     if (fs::is_dir(dir)) { println("isdir"); } else { println("notdir"); }
 

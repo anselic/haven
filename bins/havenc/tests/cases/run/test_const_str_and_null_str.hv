@@ -27,7 +27,7 @@ proc count_until_null(arr: *str) u32 {
 @export
 proc main() i32 {
     println(GREETING);
-    printf::<u32>("id=%u\n", THING.id);
+    print("id="); println(THING.id);
     println(THING.label);
 
     // a null-terminated list: two entries then a null `str`.
@@ -35,12 +35,12 @@ proc main() i32 {
     arr[0] = "audio-effect";
     arr[1] = "stereo";
     arr[2] = null::<str>();
-    printf::<u32>("count=%u\n", count_until_null(arr));
+    print("count="); println(count_until_null(arr));
     dealloc::<str>(arr);
 
     // str -> *u8 -> str round trip; strlen proves the pointer survived intact.
     let raw: *u8 = ptr_cast::<*u8>(GREETING);
     let back: str = ptr_cast::<str>(raw);
-    printf::<u64>("len=%llu\n", strlen(back));
+    print("len="); println(strlen(back));
     return 0;
 }

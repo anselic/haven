@@ -13,12 +13,12 @@ proc apply(f: proc(f64) f64, x: f64) f64 {
 proc main() i32 {
     // `square` is imported unqualified from std/math and taken by value here.
     let g: proc(f64) f64 = square;
-    printf_f64("%f\n", apply(g, 3.0f64)); // expect 9.0
+    println(apply(g, 3.0f64)); // expect 9.0
 
     // a local shadowing an imported name is NOT the imported symbol: this reads
     // the local fn pointer, not std/math's square.
     let square: proc(f64) f64 = g;
-    printf_f64("%f\n", square(4.0f64));   // expect 16.0
+    println(square(4.0f64));   // expect 16.0
 
     return 0;
 }

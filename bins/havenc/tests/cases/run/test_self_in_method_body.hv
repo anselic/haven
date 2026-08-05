@@ -28,11 +28,11 @@ proc main() i32 {
     let a: Vec2 = Vec2::make(3, 4);
     let b: Vec2 = Vec2::zero();
     let c: Vec2 = a.add(Vec2::make(10, 20));
-    printf::<i32>("a.x=%d\n", a.x);
-    printf::<i32>("a.y=%d\n", a.y);
-    printf::<i32>("b.x=%d\n", b.x);
-    printf::<i32>("b.y=%d\n", b.y);
-    printf::<i32>("c.x=%d\n", c.x);
-    printf::<i32>("c.y=%d\n", c.y);
+    print("a.x="); println(a.x);
+    print("a.y="); println(a.y);
+    print("b.x="); println(b.x);
+    print("b.y="); println(b.y);
+    print("c.x="); println(c.x);
+    print("c.y="); println(c.y);
     return 0;
 }

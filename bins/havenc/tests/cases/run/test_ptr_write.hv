@@ -16,7 +16,7 @@ struct Owner { data: *i32 }
 
 extend Owner: Delete {
     proc delete(*self) {
-        printf::<i32>("drop owner %d\n", *self.data);
+        print("drop owner "); println(*self.data);
         dealloc::<i32>(self.data);
     }
 }
@@ -33,8 +33,8 @@ proc main() i32 {
     let xs: *i32 = alloc::<i32>(2u64).unwrap();
     ptr_write::<i32>(xs, 7);
     ptr_write::<i32>(&xs[1], 8);
-    printf::<i32>("scalars %d", xs[0]);
-    printf::<i32>(" %d\n", xs[1]);
+    print("scalars "); print(xs[0]);
+    print(" "); println(xs[1]);
     dealloc::<i32>(xs);
 
     // an aggregate slot: a field-by-field copy into the destination, the same
@@ -48,7 +48,7 @@ proc main() i32 {
     let slot2: *Owner = alloc::<Owner>(1u64).unwrap();
     ptr_write::<Owner>(slot2, held);
 
-    printf::<i32>("written %d\n", 2);
+    print("written "); println(2);
     drop_in_place::<Owner>(slot, 1u64);
     drop_in_place::<Owner>(slot2, 1u64);
     dealloc::<Owner>(slot);
