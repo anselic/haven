@@ -123,24 +123,3 @@ extend String: Display {
 extend *T: Display where T: Display {
     proc display(*self) String { return (**self).display(); }
 }
-
-// `Vec<T>` is `Display` exactly when its elements are: `[a, b, c]`. Each element
-// is displayed through a borrow (`get_ptr` gives a `*T`, and `display` takes
-// `*self`), so an owning element is never moved out; the per-element `String` is
-// dropped at the end of its loop iteration.
-extend Vec<T>: Display where T: Display {
-    proc display(*self) String {
-        let s: String = String::from_str("[");
-        let n: u64 = self.len();
-        let i: u64 = 0u64;
-        while (i < n) {
-            if (i > 0u64) { s.push_str(", "); }
-            let ep: *T = self.get_ptr(i);
-            let part: String = ep.display();
-            s.push_str(part.as_str());
-            i = i + 1u64;
-        }
-        s.push_byte(93u8); // ']'
-        return s;
-    }
-}

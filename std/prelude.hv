@@ -8,9 +8,10 @@
 extern strlen(s: str) u64;
 
 // re-exports
+pub import std/clone { Clone }
+pub import std/fmt { Display, display_print, display_println }
 pub import std/string { String }
 pub import std/vec { Vec }
-pub import std/fmt { Display, display_print, display_println }
 
 /// A destructor. Implement it to give a type ownership of a resource:
 ///

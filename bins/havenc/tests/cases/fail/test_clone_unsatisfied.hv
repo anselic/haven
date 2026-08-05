@@ -1,0 +1,14 @@
+// `Vec::get_cloned` is gated on `T: Clone` (std/clone), checked where the receiver
+// binds `T`. `Pt` never implements `Clone`, so `Vec<Pt>::get_cloned` is rejected
+// at the call site rather than surfacing inside the instantiated body.
+//@ error: does not implement trait `Clone`
+
+struct Pt { x: i32, y: i32 }
+
+@export
+proc main() i32 {
+    let v: Vec<Pt> = Vec::<Pt>::new();
+    v.push(Pt { x: 1, y: 2 });
+    let p: Pt = v.get_cloned(0u64);
+    return p.x;
+}

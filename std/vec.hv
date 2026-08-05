@@ -144,6 +144,38 @@ pub struct Vec<T> {
     }
 }
 
+// `Vec<T>` is `Clone` exactly when its elements are. Each element is cloned
+// through a borrow (`get_ptr` gives a `*T`, and `clone` takes `*self`), so an
+// owning element is duplicated, never moved out of the source Vec. There is no
+// `*T: Clone` blanket to lean on the way `Display` has one - its `Self` would be
+// `*T`, but a pointer clone that returns the pointer is an alias, so `*T` is left
+// un-`Clone` and `p.clone()` on the `*T` from `get_ptr` dispatches straight to
+// `T`'s own impl through the `T: Clone` bound.
+extend Vec<T>: Clone where T: Clone {
+    proc clone(*self) Vec<T> {
+        let out: Vec<T> = Vec::<T>::with_capacity(self.len());
+        let i: u64 = 0u64;
+        while (i < self.len()) {
+            out.push(self.get_ptr(i).clone());
+            i = i + 1u64;
+        }
+        return out;
+    }
+}
+
+/// Read an element as an owned, independent clone - the owning-`T` counterpart
+/// to `get`. Where `get` copies the bits out (a move out of an index the Vec
+/// still owns, which the ownership pass rejects for an owner), `get_cloned`
+/// borrows the element and deep-copies it, leaving the Vec's own copy in place.
+/// A method-level bound can't be written (`where` attaches only to `extend`), so
+/// this lives in its own `extend Vec<T> where T: Clone` block rather than the
+/// struct body. Out-of-bounds is undefined; guard with len.
+extend Vec<T> where T: Clone {
+    proc get_cloned(*self, i: u64) T {
+        return self.get_ptr(i).clone();
+    }
+}
+
 /// The destructor: destroy every element, then release the buffer. Called for
 /// you when the Vec goes out of scope - never by hand. `drop_in_place` expands to
 /// one `delete` per element (and to nothing when `T` owns nothing), and the
@@ -154,5 +186,26 @@ extend Vec<T>: Delete {
         if (self.cap != 0u64) {
             dealloc::<T>(self.data);
         }
+    }
+}
+
+// `Vec<T>` is `Display` exactly when its elements are: `[a, b, c]`. Each element
+// is displayed through a borrow (`get_ptr` gives a `*T`, and `display` takes
+// `*self`), so an owning element is never moved out; the per-element `String` is
+// dropped at the end of its loop iteration.
+extend Vec<T>: Display where T: Display {
+    proc display(*self) String {
+        let s: String = String::from_str("[");
+        let n: u64 = self.len();
+        let i: u64 = 0u64;
+        while (i < n) {
+            if (i > 0u64) { s.push_str(", "); }
+            let ep: *T = self.get_ptr(i);
+            let part: String = ep.display();
+            s.push_str(part.as_str());
+            i = i + 1u64;
+        }
+        s.push_byte(93u8); // ']'
+        return s;
     }
 }

@@ -1,0 +1,30 @@
+// `Clone` (std/clone, re-exported by the prelude): an independent deep copy of an
+// owning value. Exercises the three cases that a move alone cannot express - a
+// `String` cloned while the original stays live, a whole `Vec<String>` cloned
+// with its elements deep-copied, and `Vec::get_cloned` pulling an owned element
+// out without moving it out of the Vec. All six owners drop automatically.
+
+@export
+proc main() i32 {
+    // deep-clone a String: `a` is still usable afterwards, and `a`/`b` own
+    // separate buffers (each gets its own `delete`).
+    let a: String = String::from_str("hello");
+    let b: String = a.clone();
+    println(a.as_str()); // hello
+    println(b.as_str()); // hello
+
+    // clone a container of owners: `w`'s elements are fresh copies of `v`'s.
+    let v: Vec<String> = Vec::<String>::new();
+    v.push(String::from_str("x"));
+    v.push(String::from_str("y"));
+    let w: Vec<String> = v.clone();
+
+    // get_cloned borrows the element and returns an owned clone - `v` keeps its
+    // own copy, so this is not the move-out-of-index that `get` would be.
+    let first: String = v.get_cloned(0u64);
+    let second: String = w.get_cloned(1u64);
+    println(first.as_str());  // x
+    println(second.as_str()); // y
+
+    return 0;
+}

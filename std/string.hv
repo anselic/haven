@@ -181,3 +181,10 @@ pub struct String {
         return rt_bytes_as_str(self.buf.get_ptr(0u64));
     }
 }
+
+// A `String`'s clone is a fresh String seeded from its own bytes - the same body
+// as `Display for String`, and for the same reason: `from_str` copies the bytes
+// into a buffer the result owns independently.
+extend String: Clone {
+    proc clone(*self) String { return String::from_str(self.as_str()); }
+}
