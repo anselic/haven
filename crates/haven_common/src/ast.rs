@@ -127,7 +127,7 @@ pub enum Token<'a> {
     Arrow,
 
     Let, If, Else, Return,
-    While, Break, Continue,
+    While, For, Break, Continue,
     Proc, Extern, Const, Struct, Enum,
     Import, Pub, Match,
 }
@@ -170,6 +170,7 @@ impl Display for Token<'_> {
             Token::Else         => write!(f, "else"),
             Token::Return       => write!(f, "return"),
             Token::While        => write!(f, "while"),
+            Token::For          => write!(f, "for"),
             Token::Break        => write!(f, "break"),
             Token::Continue     => write!(f, "continue"),
             Token::Proc         => write!(f, "proc"),

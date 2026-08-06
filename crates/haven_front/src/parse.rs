@@ -149,6 +149,7 @@ fn lexer<'a> (
         "else"     => Token::Else,
         "return"   => Token::Return,
         "while"    => Token::While,
+        "for"      => Token::For,
         "break"    => Token::Break,
         "continue" => Token::Continue,
         "proc"     => Token::Proc,
@@ -915,6 +916,12 @@ fn parse_type<'tks, 'src: 'tks>()
     })
 }
 
+/// One postfix step of a `for`-iterand place expression: `.field` or `[index]`.
+enum PlacePostfix<'a> {
+    Field(&'a str),
+    Index(Expr<'a>),
+}
+
 fn parse_stmt<'tks, 'src: 'tks>()
 -> impl Parser<
     'tks,
@@ -988,6 +995,103 @@ fn parse_stmt<'tks, 'src: 'tks>()
             .map(|(condition, body)| StmtNode::While {
                 condition,
                 body: Box::new(body),
+            });
+
+        // The `for` iterand is a *place* expression: a variable followed by any
+        // chain of `.field` / `[index]`. Restricting the grammar here (rather than
+        // parsing a full expression) does double duty: it structurally forbids the
+        // `Name { ... }` struct-literal reading of `for x in it { ... }` — the same
+        // ambiguity `if`/`while`/`match` avoid with parentheses — and it enforces
+        // that the iterand is a stable place, since the desugar re-evaluates it as
+        // the `.next()` receiver every iteration.
+        let place = var
+            .map_with(|s, e| Metadata::new(ExprNode::Var(*s), e.span()))
+            .then(
+                choice((
+                    just(Token::Dot).ignore_then(var.map(|s| *s)).map(PlacePostfix::Field),
+                    parse_expr()
+                        .delimited_by(just(Token::LBracket), just(Token::RBracket))
+                        .map(PlacePostfix::Index),
+                )).repeated().collect::<Vec<_>>()
+            )
+            .map_with(|(base, ops), e| {
+                let span = e.span();
+                ops.into_iter().fold(base, |base, op| match op {
+                    PlacePostfix::Field(field) => Metadata::new(
+                        ExprNode::Access { base: Box::new(base), field }, span),
+                    PlacePostfix::Index(index) => Metadata::new(
+                        ExprNode::Index { slice: Box::new(base), index: Box::new(index) }, span),
+                })
+            });
+
+        // A trailing `(...)` means the iterand is a call (`mk()`, `v.iter()`) — a
+        // fresh iterator each time the loop re-evaluates it. Catch it here for a
+        // targeted message instead of a bare "unexpected `(`" from the body parser.
+        let iterand = place
+            .then(
+                parse_expr()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+                    .or_not(),
+            )
+            .try_map(|(place, call), span| match call {
+                None => Ok(place),
+                Some(_) => Err(Rich::custom(span, "the `for` iterator cannot be a call \
+                    like `v.iter()`; bind it to a `let` first, then `for x in it`")),
+            });
+
+        // `for x in <place> <body>`, desugared here into the `Iterator` protocol:
+        //
+        //     while (true) {
+        //         match (<place>.next()) {
+        //             Option::Some(x) -> <body>
+        //             Option::None    -> break;
+        //         }
+        //     }
+        //
+        // `Option` is left unqualified: it resolves to whichever `Option` is in
+        // scope (std's, or a module's own), matching the enum the iterator's `next`
+        // actually returns.
+        let for_ = just(Token::For)
+            .ignore_then(var.map(|s| *s))
+            .then_ignore(select_ref! { Token::Var(s) if *s == "in" => () })
+            .then(iterand)
+            .then(single_stmt_or_block.clone())
+            .map_with(|((loop_var, iter), body), e| {
+                let span = e.span();
+                let opt_pat = |variant, fields| Metadata::new(
+                    PatternNode::Variant {
+                        path: NameRef::new(Path { segments: vec!["Option", variant] }),
+                        fields,
+                    },
+                    span,
+                );
+                let some_arm = (
+                    opt_pat("Some", vec![Metadata::new(PatternNode::Bind(loop_var), span)]),
+                    Box::new(body),
+                );
+                let none_arm = (
+                    Metadata::new(PatternNode::Path(
+                        NameRef::new(Path { segments: vec!["Option", "None"] })), span),
+                    Box::new(Metadata::new(StmtNode::Break, span)),
+                );
+                // `<iter>.next()`
+                let next_call = Metadata::new(ExprNode::Call {
+                    func: Box::new(Metadata::new(
+                        ExprNode::Access { base: Box::new(iter), field: "next" }, span)),
+                    type_args: Vec::new(),
+                    args: Vec::new(),
+                }, span);
+                let match_stmt = Metadata::new(StmtNode::Match {
+                    scrutinee: next_call,
+                    arms: vec![some_arm, none_arm],
+                }, span);
+                StmtNode::While {
+                    condition: Metadata::new(ExprNode::Bool(true), span),
+                    body: Box::new(match_stmt),
+                }
             });
 
         // a match pattern: `Enum::Variant`, a data-variant destructure
@@ -1086,6 +1190,7 @@ fn parse_stmt<'tks, 'src: 'tks>()
             .or(if_else)
             .or(if_)
             .or(while_)
+            .or(for_)
             .or(match_)
             .or(contbreak)
             .or(return_)

@@ -1,0 +1,29 @@
+// `for` over an iterator whose Item is an *owning* type. Each `Some` payload is
+// moved out of the returned Option, bound to the loop variable, used, and dropped
+// at the end of its iteration — exercising the ownership pass through the desugar.
+
+import std/iter { Iterator }
+import std/option { Option }
+import std/string { String }
+
+struct Words { made: i32, count: i32 }
+
+extend Words: Iterator {
+    type Item = String;
+    proc next(*self) Option<String> {
+        if (self.made >= self.count) { return Option::None::<String>(); } else {}
+        self.made = self.made + 1;
+        return Option::Some::<String>(String::from_str("word"));
+    }
+}
+
+@export
+proc main() i32 {
+    let w: Words = Words { made: 0, count: 3 };
+    let total: i32 = 0;
+    for s in w {
+        total = total + numerical_cast::<i32>(s.len());
+    }
+    println(total);  // 3 words * 4 bytes = 12
+    return 0;
+}

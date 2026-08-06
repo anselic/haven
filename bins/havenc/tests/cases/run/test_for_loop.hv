@@ -1,0 +1,41 @@
+// `for x in <place>` over the std `Iterator` trait. Desugars to
+//   while (true) { match (place.next()) { Option::Some(x) -> ..., None -> break } }
+// Covers a plain variable iterand and a field-access iterand (`h.it`).
+
+import std/iter { Iterator }
+import std/option { Option }
+
+struct RangeIter { cur: i32, end: i32 }
+
+extend RangeIter: Iterator {
+    type Item = i32;
+    proc next(*self) Option<i32> {
+        if (self.cur >= self.end) { return Option::None::<i32>(); } else {}
+        let v: i32 = self.cur;
+        self.cur = self.cur + 1;
+        return Option::Some::<i32>(v);
+    }
+}
+
+struct Holder { it: RangeIter }
+
+@export
+proc main() i32 {
+    // variable iterand
+    let it: RangeIter = RangeIter { cur: 0, end: 5 };
+    let sum: i32 = 0;
+    for x in it {
+        sum = sum + x;
+    }
+    println(sum);   // 0+1+2+3+4 = 10
+
+    // field-access iterand
+    let h: Holder = Holder { it: RangeIter { cur: 0, end: 4 } };
+    let s2: i32 = 0;
+    for y in h.it {
+        s2 = s2 + y;
+    }
+    println(s2);    // 0+1+2+3 = 6
+
+    return 0;
+}
