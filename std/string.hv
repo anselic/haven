@@ -107,7 +107,7 @@ pub struct String {
 
     pub proc push_string(*self, other: *String) {
         let n: u64 = other.len();
-        let src: *u8 = other.buf.get_ptr(0u64);
+        let src: *u8 = other.buf.as_ptr();
         self.buf.reserve(self.len() + n);
         let i: u64 = 0u64;
         while (i < n) {
@@ -126,7 +126,7 @@ pub struct String {
         let n: u64 = self.len();
         let i: u64 = 0u64;
         while (i < n) {
-            if (self.buf.get(i) != other.buf.get(i)) { return false; }
+            if (self.buf.get(i).unwrap() != other.buf.get(i).unwrap()) { return false; }
             i = i + 1u64;
         }
         return true;
@@ -146,13 +146,13 @@ pub struct String {
         // walk one past the end so the final segment [start, n) flushes uniformly;
         // `||` short-circuits, so `get(i)` is never read at `i == n`.
         while (i <= n) {
-            if (i == n || self.buf.get(i) == sep) {
+            if (i == n || self.buf.get(i).unwrap() == sep) {
                 // build this segment as a fresh local, then move it into `result`;
                 // a new binding each flush keeps the ownership pass happy.
                 let seg: String = String::new();
                 let j: u64 = start;
                 while (j < i) {
-                    seg.push_byte(self.buf.get(j));
+                    seg.push_byte(self.buf.get(j).unwrap());
                     j = j + 1u64;
                 }
                 result.push(seg);
@@ -168,7 +168,7 @@ pub struct String {
     /// by the next mutation or free; for an empty String it is null. Pair it with
     /// `len` to hand the bytes to a byte-oriented sink like `fs::write`.
     pub proc as_bytes(*self) *u8 {
-        return self.buf.get_ptr(0u64);
+        return self.buf.as_ptr();
     }
 
     /// A borrowable, NUL-terminated `str` view of the bytes, valid until the next
@@ -178,7 +178,7 @@ pub struct String {
     pub proc as_str(*self) str {
         self.buf.reserve(self.len() + 1u64);
         self.buf.set(self.len(), 0u8);
-        return rt_bytes_as_str(self.buf.get_ptr(0u64));
+        return rt_bytes_as_str(self.buf.as_ptr());
     }
 }
 

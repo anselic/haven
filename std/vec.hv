@@ -79,18 +79,34 @@ pub struct Vec<T> {
         self.len = self.len + 1u64;
     }
 
-    /// Read the element at `i` by value. Out-of-bounds is undefined; guard with
-    /// len. This copies the element out, so it is for a `Copy` `T` (an integer, a
+    /// Read the element at `i` by value, or `none` when `i` is out of bounds.
+    /// This copies the element out, so it is for a `Copy` `T` (an integer, a
     /// plain struct); for an owning `T` it would duplicate ownership, and
     /// instantiating it is a move error - reach the element by pointer with
     /// `get_ptr` instead.
-    pub proc get(*self, i: u64) T {
-        return self.data[i];
+    pub proc get(*self, i: u64) Option<T> {
+        if (i >= self.len) {
+            return Option::None::<T>();
+        }
+        return Option::Some::<T>(self.data[i]);
     }
 
-    /// A pointer to the element at `i`, for in-place mutation of the slot.
-    pub proc get_ptr(*self, i: u64) *T {
-        return &self.data[i];
+    /// A pointer to the element at `i`, for in-place mutation of the slot, or
+    /// `none` when `i` is out of bounds.
+    pub proc get_ptr(*self, i: u64) Option<*T> {
+        if (i >= self.len) {
+            return Option::None::<*T>();
+        }
+        return Option::Some::<*T>(&self.data[i]);
+    }
+
+    /// The raw base pointer of the buffer (element 0), or null when the Vec has
+    /// never allocated. Unlike `get_ptr`, this is not bounds-checked and does not
+    /// depend on `len`: it hands back the buffer's address for callers that need
+    /// to walk the raw bytes (an FFI `argv`, a byte view). Invalidated by the next
+    /// push or free.
+    pub proc as_ptr(*self) *T {
+        return self.data;
     }
 
     /// Write `value` into the slot at `i`, without destroying whatever was there.
@@ -124,7 +140,7 @@ pub struct Vec<T> {
     pub proc for_each(*self, f: proc(*T) void) {
         let i: u64 = 0u64;
         while (i < self.len) {
-            f(self.get_ptr(i));
+            f(self.get_ptr(i).unwrap());
             i = i + 1u64;
         }
     }
@@ -136,7 +152,7 @@ pub struct Vec<T> {
         let result: Vec<U> = Vec::<U>::with_capacity(self.len);
         let i: u64 = 0u64;
         while (i < self.len) {
-            let value: U = f(self.get_ptr(i));
+            let value: U = f(self.get_ptr(i).unwrap());
             result.push(value);
             i = i + 1u64;
         }
@@ -156,7 +172,7 @@ extend Vec<T>: Clone where T: Clone {
         let out: Vec<T> = Vec::<T>::with_capacity(self.len());
         let i: u64 = 0u64;
         while (i < self.len()) {
-            out.push(self.get_ptr(i).clone());
+            out.push(self.get_ptr(i).unwrap().clone());
             i = i + 1u64;
         }
         return out;
@@ -172,7 +188,7 @@ extend Vec<T>: Clone where T: Clone {
 /// struct body. Out-of-bounds is undefined; guard with len.
 extend Vec<T> where T: Clone {
     pub proc get_cloned(*self, i: u64) T {
-        return self.get_ptr(i).clone();
+        return self.get_ptr(i).unwrap().clone();
     }
 }
 
@@ -200,7 +216,7 @@ extend Vec<T>: Display where T: Display {
         let i: u64 = 0u64;
         while (i < n) {
             if (i > 0u64) { s.push_str(", "); }
-            let ep: *T = self.get_ptr(i);
+            let ep: *T = self.get_ptr(i).unwrap();
             let part: String = ep.display();
             s.push_str(part.as_str());
             i = i + 1u64;

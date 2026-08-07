@@ -31,7 +31,7 @@
 ///     }
 
 // Both wrappers hand C a `char**` argv built from the `Vec<str>` (its buffer is
-// already a contiguous array of `str`, i.e. C `char*`, so `get_ptr(0)` is the
+// already a contiguous array of `str`, i.e. C `char*`, so `as_ptr()` is the
 // argv pointer) plus a length; the C shim prepends the program and NUL-terminates.
 // `capture` adopts the shim's two malloc'd, NUL-terminated buffers straight into
 // `String`s via `from_raw_parts`/`from_bytes` (no copy), exactly as `fs::read` does.
@@ -81,7 +81,7 @@ pub struct Output {
 pub proc run(program: str, args: Vec<str>) Result<i32, ProcError> {
     let code: i32 = 0i32;
     let n: u64 = args.len();
-    let argv: *str = args.get_ptr(0u64);
+    let argv: *str = args.as_ptr();
     let e: i32 = rt_proc_run(program, argv, n, &code);
     if (e != 0i32) {
         return Result::Err::<i32, ProcError>(ProcError { code: e });
@@ -100,7 +100,7 @@ pub proc capture(program: str, args: Vec<str>) Result<Output, ProcError> {
     let err_len: u64 = 0u64;
 
     let n: u64 = args.len();
-    let argv: *str = args.get_ptr(0u64);
+    let argv: *str = args.as_ptr();
     let e: i32 = rt_proc_capture(program, argv, n, &code,
                                  &out_ptr, &out_len, &err_ptr, &err_len);
     if (e != 0i32) {

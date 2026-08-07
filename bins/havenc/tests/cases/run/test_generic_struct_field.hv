@@ -13,7 +13,7 @@ proc main() i32 {
     let p: Pair = Pair { xs: Vec::<i32>::new(), tag: 7 };
     p.xs.push(10);
     p.xs.push(20);
-    println(p.xs.get(0u64) + p.tag); // 17
+    println(p.xs.get(0u64).unwrap() + p.tag); // 17
     println(p.xs.len());           // 2
 
     // pop yields Option<*T>: unwrap to the slot pointer, deref for the value

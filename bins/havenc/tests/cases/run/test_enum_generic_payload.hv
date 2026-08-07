@@ -15,7 +15,7 @@ enum Wrap<T> { Nil, One(T), Many(Vec<i32>) }
 proc bag_first(b: Bag) i32 {
     match (b) {
         Bag::Empty -> { return -1; }
-        Bag::Full(v) -> { return v.get(0u64); }
+        Bag::Full(v) -> { return v.get(0u64).unwrap(); }
     }
 }
 
@@ -35,7 +35,7 @@ proc main() i32 {
     match (w) {
         Wrap::Nil -> { println(0); }
         Wrap::One(x) -> { println(x); }
-        Wrap::Many(v) -> { println(v.get(1u64)); } // 200
+        Wrap::Many(v) -> { println(v.get(1u64).unwrap()); } // 200
     }
 
     // generic enum: the type-param payload

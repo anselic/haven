@@ -113,7 +113,7 @@ pub proc mkdir_all(path: str) Result<Unit, FsError> {
     let n: u64 = parts.len();
     let i: u64 = 0u64;
     while (i < n) {
-        let part: *String = parts.get_ptr(i);
+        let part: *String = parts.get_ptr(i).unwrap();
         if (part.is_empty()) {
             // a leading empty component means an absolute path ("/..."): keep the
             // root slash. Interior/trailing empties come from "//" or a trailing
