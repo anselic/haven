@@ -37,10 +37,26 @@ fn main() {
     // `defs` owns every top-level definition's identity: it produced the symbol
     // names now in `ast`, and it carries the member table both typecheck passes
     // use to resolve method calls.
-    let (ast, files, mut defs, impls) = match module::load_and_merge(input, !args.no_prelude, &arena) {
+    let (mut ast, files, mut defs, impls) = match module::load_and_merge(input, !args.no_prelude, &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };
+
+    // `main` is the program entry point, so the C runtime that calls it needs the
+    // symbol to have external linkage. Inject `@export` automatically rather than
+    // making every user write it by hand. Module merging leaves the entry `main`
+    // unmangled (see `haven_front::module`), so the only function literally named
+    // "main" is the entry one; a non-entry module's `main` was mangled away.
+    for item in &mut ast {
+        if let ast::TopLevelNode::Function { name: "main", attributes, .. } = &mut item.value {
+            if !attributes.iter().any(|a| a.value.name == "export") {
+                attributes.push(ast::Metadata::new(
+                    ast::AttributeNode::new("export", None),
+                    ast::Span::unknown(),
+                ));
+            }
+        }
+    }
 
     {
         let mut cx = typecheck::Context::new();
@@ -63,7 +79,7 @@ fn main() {
             if main_fn.is_none() {
                 eprintln!("Error: No 'main' function defined");
                 eprintln!("If you intended to compile a shared/static library, use the --shared or --static-lib flag.");
-                eprintln!("Otherwise, add a 'main' function to your program and an @export attribute to it.");
+                eprintln!("Otherwise, add a 'main' function to your program.");
                 std::process::exit(1);
             }
         }
