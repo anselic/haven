@@ -1,8 +1,9 @@
 //! Loading and interpreting `haven.toml`, the per-project manifest.
 //!
 //! A project is any directory tree with a `haven.toml` at its root. The manifest
-//! is deliberately small: a `[project]` table with a name and a handful of
-//! optional knobs mirroring `havenc`'s flags (`entry`, `shared`, `static_lib`).
+//! is deliberately small: a `[project]` table with a name, an optional `entry`,
+//! and a `kind` list declaring what the project builds to (`bin`, `lib`,
+//! `cdylib`, `staticlib`).
 
 use std::path::{Path, PathBuf};
 
@@ -35,22 +36,56 @@ pub struct ProjectTable {
     pub version: Option<toml::Value>,
 
     /// Entry source file, relative to the project root. Defaults to
-    /// [`Project::DEFAULT_ENTRY`] when omitted.
+    /// `src/main.hv` for a binary project and `src/lib.hv` for a library one.
     #[serde(default)]
     pub entry: Option<String>,
 
-    /// Build a shared library (`.so`/`.dll`/`.dylib`) instead of an executable.
+    /// What the project builds to. Omitted means `["bin"]`. See [`Kind`] for the
+    /// recognized values and [`Project::validate`] for the legal combinations.
     #[serde(default)]
-    pub shared: bool,
+    pub kind: Option<Vec<Kind>>,
+}
 
-    /// Build a static library (`.a`/`.lib`) instead of an executable.
-    #[serde(default)]
-    pub static_lib: bool,
+/// A single entry of the manifest's `kind` list.
+///
+/// `bin` and `lib` are mutually exclusive shapes: a project is either an
+/// executable or a library. `cdylib`/`staticlib` refine a `lib` into a
+/// natively-compiled artifact for FFI or linking (`--shared` / `--static-lib`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// An executable with a `main` function.
+    Bin,
+    /// A library consumed by other Haven projects.
+    Lib,
+    /// A shared/dynamic native library (`.so`/`.dll`/`.dylib`), built `--shared`.
+    Cdylib,
+    /// A static native library (`.a`/`.lib`), built `--static-lib`.
+    Staticlib,
+}
+
+/// The single artifact a `haven build` produces, resolved from the `kind` list.
+/// A `havenc` invocation emits exactly one of these, which is why conflicting
+/// `kind` combinations are rejected up front (see [`Project::validate`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Output {
+    Executable,
+    Shared,
+    Static,
+}
+
+impl Output {
+    /// Human-readable label for the "Compiling ... (label)" build line.
+    pub fn label(self) -> &'static str {
+        match self {
+            Output::Executable => "executable",
+            Output::Shared => "shared library",
+            Output::Static => "static library",
+        }
+    }
 }
 
 impl Project {
-    pub const DEFAULT_ENTRY: &'static str = "src/main.hv";
-
     /// Walk up from `start` (and its ancestors) looking for a `haven.toml`, load
     /// and parse it. Errors carry a user-facing message, already contextualized.
     pub fn find_and_load(start: &Path) -> Result<Project, String> {
@@ -82,9 +117,70 @@ impl Project {
         Ok(Project { root, project: manifest.project })
     }
 
-    /// Absolute path to the entry source file.
+    /// The declared `kind` list, defaulting to `["bin"]` when the manifest omits
+    /// it. Callers should have already run [`validate`](Self::validate).
+    pub fn kinds(&self) -> Vec<Kind> {
+        self.project
+            .kind
+            .clone()
+            .unwrap_or_else(|| vec![Kind::Bin])
+    }
+
+    /// Whether this project is a library (its `kind` list has no `bin`). Governs
+    /// the default entry file and whether `haven run` is meaningful.
+    pub fn is_library(&self) -> bool {
+        !self.kinds().contains(&Kind::Bin)
+    }
+
+    /// Reject `kind` combinations `havenc` cannot satisfy in a single build.
+    /// A build emits exactly one artifact, so an executable cannot be paired
+    /// with a native library, nor a shared library with a static one.
+    pub fn validate(&self) -> Result<(), String> {
+        let kinds = self.kinds();
+        if kinds.is_empty() {
+            return Err("`kind` must list at least one output kind \
+                        (e.g. `kind = [\"bin\"]`)"
+                .to_string());
+        }
+        let has_bin = kinds.contains(&Kind::Bin);
+        let has_shared = kinds.contains(&Kind::Cdylib);
+        let has_static = kinds.contains(&Kind::Staticlib);
+        if has_shared && has_static {
+            return Err("`kind` cannot request both `cdylib` and `staticlib`; \
+                        a build produces one native library, not both"
+                .to_string());
+        }
+        if has_bin && (has_shared || has_static) {
+            return Err("`kind` cannot combine `bin` with `cdylib`/`staticlib`; \
+                        a build is either an executable or a library"
+                .to_string());
+        }
+        Ok(())
+    }
+
+    /// The single artifact `haven build` produces for this project's `kind`.
+    /// `cdylib` builds shared, `staticlib` (or a bare `lib`) builds static, and
+    /// `bin` builds an executable.
+    pub fn output_kind(&self) -> Output {
+        let kinds = self.kinds();
+        if kinds.contains(&Kind::Cdylib) {
+            Output::Shared
+        } else if kinds.contains(&Kind::Staticlib) {
+            Output::Static
+        } else if kinds.contains(&Kind::Bin) {
+            Output::Executable
+        } else {
+            // A bare `lib`: compile it to a static archive, which both verifies
+            // it (no `main` required) and yields a linkable artifact.
+            Output::Static
+        }
+    }
+
+    /// Absolute path to the entry source file. Defaults to `src/main.hv` for a
+    /// binary and `src/lib.hv` for a library, unless `entry` overrides it.
     pub fn entry_path(&self) -> PathBuf {
-        let entry = self.project.entry.as_deref().unwrap_or(Self::DEFAULT_ENTRY);
+        let default = if self.is_library() { "src/lib.hv" } else { "src/main.hv" };
+        let entry = self.project.entry.as_deref().unwrap_or(default);
         self.root.join(entry)
     }
 

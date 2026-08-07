@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 mod config;
 
-use config::Project;
+use config::{Output, Project};
 
 #[derive(Parser)]
 #[command(
@@ -37,6 +37,15 @@ enum Cmd {
     New {
         /// Directory to create for the project.
         path: PathBuf,
+
+        /// Scaffold a library (`src/lib.hv`, `kind = ["lib"]`).
+        #[arg(long, conflicts_with = "bin")]
+        lib: bool,
+
+        /// Scaffold an executable (`src/main.hv`, `kind = ["bin"]`). This is the
+        /// default when neither `--lib` nor `--bin` is given.
+        #[arg(long)]
+        bin: bool,
     },
 
     /// Compile the project to `.haven/target/`.
@@ -80,7 +89,7 @@ impl MessageFormat {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.cmd {
-        Cmd::New { path } => cmd_new(&path),
+        Cmd::New { path, lib, .. } => cmd_new(&path, lib),
         Cmd::Build { message_format } => cmd_build(message_format).map(|_| ()),
         Cmd::Run { message_format, args } => cmd_run(message_format, &args),
         Cmd::Doc => cmd_doc(),
@@ -98,7 +107,7 @@ fn main() -> ExitCode {
 // new
 // ---------------------------------------------------------------------------
 
-fn cmd_new(path: &Path) -> Result<(), String> {
+fn cmd_new(path: &Path, is_lib: bool) -> Result<(), String> {
     if path.exists() {
         return Err(format!("destination `{}` already exists", path.display()));
     }
@@ -114,23 +123,36 @@ fn cmd_new(path: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&src_dir)
         .map_err(|e| format!("cannot create `{}`: {}", src_dir.display(), e))?;
 
+    let kind = if is_lib { "lib" } else { "bin" };
     let manifest = format!(
         "[project]\n\
          name = \"{name}\"\n\
          version = \"0.1.0\"\n\
-         \n\
-         # Optional: entry source file (default: src/main.hv)\n\
-         entry = \"src/main.hv\"\n",
+         kind = [\"{kind}\"]\n\
+         # kind = [\"bin\"]              <- executable\n\
+         # kind = [\"lib\"]              <- library for other Haven projects\n\
+         # kind = [\"lib\", \"cdylib\"]    <- Haven-consumable library with --shared\n\
+         # kind = [\"lib\", \"staticlib\"] <- Haven-consumable library with --static\n",
     );
     write_new_file(&path.join(config::MANIFEST), &manifest)?;
 
-    let main_hv = "proc main() i32 {\n    println(\"Hello, Haven!\");\n    return 0;\n}\n";
-    write_new_file(&src_dir.join("main.hv"), main_hv)?;
+    if is_lib {
+        let lib_hv = "/// Add two integers.\n\
+                      pub proc add(a: i32, b: i32) i32 {\n\
+                      \x20   return a + b;\n\
+                      }\n";
+        write_new_file(&src_dir.join("lib.hv"), lib_hv)?;
+    } else {
+        let main_hv =
+            "proc main() i32 {\n    println(\"Hello, World!\");\n    return 0;\n}\n";
+        write_new_file(&src_dir.join("main.hv"), main_hv)?;
+    }
 
     // Keep the build directory out of version control.
     write_new_file(&path.join(".gitignore"), "/.haven\n")?;
 
-    println!("Created Haven project `{}` at `{}`", name, path.display());
+    let what = if is_lib { "library" } else { "executable" };
+    println!("Created Haven {} `{}` at `{}`", what, name, path.display());
     Ok(())
 }
 
@@ -151,13 +173,15 @@ fn cmd_build(fmt: MessageFormat) -> Result<PathBuf, String> {
 }
 
 /// The shared compile path used by both `build` and `run`. When
-/// `force_executable` is set (as `run` requires), the manifest's
-/// `shared`/`static_lib` flags are ignored so there is a binary to launch.
+/// `force_executable` is set (as `run` requires), the manifest's `kind` is
+/// overridden to build an executable so there is a binary to launch.
 fn build_project(
     project: &Project,
     fmt: MessageFormat,
     force_executable: bool,
 ) -> Result<PathBuf, String> {
+    project.validate()?;
+
     let entry = project.entry_path();
     if !entry.is_file() {
         return Err(format!("entry file `{}` does not exist", entry.display()));
@@ -169,6 +193,12 @@ fn build_project(
 
     let out_base = target_dir.join(project.bin_name());
 
+    let output = if force_executable {
+        Output::Executable
+    } else {
+        project.output_kind()
+    };
+
     let havenc = tool_path("havenc");
     let mut cmd = Command::new(&havenc);
     cmd.arg(&entry)
@@ -177,24 +207,15 @@ fn build_project(
         .arg("--message-format")
         .arg(fmt.as_str());
 
-    let shared = !force_executable && project.project.shared;
-    let static_lib = !force_executable && project.project.static_lib;
-    if shared {
-        cmd.arg("--shared");
-    } else if static_lib {
-        cmd.arg("--static-lib");
+    match output {
+        Output::Shared => { cmd.arg("--shared"); }
+        Output::Static => { cmd.arg("--static-lib"); }
+        Output::Executable => {}
     }
 
-    let kind = if shared {
-        "shared library"
-    } else if static_lib {
-        "static library"
-    } else {
-        "executable"
-    };
     let ver = project.version_display();
     let ver = if ver.is_empty() { String::new() } else { format!(" v{ver}") };
-    println!("Compiling {}{} ({})", project.project.name, ver, kind);
+    println!("Compiling {}{} ({})", project.project.name, ver, output.label());
 
     let status = cmd
         .status()
@@ -205,30 +226,36 @@ fn build_project(
 
     // Resolve the actual artifact path from the output kind, mirroring `havenc`'s
     // extension choices, so callers (chiefly `run`) know what to launch.
-    let artifact = artifact_path(&out_base, shared, static_lib);
+    let artifact = artifact_path(&out_base, output);
     println!("Finished: {}", artifact.display());
     Ok(artifact)
 }
 
-/// The on-disk path `havenc` writes for a given output base and library kind,
+/// The on-disk path `havenc` writes for a given output base and output kind,
 /// matching its per-platform extension logic.
-fn artifact_path(base: &Path, shared: bool, static_lib: bool) -> PathBuf {
-    if shared {
-        let ext = if cfg!(target_os = "windows") {
-            "dll"
-        } else if cfg!(target_os = "macos") {
-            "dylib"
-        } else {
-            "so"
-        };
-        base.with_extension(ext)
-    } else if static_lib {
-        let ext = if cfg!(target_os = "windows") { "lib" } else { "a" };
-        base.with_extension(ext)
-    } else if cfg!(target_os = "windows") {
-        base.with_extension("exe")
-    } else {
-        base.to_path_buf()
+fn artifact_path(base: &Path, output: Output) -> PathBuf {
+    match output {
+        Output::Shared => {
+            let ext = if cfg!(target_os = "windows") {
+                "dll"
+            } else if cfg!(target_os = "macos") {
+                "dylib"
+            } else {
+                "so"
+            };
+            base.with_extension(ext)
+        }
+        Output::Static => {
+            let ext = if cfg!(target_os = "windows") { "lib" } else { "a" };
+            base.with_extension(ext)
+        }
+        Output::Executable => {
+            if cfg!(target_os = "windows") {
+                base.with_extension("exe")
+            } else {
+                base.to_path_buf()
+            }
+        }
     }
 }
 
@@ -238,6 +265,11 @@ fn artifact_path(base: &Path, shared: bool, static_lib: bool) -> PathBuf {
 
 fn cmd_run(fmt: MessageFormat, args: &[String]) -> Result<(), String> {
     let project = Project::find_and_load(&cwd()?)?;
+    if project.is_library() {
+        return Err("cannot `haven run` a library project \
+                    (its `kind` has no `bin`)"
+            .to_string());
+    }
     let bin = build_project(&project, fmt, /*force_executable=*/ true)?;
 
     println!("Running `{}`", bin.display());
