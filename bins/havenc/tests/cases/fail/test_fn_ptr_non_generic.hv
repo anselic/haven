@@ -1,7 +1,7 @@
 // A turbofish on a non-generic function taken by value is an error: a plain
 // function is already a concrete pointer and has no type parameters to bind.
 //
-//@ error: 'f' is not generic and takes no type arguments
+//@ error: is not generic and takes no type arguments
 proc f(x: i32) i32 { return x; }
 
 @export

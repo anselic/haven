@@ -204,6 +204,8 @@ fn build_project(
     cmd.arg(&entry)
         .arg("--output")
         .arg(&out_base)
+        .arg("--package-name")
+        .arg(&project.project.name)
         .arg("--message-format")
         .arg(fmt.as_str());
 

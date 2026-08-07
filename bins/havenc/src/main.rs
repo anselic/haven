@@ -42,7 +42,7 @@ fn main() {
     // `defs` owns every top-level definition's identity: it produced the symbol
     // names now in `ast`, and it carries the member table both typecheck passes
     // use to resolve method calls.
-    let (mut ast, files, mut defs, impls) = match module::load_and_merge(input, !args.no_prelude, &arena) {
+    let (mut ast, files, mut defs, impls) = match module::load_and_merge(input, args.package_name.as_deref(), !args.no_prelude, &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };

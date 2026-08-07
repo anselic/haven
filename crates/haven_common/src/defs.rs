@@ -19,21 +19,27 @@
 //!
 //! ## symbol scheme
 //!
-//! An item that must keep a stable spelling — an `extern`'s C link name, an
-//! `@export`ed item, anything in the entry module — is [`Linkage::Fixed`] and is
-//! emitted verbatim. Everything else is [`Linkage::Mangled`] and comes out as
-//! `<module slug>$<source name>`:
+//! An item that must keep a stable spelling — an `extern`'s C link name or an
+//! `@export`ed item — is [`Linkage::Fixed`] and is emitted verbatim. Everything
+//! else is [`Linkage::Mangled`] and comes out as `<module slug>$<source name>`:
 //!
 //! ```text
 //! std.math$square          std/math.hv
-//! helpers.geo$Point        helpers/geo.hv, relative to the entry file
-//! m7f3a1c02$Point          a module outside the entry's tree
+//! foo$Point                src/main.hv        (the package root of package `foo`)
+//! foo.geo$Point            src/geo.hv         (a submodule of package `foo`)
+//! foo.dsp.osc$Osc          src/dsp/osc.hv
 //! ```
+//!
+//! The slug is a pure function of `(package name, module path relative to that
+//! package's root)`: the root module carries the bare package name, a submodule
+//! `<package>.<relpath>`, and `std` is just the package named `std`. No absolute
+//! filesystem path ever appears in a symbol, so the same package compiled from
+//! any location on any machine emits identical names — what `--shared` /
+//! `--static-lib` ABI and reproducible builds need.
 //!
 //! The slug is derived from the module's *path*, not from load order. The old
 //! scheme was `m{id}_{basename}` with `id` an enqueue index, so adding an
-//! unrelated import renamed every symbol in the program — bad for `--shared` and
-//! `--static-lib` ABI, and for reading `--emit-ir` diffs.
+//! unrelated import renamed every symbol in the program.
 //!
 //! The `$` between slug and name is a separator only - nothing takes a symbol
 //! apart to recover the item name any more. Diagnostics get the source spelling
@@ -94,9 +100,9 @@ pub enum DefKind {
 /// where the three copies had drifted apart (only the fn one checked `extern`).
 #[derive(Clone, Copy, Debug)]
 pub enum Linkage<'a> {
-    /// Emitted under exactly this name: an `extern`'s link symbol, an `@export`ed
-    /// item, or anything in the entry module (whose names can't collide with the
-    /// mangled imported ones, and whose diagnostics read better unmangled).
+    /// Emitted under exactly this name: an `extern`'s link symbol or an
+    /// `@export`ed item (the program's `main` reaches this through the
+    /// `@export` the driver injects onto it).
     Fixed(&'a str),
     /// Emitted as `<module slug>$<source name>`.
     Mangled,
@@ -340,22 +346,37 @@ pub struct Defs<'a> {
 impl<'a> Defs<'a> {
     pub fn new() -> Self { Self::default() }
 
-    /// Register a module and compute its symbol slug. `entry_dir` is the
-    /// directory holding the entry file, which user module paths are made
-    /// relative to.
-    pub fn add_module(&mut self, key: String, file: FileId, is_entry: bool,
-                      entry_dir: Option<&Path>) -> ModId {
+    /// Register a module and compute its symbol slug. `package` is the name of
+    /// the package this module belongs to, and `root` is that package's root
+    /// directory, which non-`std` module paths are made relative to. `is_entry`
+    /// marks the package root module (whose slug is the bare package name).
+    ///
+    /// Fails only when a non-root, non-`std` module resolves outside the package
+    /// root — the case the old absolute-path hash silently absorbed, now a
+    /// diagnosable error rather than a symbol that bakes in a filesystem path.
+    pub fn add_module(&mut self, package: &str, key: String, file: FileId,
+                      is_entry: bool, root: Option<&Path>) -> Result<ModId, String> {
         let id = ModId(self.mods.len() as u32);
-        let mut slug = module_slug(&key, entry_dir);
+        let Some(mut slug) = module_slug(package, &key, root, is_entry) else {
+            return Err(format!(
+                "module '{}' is outside the root of package '{}'{}. A module must \
+                 live under its package root; cross-package imports are not \
+                 supported yet",
+                key, package,
+                root.map(|r| format!(" ('{}')", r.display())).unwrap_or_default()));
+        };
         // two distinct modules must never share a slug, or their symbols collide
-        // at link time. disambiguate with a hash of the full key, which is stable
-        // regardless of the order the two were loaded in.
+        // at link time. Package-relative slugs are distinct for distinct relative
+        // paths, so this only fires when `sanitize` maps two different paths onto
+        // one spelling; disambiguate with a hash of the *package-relative* key,
+        // which is stable across machines and independent of load order (never
+        // the absolute key, which would bake in a filesystem path).
         if self.slugs.contains_key(&slug) {
-            slug = format!("{}_{:08x}", slug, fnv1a(&key));
+            slug = format!("{}_{:08x}", slug, fnv1a(&rel_seed(&key, root)));
         }
         self.slugs.insert(slug.clone(), id);
         self.mods.push(ModInfo { file, key, slug, is_entry });
-        id
+        Ok(id)
     }
 
     pub fn alloc(&mut self, def: Def<'a>) -> DefId {
@@ -479,26 +500,51 @@ impl<'a> Defs<'a> {
     }
 }
 
-/// Path-derived symbol prefix for a module.
+/// Package-anchored symbol prefix for a module: a pure function of the package
+/// name and the module's path relative to the package root, so no absolute path
+/// ever reaches a symbol.
 ///
-/// * `std/dsp/osc`    -> `std.dsp.osc`
-/// * a file under the entry's directory -> that relative path, dotted
-/// * anything else (a path escaping the entry's tree, or a key that can't be
-///   made relative) -> `m<hash>`, since there is no meaningful readable name and
-///   an absolute path would leak the developer's home directory into the binary.
-fn module_slug(key: &str, entry_dir: Option<&Path>) -> String {
+/// * `std/dsp/osc`               -> `std.dsp.osc`   (`std` is the package `std`)
+/// * the package root (`is_root`) -> `foo`          (the bare package name)
+/// * `foo`'s `src/geo.hv`        -> `foo.geo`       (`<package>.<relpath>`)
+///
+/// `None` when a non-root, non-`std` key escapes the package root. The old
+/// scheme hashed such a key's absolute path (`m<hash>`); that baked the
+/// developer's home directory into the binary and is now a caller-diagnosed
+/// error instead.
+fn module_slug(package: &str, key: &str, root: Option<&Path>, is_root: bool) -> Option<String> {
+    // `std` is just the package named `std`, anchored at the embedded tree root.
     if let Some(rest) = key.strip_prefix("std/") {
-        return format!("std.{}", sanitize(rest));
+        return Some(format!("std.{}", sanitize(rest)));
     }
-    if let Some(dir) = entry_dir {
-        if let Ok(rel) = Path::new(key).strip_prefix(dir) {
-            let rel = rel.to_string_lossy();
-            if !rel.starts_with("..") {
-                return sanitize(rel.trim_end_matches(".hv"));
-            }
+    // the package name is sanitized like a path fragment, so a manifest name
+    // with spaces or punctuation still yields a valid identifier prefix.
+    let package = sanitize(package);
+    // the package root module carries the bare package name, matching Rust's
+    // crate-root convention (`crate::thing`, not `crate::main::thing`).
+    if is_root {
+        return Some(package);
+    }
+    // a submodule: `<package>.<path relative to the package root>`.
+    let rel = Path::new(key).strip_prefix(root?).ok()?;
+    let rel = rel.to_string_lossy();
+    if rel.starts_with("..") { return None; }
+    Some(format!("{}.{}", package, sanitize(rel.trim_end_matches(".hv"))))
+}
+
+/// The location-independent seed used to disambiguate a slug collision: a
+/// module key's path *within its package* (`std/`'s tail, or the path relative
+/// to the package root), never the absolute key. Two keys reach this only when
+/// they slug alike, and their in-package paths still differ, so hashing this
+/// keeps their symbols apart while staying identical across machines.
+fn rel_seed(key: &str, root: Option<&Path>) -> String {
+    if let Some(rest) = key.strip_prefix("std/") { return rest.to_string(); }
+    if let Some(root) = root {
+        if let Ok(rel) = Path::new(key).strip_prefix(root) {
+            return rel.to_string_lossy().into_owned();
         }
     }
-    format!("m{:08x}", fnv1a(key))
+    key.to_string()
 }
 
 /// Turn a path fragment into an identifier-safe dotted slug: separators become

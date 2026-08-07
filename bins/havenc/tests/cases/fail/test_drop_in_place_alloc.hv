@@ -5,8 +5,9 @@
 // hole, and the reason it is not is that the ownership pass rewrites it into
 // ordinary `delete` calls *before* the alloc check runs, so the destructors it
 // reaches are edges like any other. The error names `Res$delete`, not the
-// intrinsic, and points at the line the loop came from.
-//@ error: calls 'Res$delete', which may allocate
+// intrinsic, and points at the line the loop came from. (The name is package-
+// anchored, `<package>$Res$delete`, so match only the type-and-method tail.)
+//@ error: Res$delete', which may allocate
 
 import std/alloc { alloc, dealloc }
 

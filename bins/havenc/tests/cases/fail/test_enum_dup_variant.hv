@@ -1,4 +1,4 @@
-//@ error: Duplicate variant 'A' in enum 'E'
+//@ error: Duplicate variant 'A' in enum
 enum E { A, B, A }
 
 @export

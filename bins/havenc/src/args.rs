@@ -71,6 +71,13 @@ pub struct Args {
     #[arg(long)]
     pub no_prelude: bool,
 
+    /// The package name that anchors emitted symbol names
+    /// (`<package>.<module>$<item>`). Defaults to the entry file's stem, so a
+    /// bare `havenc foo.hv` names its package `foo`. The `haven` build tool
+    /// forwards the manifest's `name` here.
+    #[arg(long, value_name = "NAME")]
+    pub package_name: Option<String>,
+
     /// Diagnostic output format. `human` (default) is the pretty terminal
     /// renderer; `json` emits one NDJSON diagnostic per line on stderr for
     /// tooling (LSP, the `haven` build orchestrator) to parse.

@@ -5,9 +5,10 @@
 //!   1. transitively loads every imported module (`import std/...` -> an embedded
 //!      stdlib source; any other path -> an `.hv` file relative to the
 //!      *importing* file's dir);
-//!   2. gives each module a unique mangling prefix and renames its top-level defs
-//!      (`foo` in module `m1` -> `m1_...$foo`), leaving `extern` link names,
-//!      `@export`ed items and the entry `main` alone;
+//!   2. gives each module a package-anchored mangling prefix and renames its
+//!      top-level defs (`bar` in `pkg`'s `geo.hv` -> `pkg.geo$bar`), leaving
+//!      `extern` link names and `@export`ed items alone (the driver `@export`s
+//!      the entry `main`, so it too keeps its spelling);
 //!   3. rewrites every reference (call targets, struct literals, struct types)
 //!      per that module's imports;
 //!   4. concatenates all modules into one flat program, no imports left.
@@ -119,7 +120,6 @@ struct Module<'a> {
     file: FileId,
     /// this module's entry in `Defs`, which owns its symbol slug.
     mid: ModId,
-    is_entry: bool,
     imports: Vec<Import<'a>>,
     /// what each import resolved to (parallel to `imports`), or `None` if it
     /// failed to resolve (error already recorded).
@@ -168,10 +168,13 @@ fn is_export(attrs: &[Attribute]) -> bool {
 ///
 /// * `extern` - the name *is* the C link symbol.
 /// * `@export` - a host looks the symbol up by that name.
-/// * the entry module - its names can't clash with the mangled imported ones,
-///   and single-file diagnostics read better unmangled.
-fn linkage_of<'a>(m: &Module<'_>, name: &'a str, attrs: &[Attribute], is_extern: bool) -> Linkage<'a> {
-    if is_extern || is_export(attrs) || m.is_entry {
+///
+/// The entry module is *not* special: its items mangle under the package
+/// namespace like any other module's, so a package is reproducible whether it is
+/// rooted at `main.hv` or `lib.hv`. `main` still links because the driver injects
+/// `@export` onto it before this runs, which routes it through `is_export`.
+fn linkage_of<'a>(name: &'a str, attrs: &[Attribute], is_extern: bool) -> Linkage<'a> {
+    if is_extern || is_export(attrs) {
         Linkage::Fixed(name)
     } else {
         Linkage::Mangled
@@ -1629,17 +1632,17 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
         match &tl.value {
             TopLevelNode::Function { name, is_pub, attributes, .. } => {
                 let id = def(defs, DefKind::Fn, name, *is_pub,
-                    linkage_of(m, name, attributes, false), &tl.span);
+                    linkage_of(name, attributes, false), &tl.span);
                 st.fns.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             TopLevelNode::Extern { name, is_pub, attributes, .. } => {
                 let id = def(defs, DefKind::Extern, name, *is_pub,
-                    linkage_of(m, name, attributes, true), &tl.span);
+                    linkage_of(name, attributes, true), &tl.span);
                 st.fns.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             TopLevelNode::Struct { name, is_pub, attributes, .. } => {
                 let id = def(defs, DefKind::Struct, name, *is_pub,
-                    linkage_of(m, name, attributes, false), &tl.span);
+                    linkage_of(name, attributes, false), &tl.span);
                 st.structs.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             // enums live in the type namespace like structs, and are mangled like
@@ -1649,7 +1652,7 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
             // names used to be forced globally unique.
             TopLevelNode::Enum { name, is_pub, attributes, variants, .. } => {
                 let id = def(defs, DefKind::Enum, name, *is_pub,
-                    linkage_of(m, name, attributes, false), &tl.span);
+                    linkage_of(name, attributes, false), &tl.span);
                 let sym = defs.symbol(id, arena);
                 st.structs.insert(name, Sym { name: sym, def: id, is_pub: *is_pub });
                 // a data variant's payload is laid out as its own struct, so it
@@ -1666,7 +1669,7 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
             // globals live in the callable/value namespace (referenced as vars).
             TopLevelNode::Global { name, is_pub, attributes, .. } => {
                 let id = def(defs, DefKind::Global, name, *is_pub,
-                    linkage_of(m, name, attributes, false), &tl.span);
+                    linkage_of(name, attributes, false), &tl.span);
                 st.fns.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             // traits live in the type namespace like structs/enums, and are mangled
@@ -1675,7 +1678,7 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
             // in one module no longer reserves its name program-wide.
             TopLevelNode::Trait { name, is_pub, .. } => {
                 let id = def(defs, DefKind::Trait, name, *is_pub,
-                    linkage_of(m, name, &[], false), &tl.span);
+                    linkage_of(name, &[], false), &tl.span);
                 st.structs.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             // `extend` blocks were lowered to functions in `lower_methods`.
@@ -1690,7 +1693,12 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
 /// unqualified in every other module; the module itself is loaded like any other
 /// std module either way, so an explicit `import std/prelude` is not a second
 /// copy of it.
-pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bump)
+///
+/// `package` names the package being compiled, which anchors every emitted
+/// symbol (`<package>.<relpath>$<name>`); `None` defaults it to the entry file's
+/// stem, keeping a bare `havenc foo.hv` working. The package is rooted at the
+/// entry file's directory, so its submodules must live under that directory.
+pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelude: bool, arena: &'a Bump)
     -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>), ()>
 {
     // a module we've decided to load but haven't parsed yet.
@@ -1732,10 +1740,17 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
             return Err(());
         }
     };
-    // user module symbol slugs are relative to the entry file's directory, so a
-    // build is reproducible across machines (the canonical key is absolute, and
-    // would otherwise bake the developer's home directory into every symbol).
+    // the package is rooted at the entry file's directory: every non-std module's
+    // slug is its path relative to here, so a build is reproducible across
+    // machines (the canonical key is absolute, and would otherwise bake the
+    // developer's home directory into every symbol).
     let entry_dir: Option<PathBuf> = entry_path.parent().map(|d| d.to_path_buf());
+
+    // resolve the package name once. Absent an explicit one, the entry file's
+    // stem stands in, so `havenc foo.hv` names its package `foo` with no flag.
+    let package: String = package.map(str::to_string).unwrap_or_else(||
+        entry_path.file_stem().map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "pkg".to_string()));
 
     worklist.push_back(Pending {
         key: entry_path.to_string_lossy().into_owned(),
@@ -1763,16 +1778,44 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
         // register the source before parsing: its spans carry this id, and any
         // lex/parse diagnostic has to be able to quote it.
         let file = files.add(p.key.clone(), p.src);
-        let (imports, items, impls, methods) = match parse_module(file, p.src, arena, &files) {
+        let (imports, mut items, impls, methods) = match parse_module(file, p.src, arena, &files) {
             Ok(pi) => pi,
             Err(()) => { had_error = true; continue; }
         };
 
-        // the module's symbol slug is derived from its *path* (see
-        // `defs::module_slug`), so it no longer shifts when an unrelated import
-        // is added or removed - which the old `m{id}_{basename}` prefix did, `id`
-        // being an enqueue index.
-        let mid = defs.add_module(p.key.clone(), file, p.is_entry, entry_dir.as_deref());
+        // `main` is the program's entry point: the C runtime that calls it needs a
+        // fixed external symbol. The entry module is otherwise an ordinary package
+        // module whose items mangle under the package namespace, so inject
+        // `@export` onto its `main` now - before `build_symtab` reads attributes to
+        // decide linkage. That keeps `main` `Fixed` (emitted verbatim, AST name
+        // left as "main"), which both the linker and the driver's main-existence
+        // check rely on. Doing it here rather than in the driver is what makes it
+        // take effect: by the time the driver runs, linkage is already assigned and
+        // every mangled name rewritten.
+        if p.is_entry {
+            for tl in &mut items {
+                if let TopLevelNode::Function { name: "main", attributes, .. } = &mut tl.value {
+                    if !is_export(attributes) {
+                        attributes.push(Metadata::new(
+                            AttributeNode::new("export", None), Span::unknown()));
+                    }
+                }
+            }
+        }
+
+        // the module's symbol slug is derived from `(package, path relative to
+        // the package root)` (see `defs::module_slug`), so it no longer shifts
+        // when an unrelated import is added or removed - which the old
+        // `m{id}_{basename}` prefix did, `id` being an enqueue index - nor when
+        // the package is compiled from a different location.
+        let mid = match defs.add_module(&package, p.key.clone(), file, p.is_entry, entry_dir.as_deref()) {
+            Ok(mid) => mid,
+            Err(msg) => {
+                diag::report("Module error", &msg, &Span::new(file, 0, 0), &files);
+                had_error = true;
+                continue;
+            }
+        };
 
         // resolve + enqueue each import. errors point at the import statement in
         // this module.
@@ -1814,7 +1857,6 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
         modules.push(Module {
             file,
             mid,
-            is_entry: p.is_entry,
             imports,
             import_keys,
             items,
