@@ -1,5 +1,25 @@
 use std::path::PathBuf;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+use haven_common::diag;
+
+/// How `havenc` prints diagnostics. `human` is the ariadne pretty-printer;
+/// `json` emits one machine-readable object per line (NDJSON) on stderr for the
+/// LSP and the `haven` build orchestrator to consume.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum MessageFormat {
+    Human,
+    Json,
+}
+
+impl From<MessageFormat> for diag::Format {
+    fn from(m: MessageFormat) -> Self {
+        match m {
+            MessageFormat::Human => diag::Format::Human,
+            MessageFormat::Json => diag::Format::Json,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -50,4 +70,10 @@ pub struct Args {
     /// unless declared manually). Useful for freestanding builds.
     #[arg(long)]
     pub no_prelude: bool,
+
+    /// Diagnostic output format. `human` (default) is the pretty terminal
+    /// renderer; `json` emits one NDJSON diagnostic per line on stderr for
+    /// tooling (LSP, the `haven` build orchestrator) to parse.
+    #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
+    pub message_format: MessageFormat,
 }

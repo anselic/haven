@@ -5,6 +5,7 @@ members = [
     "crates/haven_front",
     "crates/haven_mid",
     "crates/haven_back",
+    "bins/haven",
     "bins/havenc",
     "bins/havendoc",
 ]

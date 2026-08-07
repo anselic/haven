@@ -1721,14 +1721,14 @@ pub fn load_and_merge<'a>(entry: &FilePath, inject_prelude: bool, arena: &'a Bum
     let entry_path = match std::fs::canonicalize(entry) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Error: cannot read entry file '{}': {}", entry.display(), e);
+            diag::report_plain("Error", &format!("cannot read entry file '{}': {}", entry.display(), e));
             return Err(());
         }
     };
     let entry_src = match std::fs::read_to_string(&entry_path) {
         Ok(s) => arena.alloc_str(&s),
         Err(e) => {
-            eprintln!("Error: cannot read entry file '{}': {}", entry_path.display(), e);
+            diag::report_plain("Error", &format!("cannot read entry file '{}': {}", entry_path.display(), e));
             return Err(());
         }
     };

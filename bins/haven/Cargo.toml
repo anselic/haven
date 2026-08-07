@@ -1,0 +1,8 @@
+[package]
+name = "haven"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name  = "haven"
+path = "src/main.rs"

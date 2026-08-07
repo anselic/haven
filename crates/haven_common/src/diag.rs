@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use ariadne::{Color, Label, Report, ReportKind};
 
@@ -50,6 +51,33 @@ impl<'a> Files<'a> {
     }
 }
 
+/// How diagnostics are rendered. `Human` is the ariadne pretty-printer for a
+/// terminal; `Json` emits one machine-readable object per line (NDJSON) so an
+/// LSP server or the `haven` build orchestrator can stream-parse them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Format {
+    Human,
+    Json,
+}
+
+// Chosen once at startup (see `set_format`) and read on every `report`. An atomic
+// keeps `report`/`report_error`/`report_plain` free of any extra threading, so
+// every existing call site emits in the selected format for free.
+static FORMAT: AtomicU8 = AtomicU8::new(Format::Human as u8);
+
+/// Select the diagnostic output format. Call once, before compilation starts.
+pub fn set_format(fmt: Format) {
+    FORMAT.store(fmt as u8, Ordering::Relaxed);
+}
+
+/// The format selected by [`set_format`], defaulting to [`Format::Human`].
+pub fn format() -> Format {
+    match FORMAT.load(Ordering::Relaxed) {
+        x if x == Format::Json as u8 => Format::Json,
+        _ => Format::Human,
+    }
+}
+
 /// AST/chumsky spans are byte offsets, but ariadne's renderer indexes labels by
 /// char offset. Convert here so multibyte source still underlines the right span
 fn byte_to_char(src: &str, byte: usize) -> usize {
@@ -62,17 +90,101 @@ fn to_span(src: &str, path: &str, span: &Span) -> (String, Range<usize>) {
     (path.to_string(), start..end)
 }
 
-/// Render one diagnostic to stderr. `stage` is the header label (e.g.
-/// `"Typecheck error"`); `span.file` selects which source in `files` to quote.
+/// 0-based `(line, character)` for a byte offset, in the units LSP expects:
+/// lines split on `\n`, columns counted in UTF-16 code units so an editor can
+/// map the position without re-scanning the source itself.
+fn line_col(src: &str, byte: usize) -> (usize, usize) {
+    let byte = byte.min(src.len());
+    let mut line = 0usize;
+    let mut col = 0usize; // utf-16 units since the last newline
+    for (i, ch) in src.char_indices() {
+        if i >= byte { break; }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf16();
+        }
+    }
+    (line, col)
+}
+
+/// Append `s` to `out` as a JSON string literal, quotes included.
+fn push_json_str(out: &mut String, s: &str) {
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Emit one diagnostic as a single NDJSON line on stderr. `file` and the
+/// resolved `span` are optional so spanless errors (e.g. "no main function")
+/// still land in the same stream with `null` fields.
+fn emit_json(stage: &str, msg: &str, file: Option<&str>, span: Option<(&str, &Span)>) {
+    let mut out = String::new();
+    out.push_str("{\"severity\":\"error\",\"stage\":");
+    push_json_str(&mut out, stage);
+    out.push_str(",\"message\":");
+    push_json_str(&mut out, msg);
+
+    out.push_str(",\"file\":");
+    match file {
+        Some(f) => push_json_str(&mut out, f),
+        None => out.push_str("null"),
+    }
+
+    out.push_str(",\"span\":");
+    match span {
+        Some((src, sp)) => {
+            let end = sp.end.max(sp.start);
+            let (sl, sc) = line_col(src, sp.start);
+            let (el, ec) = line_col(src, end);
+            out.push_str(&format!(
+                "{{\"byte_start\":{},\"byte_end\":{},\
+                 \"start\":{{\"line\":{},\"character\":{}}},\
+                 \"end\":{{\"line\":{},\"character\":{}}}}}",
+                sp.start, end, sl, sc, el, ec,
+            ));
+        }
+        None => out.push_str("null"),
+    }
+    out.push('}');
+
+    eprintln!("{}", out);
+}
+
+/// Render one diagnostic. `stage` is the header label (e.g. `"Typecheck error"`);
+/// `span.file` selects which source in `files` to quote. Honors the format set by
+/// [`set_format`]: pretty ariadne output, or one NDJSON line, both on stderr.
 pub fn report(stage: &str, msg: &str, span: &Span, files: &Files) {
+    let path = files.path(span.file);
     let Some(src) = files.src(span.file) else {
         // no source on hand (shouldn't happen) but we don't want to swallow the
         // message
-        eprintln!("{} in {}: {}", stage, files.path(span.file), msg);
+        match format() {
+            Format::Json => emit_json(stage, msg, Some(path), None),
+            Format::Human => eprintln!("{} in {}: {}", stage, path, msg),
+        }
         return;
     };
 
-    let span = to_span(src, files.path(span.file), span);
+    if let Format::Json = format() {
+        emit_json(stage, msg, Some(path), Some((src, span)));
+        return;
+    }
+
+    let span = to_span(src, path, span);
     Report::build(ReportKind::Custom(stage, Color::Red), span.clone())
         .with_message(msg)
         .with_label(Label::new(span).with_color(Color::Red).with_message(msg))
@@ -85,4 +197,15 @@ pub fn report(stage: &str, msg: &str, span: &Span, files: &Files) {
 /// Convenience for the common `ast::Error` case.
 pub fn report_error(stage: &str, err: &Error, files: &Files) {
     report(stage, &err.msg, &err.span, files);
+}
+
+/// Report an error with no source location (a driver-level failure like a
+/// missing entry file or absent `main`). In human mode this is a plain stderr
+/// line; in JSON mode it joins the NDJSON stream with `null` file/span so a
+/// consumer never has to parse free-form text to notice the build failed.
+pub fn report_plain(stage: &str, msg: &str) {
+    match format() {
+        Format::Json => emit_json(stage, msg, None, None),
+        Format::Human => eprintln!("{}: {}", stage, msg),
+    }
 }

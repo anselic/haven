@@ -19,6 +19,11 @@ fn main() {
     let args = args::Args::parse();
     let input = &args.input;
 
+    // Pick the diagnostic format before any stage can emit one, so every
+    // `diag::report*` call below - including those inside `load_and_merge` -
+    // renders in the requested format.
+    diag::set_format(args.message_format.into());
+
     // arena backing every `&'a str` in the AST (module sources, token streams,
     // and the synthetic mangled/prefixed names minted during module resolution
     // and monomorphization)
@@ -77,9 +82,12 @@ fn main() {
             });
 
             if main_fn.is_none() {
-                eprintln!("Error: No 'main' function defined");
-                eprintln!("If you intended to compile a shared/static library, use the --shared or --static-lib flag.");
-                eprintln!("Otherwise, add a 'main' function to your program.");
+                diag::report_plain(
+                    "Error",
+                    "No 'main' function defined. If you intended to compile a \
+                     shared/static library, use the --shared or --static-lib \
+                     flag. Otherwise, add a 'main' function to your program.",
+                );
                 std::process::exit(1);
             }
         }
