@@ -760,9 +760,10 @@ fn write_book_toml(out: &Path, title: &str) -> Result<(), ()> {
 /// Oxocarbon (nyoom-engineering, an IBM Carbon Design System palette) as an
 /// mdBook theme, emitted so a plain `havendoc` run needs no manual theming.
 ///
-/// Only `theme/css/variables.css` is overridden: mdBook falls back to its
-/// built-in `index.hbs`/`book.js` for everything else, so no mdBook internals
-/// are vendored or version-pinned. The dark variant is mapped onto the built-in
+/// Only `theme/css/variables.css` and `theme/highlight.js` are overridden:
+/// mdBook falls back to its built-in `index.hbs`/`book.js` for everything else.
+/// (`highlight.js` is the one vendored mdBook internal; see `THEME_HIGHLIGHT_JS`
+/// for why.) The dark variant is mapped onto the built-in
 /// `navy` theme slot (which already loads the dark highlight CSS) and the light
 /// variant onto `light`; the trailing rules restrict the theme picker to just
 /// those two and relabel them "Oxocarbon" / "Oxocarbon Light".
@@ -772,6 +773,16 @@ const THEME_VARIABLES_CSS: &str = include_str!("../assets/variables.css");
 /// Pro `@font-face` set with Geist / Geist Mono. Uses mdBook's `{{ resource }}`
 /// helper, so it is rendered as a template at book-build time.
 const THEME_FONTS_CSS: &str = include_str!("../assets/fonts.css");
+
+/// `theme/highlight.js`: mdBook's bundled highlight.js (10.1.1, BSD-3-Clause)
+/// with a haven (`hv`) language grammar appended. mdBook highlights client-side
+/// and has no append hook, only a wholesale `theme/highlight.js` override, so the
+/// core is necessarily vendored and version-pinned here. Without it, ```` ```hv ````
+/// fences render unhighlighted since stock highlight.js has no `hv` language. The
+/// grammar emits standard hljs scopes (`keyword`/`string`/`number`/`meta`/`type`
+/// /...), which the theme's highlight CSS already colors. To refresh the base:
+/// grab `highlight.js` from any `mdbook build` output and re-append the grammar.
+const THEME_HIGHLIGHT_JS: &str = include_str!("../assets/highlight.js");
 
 /// The Geist family (variable, weight axis 100-900) plus its SIL OFL license,
 /// embedded so a plain `havendoc` run ships self-contained fonts. `(filename,
@@ -787,10 +798,10 @@ const THEME_FONTS: &[(&str, &[u8])] = &[
 ];
 
 /// Write the theme override under `<out>/theme`: the Oxocarbon color variables
-/// (`css/variables.css`) plus the Geist fonts and their `@font-face`
-/// declarations (`fonts/`). mdBook falls back to its built-in `index.hbs`/
-/// `book.js`/`general.css` for everything else, so no mdBook internals are
-/// vendored or version-pinned.
+/// (`css/variables.css`), the haven syntax-highlighting grammar (`highlight.js`),
+/// plus the Geist fonts and their `@font-face` declarations (`fonts/`). mdBook
+/// falls back to its built-in `index.hbs`/`book.js`/`general.css` for everything
+/// else.
 fn write_theme(out: &Path) -> Result<(), ()> {
     let theme = out.join("theme");
 
@@ -800,6 +811,8 @@ fn write_theme(out: &Path) -> Result<(), ()> {
         return Err(());
     }
     write_file(&css_dir.join("variables.css"), THEME_VARIABLES_CSS.as_bytes())?;
+
+    write_file(&theme.join("highlight.js"), THEME_HIGHLIGHT_JS.as_bytes())?;
 
     let fonts_dir = theme.join("fonts");
     if let Err(e) = std::fs::create_dir_all(&fonts_dir) {
