@@ -1,0 +1,4 @@
+proc main() i32 {
+    println("Hello, Haven!");
+    return 0;
+}

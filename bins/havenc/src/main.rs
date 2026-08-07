@@ -220,8 +220,6 @@ fn main() {
             }
 
             let status = if args.shared {
-                println!("Compiling as a shared library...");
-
                 let shared_output_path = if cfg!(target_os = "windows") {
                     args.output.with_extension("dll")
                 } else if cfg!(target_os = "macos") {
@@ -239,8 +237,6 @@ fn main() {
                     .status()
                     .expect("Failed to execute compiler for shared library")
             } else if args.static_lib {
-                println!("Compiling as a static library...");
-
                 // clang won't archive for us, so compile the IR to a single
                 // object first, then bundle it with the runtime archive into one
                 // static library the host can link against.
@@ -296,8 +292,6 @@ fn main() {
 
                 archive_status
             } else {
-                println!("Compiling as an executable...");
-
                 let output = if cfg!(target_os = "windows") {
                     args.output.with_extension("exe")
                 } else {
