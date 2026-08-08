@@ -42,7 +42,14 @@ fn main() {
     // `defs` owns every top-level definition's identity: it produced the symbol
     // names now in `ast`, and it carries the member table both typecheck passes
     // use to resolve method calls.
-    let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), !args.no_prelude, &arena) {
+    // Compiled-library dependencies: each `--dep name=path.hvmeta` is read and
+    // validated up front, so a malformed or version-incompatible artifact fails
+    // as a clean diagnostic before compilation rather than mid-resolution. The
+    // parsed source travels into `load_and_merge`, which resolves an `import
+    // name/...` against it exactly the way it resolves `std/...`.
+    let deps = load_deps(&args.dep);
+
+    let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), !args.no_prelude, &deps, &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };
@@ -328,6 +335,51 @@ fn main() {
             }
         }
     }
+}
+
+/// Parse and load every `--dep name=path.hvmeta` into a `name -> artifact` map.
+///
+/// Each artifact is read and version-checked here so a bad dependency surfaces as
+/// one clear diagnostic before any compilation happens. The bound name must match
+/// the artifact's own package name: symbols are slugged under the name the import
+/// path uses, so binding `foo`'s artifact as `bar=` would resolve `import bar/...`
+/// to modules slugged `foo.*` and silently disagree with the library's own build.
+/// Exits the process on any malformed spec, unreadable/incompatible artifact, or
+/// duplicate name.
+fn load_deps(specs: &[String]) -> std::collections::HashMap<String, haven_meta::HavenMeta> {
+    let mut deps = std::collections::HashMap::new();
+    for spec in specs {
+        let (name, path) = match spec.split_once('=') {
+            Some((n, p)) if !n.is_empty() && !p.is_empty() => (n, p),
+            _ => {
+                diag::report_plain("Error", &format!(
+                    "invalid --dep '{}': expected NAME=PATH, e.g. --dep foo=foo.hvmeta", spec));
+                std::process::exit(1);
+            }
+        };
+        let meta = match haven_meta::read(std::path::Path::new(path)) {
+            Ok(m) => m,
+            Err(e) => {
+                diag::report_plain("Error", &format!(
+                    "cannot load dependency '{}' from '{}': {}", name, path, e));
+                std::process::exit(1);
+            }
+        };
+        if meta.header.package_name != name {
+            diag::report_plain("Error", &format!(
+                "dependency bound as '{}' is actually package '{}'; bind it as \
+                 `--dep {}={}` so `import {}/...` names it", name,
+                meta.header.package_name, meta.header.package_name, path,
+                meta.header.package_name));
+            std::process::exit(1);
+        }
+        if deps.insert(name.to_string(), meta).is_some() {
+            diag::report_plain("Error", &format!(
+                "dependency '{}' is specified more than once", name));
+            std::process::exit(1);
+        }
+    }
+    deps
 }
 
 /// Assemble and write a native library's `.hvmeta` artifact: a header plus every

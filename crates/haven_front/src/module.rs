@@ -81,6 +81,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path as FilePath, PathBuf};
 
 use bumpalo::Bump;
+use haven_meta::HavenMeta;
 
 use haven_common::ast::*;
 use crate::parse;
@@ -314,6 +315,55 @@ fn load_import<'a>(imp: &Import, key: &str, dir: Option<&FilePath>, arena: &'a B
             .map_err(|e| format!("cannot read module file '{}': {}", canon.display(), e))?;
         Ok((arena.alloc_str(&src), canon.parent().map(|d| d.to_path_buf())))
     }
+}
+
+/// The worklist/`seen`/`Files` key for a dependency module: the dep name followed
+/// by the module's package-root-relative key from the artifact — `foo` +
+/// `dsp/osc.hv` -> `foo/dsp/osc.hv`. Prefixing with the dep name keeps it from
+/// ever colliding with the leaf's absolute-path keys or a `std/...` key, and — fed
+/// to [`Defs::add_module`] with the dep name as package and root — makes
+/// `module_slug` re-derive the dep's own `foo.dsp.osc` slug, byte-identical to
+/// what the library emitted standalone.
+fn dep_key(pkg: &str, relkey: &str) -> String {
+    format!("{}/{}", pkg, relkey)
+}
+
+/// Resolve an import *within* a dependency's own module set (its `.hvmeta`
+/// source), mirroring the on-disk relative resolution in [`resolve_target`] but
+/// against the artifact instead of the filesystem. `segs` is the target module
+/// path relative to the dep root: `["geo"]`, `["dsp", "osc"]`, or empty for a
+/// bare `import <dep>` (which binds the dep's root module).
+///
+/// This is the same "load a package's source under a namespace" path std uses,
+/// with two differences the caller supplies: the source is the artifact's, and
+/// the namespace is the dep's package name rather than `std`.
+fn resolve_within_dep<'a>(meta: &HavenMeta, pkg: &str, segs: &[&str], arena: &'a Bump)
+    -> Result<ImportTarget<'a>, String>
+{
+    // bare `import foo` binds the dep's root module (its `is_root` one).
+    if segs.is_empty() {
+        let root = meta.modules.iter().find(|m| m.is_root).ok_or_else(||
+            format!("dependency '{}' has no root module to import", pkg))?;
+        return Ok(ImportTarget::Module(dep_key(pkg, &root.key)));
+    }
+    let rel = segs.join("/");
+    let file = format!("{}.hv", rel);
+    if meta.modules.iter().any(|m| m.key == file) {
+        return Ok(ImportTarget::Module(dep_key(pkg, &file)));
+    }
+    // not a module file — a directory of them? every member below `rel/` becomes
+    // an implicit namespace, exactly as a std/on-disk directory import does.
+    let prefix = format!("{}/", rel);
+    let members: Vec<DirMember<'a>> = meta.modules.iter().filter_map(|m| {
+        let sub = m.key.strip_prefix(&prefix)?;
+        let stem = sub.strip_suffix(".hv").unwrap_or(sub);
+        let segments = stem.split('/').map(|s| &*arena.alloc_str(s)).collect();
+        Some(DirMember { segments, key: dep_key(pkg, &m.key) })
+    }).collect();
+    if !members.is_empty() {
+        return Ok(ImportTarget::Dir(members));
+    }
+    Err(format!("package '{}' has no module '{}'", pkg, rel))
 }
 
 /// Desugar every `extend` block (and the synthesized ones from inherent struct/
@@ -1699,7 +1749,17 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
 /// stem, keeping a bare `havenc foo.hv` working. The package is rooted at the
 /// entry file's directory, so its submodules must live under that directory. The
 /// resolved package name is returned as the final tuple element.
-pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelude: bool, arena: &'a Bump)
+///
+/// `deps` maps a dependency name to the parsed `.hvmeta` artifact bound to it on
+/// the command line. An `import <name>/<mod>` (or a bare `import <name>`) whose
+/// leading segment is a key here resolves against that artifact's source, merged
+/// under package name `<name>` — the same "load a package's source under a
+/// namespace" path std travels, so the dep's items re-derive the exact
+/// package-anchored symbols they would emit standalone. Resolution tries
+/// `std/...` before the deps map, so a dependency can never shadow (or force a
+/// second copy of) the embedded stdlib.
+pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelude: bool,
+                          deps: &HashMap<String, HavenMeta>, arena: &'a Bump)
     -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>, String), ()>
 {
     // a module we've decided to load but haven't parsed yet.
@@ -1708,6 +1768,22 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         src: &'a str,
         dir: Option<PathBuf>,
         is_entry: bool,
+        /// `Some` when this module came from a dependency artifact rather than the
+        /// leaf's own source tree: carries the namespace it slugs under and its
+        /// position within the dep, for resolving the dep's *internal* imports.
+        dep: Option<DepCtx>,
+    }
+
+    // where a dependency module sits, so it slugs under the dep's package name and
+    // its own relative imports resolve against the dep's artifact, not the disk.
+    struct DepCtx {
+        /// the dependency's package name (also the namespace it was imported as).
+        package: String,
+        /// this module's directory within the dep, for joining onto its relative
+        /// imports: `""` for a root-level module, `"dsp"` for `dsp/osc.hv`.
+        reldir: String,
+        /// the dep's package-root module, which slugs to the bare package name.
+        is_root: bool,
     }
 
     let mut worklist: VecDeque<Pending<'a>> = VecDeque::new();
@@ -1719,7 +1795,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
     if inject_prelude {
         let src = std_source(PRELUDE_KEY)
             .expect("embedded std tree has no prelude.hv");
-        worklist.push_back(Pending { key: PRELUDE_KEY.into(), src, dir: None, is_entry: false });
+        worklist.push_back(Pending { key: PRELUDE_KEY.into(), src, dir: None, is_entry: false, dep: None });
     }
 
     // entry module. canonicalize *first* so its key matches how imports are
@@ -1758,6 +1834,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         src: entry_src,
         dir: entry_path.parent().map(|d| d.to_path_buf()),
         is_entry: true,
+        dep: None,
     });
 
     // every source a diagnostic might point into, indexed by the `FileId` its
@@ -1769,6 +1846,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
     let mut defs: Defs<'a> = Defs::new();
     let mut modules: Vec<Module<'a>> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
+    // dependencies whose whole module set has already been enqueued, so a program
+    // that imports both `foo/a` and `foo/b` pulls `foo` in exactly once.
+    let mut dep_enqueued: HashSet<String> = HashSet::new();
     let mut had_error = false;
 
     while let Some(p) = worklist.pop_front() {
@@ -1808,8 +1888,15 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         // the package root)` (see `defs::module_slug`), so it no longer shifts
         // when an unrelated import is added or removed - which the old
         // `m{id}_{basename}` prefix did, `id` being an enqueue index - nor when
-        // the package is compiled from a different location.
-        let mid = match defs.add_module(&package, p.key.clone(), file, p.is_entry, entry_dir.as_deref()) {
+        // the package is compiled from a different location. A dependency module
+        // slugs under the *dep's* package name and its own synthetic root (the dep
+        // name), so it re-derives the library's own `foo.geo` symbols rather than
+        // the leaf's; the leaf's own modules use the leaf package + entry dir.
+        let (slug_pkg, slug_root, is_root): (&str, Option<&FilePath>, bool) = match &p.dep {
+            None => (&package, entry_dir.as_deref(), p.is_entry),
+            Some(dc) => (&dc.package, Some(FilePath::new(&dc.package)), dc.is_root),
+        };
+        let mid = match defs.add_module(slug_pkg, p.key.clone(), file, is_root, slug_root) {
             Ok(mid) => mid,
             Err(msg) => {
                 diag::report("Module error", &msg, &Span::new(file, 0, 0), &files);
@@ -1819,9 +1906,70 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         };
 
         // resolve + enqueue each import. errors point at the import statement in
-        // this module.
+        // this module. Resolution order is deliberate: `std/...` first (so a dep
+        // can never shadow — or force a second copy of — the embedded stdlib, the
+        // "std must not double-load" trap), then a named external dependency
+        // (`import foo/...`), then, for a module that itself came from a dep, that
+        // dep's own relative imports, and finally the leaf's on-disk imports.
         let mut import_keys = Vec::with_capacity(imports.len());
         for imp in &imports {
+            let first = imp.path.first().copied();
+
+            // a named external dependency, `import foo/geo`. On first touch its
+            // whole module set is enqueued (v1 pulls the dep in wholesale — the
+            // artifact already carries all of it and the leaf recompiles every
+            // module regardless), then this specific import is resolved against it.
+            if let Some(name) = first.filter(|f| *f != "std" && deps.contains_key(*f)) {
+                let meta = &deps[name];
+                if dep_enqueued.insert(name.to_string()) {
+                    for dm in &meta.modules {
+                        let key = dep_key(name, &dm.key);
+                        if seen.contains_key(&key) { continue; }
+                        let reldir = dm.key.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+                        worklist.push_back(Pending {
+                            key,
+                            src: arena.alloc_str(&dm.source),
+                            dir: None,
+                            is_entry: false,
+                            dep: Some(DepCtx {
+                                package: name.to_string(), reldir, is_root: dm.is_root,
+                            }),
+                        });
+                    }
+                }
+                match resolve_within_dep(meta, name, &imp.path[1..], arena) {
+                    Ok(t) => import_keys.push(Some(t)),
+                    Err(msg) => {
+                        diag::report("Import error", &msg, &imp.span, &files);
+                        had_error = true;
+                        import_keys.push(None);
+                    }
+                }
+                continue;
+            }
+
+            // a module that came from a dep resolves its *own* relative imports
+            // (`import geo`, `import dsp/osc`) against that dep's artifact, not the
+            // disk. Its whole module set is already enqueued, so nothing new is
+            // pushed here — only the target is resolved for scope building.
+            if let Some(dc) = &p.dep {
+                if first != Some("std") {
+                    let mut segs: Vec<&str> =
+                        dc.reldir.split('/').filter(|s| !s.is_empty()).collect();
+                    segs.extend(imp.path.iter().copied());
+                    match resolve_within_dep(&deps[&dc.package], &dc.package, &segs, arena) {
+                        Ok(t) => import_keys.push(Some(t)),
+                        Err(msg) => {
+                            diag::report("Import error", &msg, &imp.span, &files);
+                            had_error = true;
+                            import_keys.push(None);
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // `std/...`, or the leaf's own on-disk relative import.
             let target = match resolve_target(imp, p.dir.as_deref(), arena) {
                 Ok(t) => t,
                 Err(msg) => {
@@ -1842,7 +1990,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
                 if seen.contains_key(key) { continue; }
                 match load_import(imp, key, p.dir.as_deref(), arena) {
                     Ok((src, dir)) => worklist.push_back(Pending {
-                        key: key.to_string(), src, dir, is_entry: false,
+                        key: key.to_string(), src, dir, is_entry: false, dep: None,
                     }),
                     Err(msg) => {
                         diag::report("Import error", &msg, &imp.span, &files);

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 haven_common.workspace = true
+haven_meta.workspace = true
 chumsky.workspace = true
 bumpalo.workspace = true
 include_dir.workspace = true

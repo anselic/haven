@@ -85,6 +85,15 @@ pub struct Args {
     #[arg(long, value_name = "NAME")]
     pub package_name: Option<String>,
 
+    /// Consume a compiled Haven library: `--dep <name>=<path.hvmeta>`. Repeatable.
+    /// An `import <name>/<module>` in this program then resolves against the named
+    /// artifact's source (produced by `havenc --lib`) instead of the filesystem,
+    /// merged under package name `<name>` so it re-derives the library's own
+    /// package-anchored symbols. v1: one explicit dep per flag, no version or
+    /// lockfile resolution and no transitive deps.
+    #[arg(long = "dep", value_name = "NAME=PATH")]
+    pub dep: Vec<String>,
+
     /// Diagnostic output format. `human` (default) is the pretty terminal
     /// renderer; `json` emits one NDJSON diagnostic per line on stderr for
     /// tooling (LSP, the `haven` build orchestrator) to parse.
