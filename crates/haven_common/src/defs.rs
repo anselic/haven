@@ -463,6 +463,10 @@ impl<'a> Defs<'a> {
         &self.defs[id.0 as usize]
     }
     pub fn module(&self, id: ModId) -> &ModInfo { &self.mods[id.0 as usize] }
+    /// Every loaded module, in load order. Lets a stage that needs the module set
+    /// itself — e.g. writing a lib's `.hvmeta` from each own module's key +
+    /// source — enumerate them without a private-field accessor per use.
+    pub fn modules(&self) -> &[ModInfo] { &self.mods }
     pub fn len(&self) -> usize { self.defs.len() }
     pub fn is_empty(&self) -> bool { self.defs.is_empty() }
 

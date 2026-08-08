@@ -42,7 +42,7 @@ fn main() {
     // `defs` owns every top-level definition's identity: it produced the symbol
     // names now in `ast`, and it carries the member table both typecheck passes
     // use to resolve method calls.
-    let (mut ast, files, mut defs, impls) = match module::load_and_merge(input, args.package_name.as_deref(), !args.no_prelude, &arena) {
+    let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), !args.no_prelude, &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };
@@ -67,8 +67,10 @@ fn main() {
         let mut cx = typecheck::Context::new();
         let typecheck_errs = typecheck::typecheck_program(&mut cx, &ast, &impls, &defs);
 
-        // check if there is no main function when compiling an executable
-        if !args.shared && !args.static_lib {
+        // check if there is no main function when compiling an executable. A
+        // library of any kind (native shared/static, or a `.hvmeta` source lib)
+        // has no `main`, so the requirement is lifted for all three.
+        if !args.shared && !args.static_lib && !args.lib {
             let main_fn = ast.iter().find_map(|item| {
                 if let ast::TopLevelNode::Function { name, .. } = item.value {
                     if name == "main" {
@@ -96,6 +98,16 @@ fn main() {
             typecheck_errs.iter()
                 .for_each(|e| diag::report_error("Typecheck error", e, &files));
             std::process::exit(1);
+        } else if args.lib {
+            // A native Haven library: emit a `.hvmeta` source-blob artifact and
+            // stop. The pre-mono typecheck above already ran as validation - it
+            // checks the generic *templates* a lib exposes, so a lib author's type
+            // error surfaces here rather than in a consumer's build. Everything
+            // past this point (mono, MIL, LLVM, and the post-mono ownership/alloc
+            // checks) operates on concrete instances a lib does not have; those
+            // are deferred to the leaf, where instantiation happens.
+            write_lib_metadata(input, &package_name, &defs, &files, &args.output);
+            return;
         } else {
             // expand generics into concrete instances, then re-typecheck the
             // now fully-concrete program so node_types is populated for the
@@ -315,5 +327,67 @@ fn main() {
                 std::fs::remove_file(llvm_ir_output_path).expect("Failed to remove LLVM IR file");
             }
         }
+    }
+}
+
+/// Assemble and write a native library's `.hvmeta` artifact: a header plus every
+/// one of the package's OWN source modules. `std`/prelude are excluded - they are
+/// embedded in every `havenc`, so a consumer re-resolves `import std/...` against
+/// its own copy. Module keys are made package-root-relative and forward-slashed,
+/// so the artifact carries no absolute path and fingerprints identically from any
+/// checkout location. Exits the process on any error.
+fn write_lib_metadata(
+    entry: &std::path::Path,
+    package_name: &str,
+    defs: &haven_common::defs::Defs<'_>,
+    files: &haven_common::diag::Files<'_>,
+    output: &std::path::Path,
+) {
+    // the package root is the entry file's directory; module keys are the
+    // canonical absolute paths `load_and_merge` recorded, so relativize against
+    // the same canonical root to strip the checkout location back off.
+    let root = std::fs::canonicalize(entry).ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+    let mut modules = Vec::new();
+    for m in defs.modules() {
+        if m.key.starts_with("std/") { continue; }
+        let rel = match root.as_deref()
+            .and_then(|r| std::path::Path::new(&m.key).strip_prefix(r).ok())
+        {
+            Some(rel) => rel.to_string_lossy().replace('\\', "/"),
+            None => {
+                diag::report_plain("Error", &format!(
+                    "library module '{}' is outside the package root; cannot record \
+                     a location-independent key for it", m.key));
+                std::process::exit(1);
+            }
+        };
+        let source = files.src(m.file).unwrap_or_default().to_string();
+        modules.push(haven_meta::MetaModule { key: rel, source, is_root: m.is_entry });
+    }
+
+    let havenc_version = env!("CARGO_PKG_VERSION").to_string();
+    let fingerprint = haven_meta::fingerprint(package_name, &havenc_version, &modules);
+    let meta = haven_meta::HavenMeta {
+        header: haven_meta::Header {
+            format_version: haven_meta::FORMAT_VERSION,
+            havenc_version,
+            package_name: package_name.to_string(),
+            fingerprint,
+        },
+        modules,
+    };
+
+    let out_path = output.with_extension("hvmeta");
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).expect("Failed to create output directory");
+        }
+    }
+    if let Err(e) = haven_meta::write(&out_path, &meta) {
+        diag::report_plain("Error", &format!(
+            "cannot write library metadata '{}': {}", out_path.display(), e));
+        std::process::exit(1);
     }
 }

@@ -5,6 +5,7 @@ members = [
     "crates/haven_front",
     "crates/haven_mid",
     "crates/haven_back",
+    "crates/haven_meta",
     "bins/haven",
     "bins/havenc",
     "bins/havendoc",
@@ -17,6 +18,7 @@ haven_common = { path = "crates/haven_common" }
 haven_front = { path = "crates/haven_front" }
 haven_mid = { path = "crates/haven_mid" }
 haven_back = { path = "crates/haven_back" }
+haven_meta = { path = "crates/haven_meta" }
 
 ariadne = "0.6.0"
 bumpalo = "3.20.3"
@@ -25,6 +27,8 @@ chumsky = { git = "https://codeberg.org/zesterer/chumsky", rev = "dd46ce3def", f
 clap = { version = "4.6.1", features = ["derive"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+sha2 = "0.10"
 tempfile = "3.27.0"
 cc = "1.2.65"
 libtest-mimic = "0.8"

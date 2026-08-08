@@ -15,12 +15,15 @@ haven_common.workspace = true
 haven_front.workspace = true
 haven_mid.workspace = true
 haven_back.workspace = true
+haven_meta.workspace = true
 bumpalo.workspace = true
 clap.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
 libtest-mimic.workspace = true
+haven_meta.workspace = true
+tempfile.workspace = true
 
 # Custom test harness (tests/harness.rs): discovers .hv fixtures under
 # tests/cases/ and reports one named case per file.

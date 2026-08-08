@@ -128,11 +128,7 @@ fn cmd_new(path: &Path, is_lib: bool) -> Result<(), String> {
         "[project]\n\
          name = \"{name}\"\n\
          version = \"0.1.0\"\n\
-         kind = [\"{kind}\"]\n\
-         # kind = [\"bin\"]              <- executable\n\
-         # kind = [\"lib\"]              <- library for other Haven projects\n\
-         # kind = [\"lib\", \"cdylib\"]    <- Haven-consumable library with --shared\n\
-         # kind = [\"lib\", \"staticlib\"] <- Haven-consumable library with --static\n",
+         kind = [\"{kind}\"]\n",
     );
     write_new_file(&path.join(config::MANIFEST), &manifest)?;
 
@@ -212,6 +208,7 @@ fn build_project(
     match output {
         Output::Shared => { cmd.arg("--shared"); }
         Output::Static => { cmd.arg("--static-lib"); }
+        Output::Lib => { cmd.arg("--lib"); }
         Output::Executable => {}
     }
 
@@ -258,6 +255,7 @@ fn artifact_path(base: &Path, output: Output) -> PathBuf {
                 base.to_path_buf()
             }
         }
+        Output::Lib => base.with_extension("hvmeta"),
     }
 }
 

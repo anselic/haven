@@ -72,6 +72,9 @@ pub enum Output {
     Executable,
     Shared,
     Static,
+    /// A native Haven library: a `.hvmeta` source-blob artifact for consumption
+    /// by other Haven packages, not a linkable native object.
+    Lib,
 }
 
 impl Output {
@@ -81,6 +84,7 @@ impl Output {
             Output::Executable => "executable",
             Output::Shared => "shared library",
             Output::Static => "static library",
+            Output::Lib => "library",
         }
     }
 }
@@ -159,8 +163,8 @@ impl Project {
     }
 
     /// The single artifact `haven build` produces for this project's `kind`.
-    /// `cdylib` builds shared, `staticlib` (or a bare `lib`) builds static, and
-    /// `bin` builds an executable.
+    /// `cdylib` builds shared, `staticlib` builds static, `bin` builds an
+    /// executable, and a bare `lib` emits a `.hvmeta` native-library artifact.
     pub fn output_kind(&self) -> Output {
         let kinds = self.kinds();
         if kinds.contains(&Kind::Cdylib) {
@@ -170,9 +174,10 @@ impl Project {
         } else if kinds.contains(&Kind::Bin) {
             Output::Executable
         } else {
-            // A bare `lib`: compile it to a static archive, which both verifies
-            // it (no `main` required) and yields a linkable artifact.
-            Output::Static
+            // A bare `lib`: emit a `.hvmeta` source-blob artifact for other Haven
+            // packages to consume. The build still validates the library (its
+            // pre-mono typecheck runs, and no `main` is required).
+            Output::Lib
         }
     }
 

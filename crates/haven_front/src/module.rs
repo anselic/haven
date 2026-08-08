@@ -1697,9 +1697,10 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
 /// `package` names the package being compiled, which anchors every emitted
 /// symbol (`<package>.<relpath>$<name>`); `None` defaults it to the entry file's
 /// stem, keeping a bare `havenc foo.hv` working. The package is rooted at the
-/// entry file's directory, so its submodules must live under that directory.
+/// entry file's directory, so its submodules must live under that directory. The
+/// resolved package name is returned as the final tuple element.
 pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelude: bool, arena: &'a Bump)
-    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>), ()>
+    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>, String), ()>
 {
     // a module we've decided to load but haven't parsed yet.
     struct Pending<'a> {
@@ -2300,5 +2301,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         return Err(());
     }
 
-    Ok((out, files, defs, impls))
+    // the resolved package name is returned so the driver names artifacts (a
+    // lib's `.hvmeta`) under exactly the name that shaped the symbols, with no
+    // second, drift-prone re-derivation of the entry-stem default.
+    Ok((out, files, defs, impls, package))
 }
