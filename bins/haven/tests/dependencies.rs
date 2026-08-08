@@ -79,9 +79,8 @@ fn builds_dependency_then_program() {
     let lib_at = stdout.find("Compiling example_lib").expect("library not built");
     let app_at = stdout.find("Compiling app").expect("program not built");
     assert!(lib_at < app_at, "the dependency must build first:\n{stdout}");
-    assert!(stdout.contains(".hvmeta"), "dependency should emit a .hvmeta:\n{stdout}");
-    assert!(dir.path().join("example_lib/.haven/target").is_dir(),
-        "dependency should build into its own target dir");
+    assert!(dir.path().join("example_lib/.haven/target/example-lib.hvmeta").is_file(),
+        "dependency should emit a .hvmeta into its own target dir");
 }
 
 #[test]

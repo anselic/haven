@@ -148,7 +148,7 @@ fn cmd_new(path: &Path, is_lib: bool) -> Result<(), String> {
     write_new_file(&path.join(".gitignore"), "/.haven\n")?;
 
     let what = if is_lib { "library" } else { "executable" };
-    println!("Created Haven {} `{}` at `{}`", what, name, path.display());
+    status("Created", format_args!("{} `{}` at `{}`", what, name, path.display()));
     Ok(())
 }
 
@@ -228,21 +228,20 @@ fn build_project(
         cmd.arg("--dep").arg(format!("{}={}", name, artifact.display()));
     }
 
-    let ver = project.version_display();
-    let ver = if ver.is_empty() { String::new() } else { format!(" v{ver}") };
-    println!("Compiling {}{} ({})", project.project.name, ver, output.label());
+    let label = describe(project);
+    status("Compiling", format_args!("{} ({})", label, output.label()));
 
-    let status = cmd
+    let exit = cmd
         .status()
         .map_err(|e| format!("failed to run `{}`: {}", havenc.display(), e))?;
-    if !status.success() {
+    if !exit.success() {
         return Err("compilation failed".to_string());
     }
 
     // Resolve the actual artifact path from the output kind, mirroring `havenc`'s
     // extension choices, so callers (chiefly `run`) know what to launch.
     let artifact = artifact_path(&out_base, output);
-    println!("Finished: {}", artifact.display());
+    status("Finished", &label);
     Ok(artifact)
 }
 
@@ -288,14 +287,14 @@ fn cmd_run(fmt: MessageFormat, args: &[String]) -> Result<(), String> {
     }
     let bin = build_project(&project, fmt, /*force_executable=*/ true)?;
 
-    println!("Running `{}`", bin.display());
-    let status = Command::new(&bin)
+    status("Running", project.bin_name());
+    let exit = Command::new(&bin)
         .args(args)
         .status()
         .map_err(|e| format!("failed to run `{}`: {}", bin.display(), e))?;
-    if !status.success() {
+    if !exit.success() {
         // Surface the program's own exit status rather than masking it.
-        return Err(match status.code() {
+        return Err(match exit.code() {
             Some(code) => format!("program exited with status {}", code),
             None => "program terminated by signal".to_string(),
         });
@@ -322,23 +321,59 @@ fn cmd_doc() -> Result<(), String> {
         .map_err(|e| format!("cannot create `{}`: {}", out.display(), e))?;
 
     let havendoc = tool_path("havendoc");
-    println!("Documenting {} -> {}", project.project.name, out.display());
-    let status = Command::new(&havendoc)
+    status("Documenting", describe(&project));
+    let exit = Command::new(&havendoc)
         .arg(&input)
         .arg("--out")
         .arg(&out)
         .status()
         .map_err(|e| format!("failed to run `{}`: {}", havendoc.display(), e))?;
-    if !status.success() {
+    if !exit.success() {
         return Err("documentation generation failed".to_string());
     }
-    println!("Finished: {}", out.display());
+    // The generated docs are what the user opens next, so name where they landed
+    // - but relative to the project root, not as a long absolute path.
+    status("Generated", relative_to(&project.root, &out).display());
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Width of the status verb column. Verbs are right-aligned within it, so the
+/// messages that follow all start in the same place and the verbs read as a
+/// column of their own:
+///
+/// ```text
+///    Compiling example v0.1.0 (executable)
+///     Finished example v0.1.0
+///      Running example
+/// ```
+const STATUS_WIDTH: usize = 12;
+
+/// Print one progress line: a right-aligned verb followed by its detail.
+fn status(verb: &str, detail: impl std::fmt::Display) {
+    println!("{:>width$} {}", verb, detail, width = STATUS_WIDTH);
+}
+
+/// How a project is named in progress lines: `name v1.2.3`, or just the name
+/// when the manifest omits a version.
+fn describe(project: &Project) -> String {
+    let ver = project.version_display();
+    if ver.is_empty() {
+        project.project.name.clone()
+    } else {
+        format!("{} v{}", project.project.name, ver)
+    }
+}
+
+/// `path` expressed relative to `base` when it lies inside it, so output paths
+/// print as `.haven\doc` rather than a full (possibly `\\?\`-prefixed) path.
+/// Falls back to `path` unchanged when it does not.
+fn relative_to(base: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(base).unwrap_or(path).to_path_buf()
+}
 
 fn cwd() -> Result<PathBuf, String> {
     std::env::current_dir().map_err(|e| format!("cannot determine current directory: {}", e))

@@ -9,7 +9,6 @@ members = [
     "bins/haven",
     "bins/havenc",
     "bins/havendoc",
-    "bins/haven",
 ]
 
 # Shared dependency versions, inherited by members via `{ workspace = true }`.

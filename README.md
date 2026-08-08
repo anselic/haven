@@ -1,6 +1,11 @@
 # haven
 
-`haven` is a statically typed programming language and compiler, built specifically for DSP and audio plugin development.
+haven is a statically typed programming language and compiler, built specifically for DSP and audio plugin development.
+
+This repository includes:
+- `haven`: build system and project manager for haven projects
+- `havenc`: the compiler for the haven programming language
+- `havendoc`: a documentation generator for haven projects, built for mdBook
 
 > [!NOTE]
 > This is very alpha and work in progress, codebase can be messy and bugs may arise, please report if you find one.
@@ -11,6 +16,21 @@
 - LLVM IR compiler
   - clang
   - opt + llc (untested)
+
+## Installation
+
+Install the binaries using the provided `install.py` script:
+```shell
+$ python install.py [--debug] [--path <install_path>]
+# To remove the installed binaries with the script, you can also run:
+$ python install.py --remove [--path <install_path>]
+```
+Or alternatively, if you don't want to use the script, you can use `cargo` directly:
+```shell
+$ cargo install --path bins/haven
+$ cargo install --path bins/havenc
+$ cargo install --path bins/havendoc
+```
 
 ## Usage
 ```shell
@@ -29,15 +49,17 @@ $ havenc -h
 ## Directory Structure
 ```
 bins/
+├── haven/          # build system and project manager
 ├── havenc/         # compiler
-└── havendoc/       # mdBook documentation generator
+└── havendoc/       # documentation generator
 crates/
 ├── haven_back/     # backend-related code (LLVM IR, ABI)
 ├── haven_common/   # common code & types (AST, Diagnostics, memory layout, etc.)
 ├── haven_front/    # frontend-related code (lexer, parser, modules)
+├── haven_meta/     # .hvmeta metadata artifacts (for libraries compilation)
 └── haven_mid/      # middle-end code (type checking, semantic analysis, etc.)
-crt/
-└── rt.c            # linked C runtime for the compiler
+crt/                # linked C runtime for the compiler
+└── ...
 extensions/
 └── vscode/         # VSCode extension for syntax highlighting
 std/                # haven standard library
