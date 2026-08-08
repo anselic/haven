@@ -178,6 +178,18 @@ fn build_project(
 ) -> Result<PathBuf, String> {
     project.validate()?;
 
+    // Direct dependencies are built first, each in its own `.haven/target/`, and
+    // their `.hvmeta` artifacts passed down as `--dep name=path`. Recursion
+    // terminates at depth one: `dependencies()` rejects a dependency that has
+    // dependencies of its own, so a dependency's own build finds none.
+    let deps = project.dependencies()?;
+    let mut dep_args: Vec<(String, PathBuf)> = Vec::with_capacity(deps.len());
+    for dep in &deps {
+        let artifact = build_project(&dep.project, fmt, /*force_executable=*/ false)
+            .map_err(|e| format!("dependency `{}`: {}", dep.name, e))?;
+        dep_args.push((dep.name.clone(), artifact));
+    }
+
     let entry = project.entry_path();
     if !entry.is_file() {
         return Err(format!("entry file `{}` does not exist", entry.display()));
@@ -210,6 +222,10 @@ fn build_project(
         Output::Static => { cmd.arg("--static-lib"); }
         Output::Lib => { cmd.arg("--lib"); }
         Output::Executable => {}
+    }
+
+    for (name, artifact) in &dep_args {
+        cmd.arg("--dep").arg(format!("{}={}", name, artifact.display()));
     }
 
     let ver = project.version_display();

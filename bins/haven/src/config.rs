@@ -3,8 +3,10 @@
 //! A project is any directory tree with a `haven.toml` at its root. The manifest
 //! is deliberately small: a `[project]` table with a name, an optional `entry`,
 //! and a `kind` list declaring what the project builds to (`bin`, `lib`,
-//! `cdylib`, `staticlib`).
+//! `cdylib`, `staticlib`), plus an optional `[dependencies]` table naming the
+//! Haven libraries this project consumes.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -18,11 +20,50 @@ pub struct Project {
     /// Absolute path to the directory containing `haven.toml`.
     pub root: PathBuf,
     pub project: ProjectTable,
+    /// `[dependencies]`, keyed by the name the code imports the library as.
+    /// Ordered so a build's dependency order - and therefore its `havenc`
+    /// command line - is deterministic.
+    pub dependencies: BTreeMap<String, DepSpec>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Manifest {
     pub project: ProjectTable,
+    #[serde(default)]
+    pub dependencies: BTreeMap<String, DepSpec>,
+}
+
+/// One entry of `[dependencies]`.
+///
+/// Only the path form is understood in v1:
+///
+/// ```toml
+/// [dependencies]
+/// example_lib = { path = "../example_lib" }
+/// ```
+///
+/// An inline *table* rather than a bare string deliberately: it is the shape that
+/// can grow a `version`/registry field later without breaking manifests written
+/// today. Anything else is captured by [`DepSpec::Other`] so the error can quote
+/// what was actually written instead of a serde type mismatch.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum DepSpec {
+    /// `{ path = "../example_lib" }` - a library on disk, relative to this
+    /// manifest's directory.
+    Path { path: String },
+    /// Any other spelling; rejected by [`Project::dependencies`] with a message
+    /// naming the supported form.
+    Other(toml::Value),
+}
+
+/// A dependency after its manifest has been located, loaded and validated.
+pub struct ResolvedDep {
+    /// The name this dependency is imported as - the `[dependencies]` key, which
+    /// is required to equal the library's own `[project].name`.
+    pub name: String,
+    /// The dependency's own project, rooted at its directory.
+    pub project: Project,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,7 +159,82 @@ impl Project {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        Ok(Project { root, project: manifest.project })
+        Ok(Project {
+            root,
+            project: manifest.project,
+            dependencies: manifest.dependencies,
+        })
+    }
+
+    /// Locate, load and validate every direct dependency, in manifest order.
+    ///
+    /// Each entry must name a Haven library (`kind = ["lib"]`, the kind that
+    /// emits a `.hvmeta`) whose own `[project].name` equals the key it is bound
+    /// to. That last rule is not bureaucracy: the bound name is what anchors the
+    /// library's emitted symbols, so binding `example_lib` under some other key
+    /// would compile its items under a namespace that disagrees with the
+    /// library's own build. `havenc` enforces the same rule; catching it here
+    /// just makes the message point at the manifest.
+    ///
+    /// v1 resolves **direct dependencies only**. A dependency that declares
+    /// dependencies of its own is rejected rather than walked: the artifact
+    /// records no dependency list, so the graph is knowable only from manifests,
+    /// and resolving it properly needs the version/diamond arbitration no
+    /// resolver exists for yet. The check doubles as cycle protection - a
+    /// dependency cycle necessarily has a dependency with dependencies.
+    pub fn dependencies(&self) -> Result<Vec<ResolvedDep>, String> {
+        let mut out = Vec::new();
+        for (name, spec) in &self.dependencies {
+            let rel = match spec {
+                DepSpec::Path { path } => path,
+                DepSpec::Other(v) => {
+                    return Err(format!(
+                        "dependency `{}` is `{}`, which is not a supported form. \
+                         Use a path dependency, e.g. `{} = {{ path = \"../{}\" }}`; \
+                         version and registry dependencies do not exist yet",
+                        name, v, name, name));
+                }
+            };
+
+            let dir = self.root.join(rel);
+            let manifest = dir.join(MANIFEST);
+            if !manifest.is_file() {
+                return Err(format!(
+                    "dependency `{}` has no `{}` at `{}` (path = \"{}\")",
+                    name, MANIFEST, dir.display(), rel));
+            }
+            // canonicalize so the dependency's own artifact paths and build
+            // output do not carry the `..` from the manifest's relative spelling.
+            let manifest = std::fs::canonicalize(&manifest).unwrap_or(manifest);
+            let dep = Self::load(&manifest)?;
+            dep.validate().map_err(|e| format!("dependency `{}`: {}", name, e))?;
+
+            if dep.project.name != *name {
+                return Err(format!(
+                    "dependency `{}` resolves to a package named `{}`. The key must \
+                     be the library's own name, since that is what its symbols are \
+                     anchored to - rename the key to `{}`",
+                    name, dep.project.name, dep.project.name));
+            }
+            if !matches!(dep.output_kind(), Output::Lib) {
+                return Err(format!(
+                    "dependency `{}` is not a Haven library: its `kind` is {:?}, \
+                     which builds {} rather than a `.hvmeta`. Only `kind = [\"lib\"]` \
+                     packages can be depended on",
+                    name, dep.kinds(), dep.output_kind().label()));
+            }
+            if !dep.dependencies.is_empty() {
+                let mut names: Vec<&str> = dep.dependencies.keys().map(String::as_str).collect();
+                names.sort_unstable();
+                return Err(format!(
+                    "dependency `{}` has dependencies of its own ({}), and transitive \
+                     dependencies are not supported yet. Depend on {} directly from \
+                     this manifest as well",
+                    name, names.join(", "), names.join(" and ")));
+            }
+            out.push(ResolvedDep { name: name.clone(), project: dep });
+        }
+        Ok(out)
     }
 
     /// The declared `kind` list, defaulting to `["bin"]` when the manifest omits
