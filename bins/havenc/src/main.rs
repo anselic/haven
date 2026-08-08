@@ -126,10 +126,6 @@ fn main() {
             // what lets the second typecheck pass below match a match-arm pattern
             // (which names the template) against a scrutinee whose type names the
             // instance.
-            // the `Delete` lang item, captured before mono drops every trait
-            // node: the post-mono pass below has no trait declarations left to
-            // find it in.
-            let delete_trait = cx.delete_trait;
             let mut mono_ast = mono::monomorphize(&ast, &mut defs, &arena, &cx.node_types, &cx.inferred_type_args, &impls).unwrap_or_else(|e| {
                 diag::report_error("Monomorphization error", &e, &files);
                 std::process::exit(1);
@@ -154,7 +150,9 @@ fn main() {
             // program, where every type's `Copy`-ness is decidable, and before
             // the alloc check, so a `@alloc(false)` function is judged on the
             // destructors it actually ends up calling.
-            own::ownership_check(&mut mono_ast, &mut cx, delete_trait, &impls)
+            // the lang item comes from `defs`, which outlives mono - so unlike
+            // the trait *declarations* mono drops, it needs no capturing here.
+            own::ownership_check(&mut mono_ast, &mut cx, defs.lang().delete, &impls)
                 .unwrap_or_else(|errs| {
                     for err in &errs {
                         diag::report_error("Ownership error", err, &files);

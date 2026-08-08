@@ -1079,8 +1079,11 @@ pub fn ownership_check<'a>(
     delete_trait: Option<DefId>,
     impls: &[ImplDecl<'a>],
 ) -> Result<(), Vec<Error>> {
-    // no `Delete` trait (or nobody implements it) means nothing in this program
-    // owns anything, and every value is `Copy` exactly as it was before.
+    // no `Delete` trait means the program has no prelude at all (`--no-prelude`),
+    // so nothing in it owns anything and every value is `Copy` exactly as it was
+    // before. This is a real answer, not a failed lookup: a prelude that does not
+    // declare `Delete` is rejected at load, precisely so that skipping the whole
+    // pass here can never be the silent consequence of not finding the lang item.
     let Some(delete_trait) = delete_trait else { return Ok(()) };
 
     // which definitions own something. `extend Vec<T>: Delete` records the

@@ -98,8 +98,8 @@ static STD_DIR: include_dir::Dir<'static> =
 /// The implicit prelude's canonical key. It is a plain `std/...` module: this is
 /// exactly the key `resolve_target` produces for an explicit `import
 /// std/prelude`, so the two share one entry in `seen` and therefore one set of
-/// definitions. Shared with the mid end, which identifies lang items by it.
-use haven_common::defs::PRELUDE_KEY;
+/// definitions - and therefore one prelude, whichever way it was reached.
+use haven_common::defs::{LangItems, PRELUDE_KEY};
 
 /// Source of an embedded stdlib module, by its `std/...` import path. The key is
 /// `imp.path.join("/")` (always forward slashes), so `std/<rel>` maps to the
@@ -2024,10 +2024,43 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
     let symtabs: Vec<SymTab> = modules.iter()
         .map(|m| build_symtab(m, &mut defs, arena, &mut errs))
         .collect();
-    // looked up rather than assumed to be 0: with `inject_prelude` off, a program
-    // may still `import std/prelude` by hand, and that must stay an ordinary
-    // qualified/selective import instead of silently going implicit everywhere.
-    let prelude_id = if inject_prelude { seen.get(PRELUDE_KEY).copied() } else { None };
+    // looked up rather than assumed to be 0: the prelude is enqueued first, but
+    // an explicit `import std/prelude` shares its entry, so its position depends
+    // on nothing but `seen`.
+    let prelude_mod = seen.get(PRELUDE_KEY).copied();
+    // whether the prelude goes into *scope* implicitly is a separate question:
+    // with `inject_prelude` off, a program may still `import std/prelude` by
+    // hand, and that must stay an ordinary import rather than silently going
+    // implicit everywhere. Its lang items still apply - the compiler knows what
+    // `Delete` means however the trait was brought into scope.
+    let prelude_id = if inject_prelude { prelude_mod } else { None };
+
+    // lang items: the definitions the compiler itself knows about, resolved here
+    // from the prelude's own symbol table. This is the only place that knows
+    // which module *is* the prelude by identity; everything downstream reads
+    // `defs.lang()` and so cannot be fooled by a module that merely keys or
+    // spells itself like the prelude.
+    //
+    // A prelude that declares no `Delete` is an error rather than a silent skip.
+    // The ownership pass treats a missing `Delete` as "nothing in this program
+    // owns anything" - correct under `--no-prelude`, but if it could also mean
+    // "the lookup failed" then a mismatched stdlib would compile to a program
+    // with no destructors at all, which is a miscompile and not a build failure.
+    if let Some(pid) = prelude_mod {
+        let delete = symtabs[pid].structs.get("Delete")
+            .map(|s| s.def)
+            .filter(|d| defs.get(*d).kind == DefKind::Trait);
+        let Some(delete) = delete else {
+            diag::report_plain("Error", &format!(
+                "the prelude ('{}') declares no `Delete` trait. The compiler needs \
+                 it to know which types own memory and whose destructors to insert; \
+                 without it every value would silently be treated as `Copy`. This \
+                 stdlib is incomplete or does not match this compiler",
+                PRELUDE_KEY));
+            return Err(());
+        };
+        defs.set_lang_items(modules[pid].mid, LangItems { delete: Some(delete) });
+    }
 
     // re-exports: fold every `pub import`'s symbols into the importing module's
     // own export set, so a third module importing it sees them.

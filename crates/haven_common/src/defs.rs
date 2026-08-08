@@ -56,11 +56,29 @@ use crate::ast::{FileId, GenericParam, Receiver, Span, Type};
 
 /// The implicit prelude's canonical module key.
 ///
-/// Shared rather than spelled twice because it is also how a *lang item* is
-/// identified: a trait the compiler itself knows about (`Delete`) is the one
-/// declared under this key, so a user's own `trait Delete` in their own module
-/// is an ordinary trait and does not silently acquire destructor semantics.
+/// Used by the module loader to find, load and inject the prelude. It is *not*
+/// how a lang item is identified: that would make a compiler-known definition
+/// depend on how its module happened to be keyed. See [`LangItems`].
 pub const PRELUDE_KEY: &str = "std/prelude";
+
+/// The definitions the compiler itself knows about.
+///
+/// Resolved once, by the module loader, out of the prelude's own symbol table -
+/// the one place that knows which module *is* the prelude, by identity rather
+/// than by re-recognizing a module key string downstream. That keying is what
+/// makes a user's own `trait Delete` in their own module an ordinary trait
+/// rather than something that quietly acquires destructor semantics, and it
+/// survives the prelude arriving by some other route than the embedded tree.
+///
+/// A field is `None` only when there is no prelude at all (`--no-prelude`): a
+/// prelude that is present but does not declare a lang item is a load error, so
+/// no later stage has to tell "absent" apart from "not found".
+#[derive(Default)]
+pub struct LangItems {
+    /// `trait Delete` - marks a type as owning something, and names the
+    /// destructor the ownership pass inserts calls to.
+    pub delete: Option<DefId>,
+}
 
 /// Identity of one top-level definition.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -341,6 +359,10 @@ pub struct Defs<'a> {
     /// alloc check works on MIL callee names) recover the definition and so its
     /// friendly spelling.
     by_symbol: HashMap<&'a str, DefId>,
+    /// The prelude module, if this program has one.
+    prelude: Option<ModId>,
+    /// Compiler-known definitions, resolved from `prelude` at load time.
+    lang: LangItems,
 }
 
 impl<'a> Defs<'a> {
@@ -457,6 +479,21 @@ impl<'a> Defs<'a> {
         if let Some(i) = self.instances.get(&id) { return i.display.clone(); }
         self.display(id)
     }
+
+    /// Record the prelude and the lang items resolved from it. Called once, by
+    /// the module loader; taking both together is what keeps the invariant that
+    /// a lang item can only be missing when the prelude itself is.
+    pub fn set_lang_items(&mut self, prelude: ModId, items: LangItems) {
+        self.prelude = Some(prelude);
+        self.lang = items;
+    }
+
+    /// The prelude module, or `None` under `--no-prelude`.
+    pub fn prelude(&self) -> Option<ModId> { self.prelude }
+
+    /// The compiler-known definitions. Every field is `None` exactly when
+    /// [`Self::prelude`] is.
+    pub fn lang(&self) -> &LangItems { &self.lang }
 
     pub fn get(&self, id: DefId) -> &Def<'a> {
         assert!(id.is_resolved(), "an unresolved DefId survived name resolution");

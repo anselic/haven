@@ -1,0 +1,35 @@
+// A program's own `trait Delete` is an ordinary trait.
+//
+// The compiler knows exactly one trait by that spelling - the prelude's - and it
+// knows it by *identity*: the module loader resolves the lang item out of the
+// prelude's own symbol table and records it in `Defs`, so no later stage has to
+// re-recognize the prelude from a module key string. A trait a program declares
+// for itself therefore stays a plain trait whatever it is named.
+//
+// So `Token` keeps every non-owner property: it stays `Copy` (the call below
+// does not move it, and it is still readable afterwards), nothing synthesizes a
+// destructor call for it, and its `delete` is an ordinary method that may be
+// called by hand - which for a real owner is an error, see
+// `fail/test_delete_explicit.hv`. One `explicit` in the output, not two.
+
+trait Delete {
+    proc delete(*self);
+}
+
+struct Token {
+    id: i32,
+}
+
+extend Token: Delete {
+    proc delete(*self) {
+        println("explicit");
+    }
+}
+
+@export
+proc main() i32 {
+    let t: Token = Token { id: 7 };
+    t.delete();
+    println(t.id);
+    return 0;
+}

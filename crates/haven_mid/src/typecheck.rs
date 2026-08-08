@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
-use haven_common::defs::{DefId, Defs, TyHead, PRELUDE_KEY};
+use haven_common::defs::{DefId, Defs, TyHead};
 use haven_common::layout::{self, TypeInfo, TypeTable, EnumRepr};
 
 mod context;
@@ -410,6 +410,11 @@ pub fn typecheck_program<'a>(
     cx.payloads = defs.payloads().clone();
     // how each definition reads in a diagnostic.
     cx.load_names(defs);
+    // the definitions the compiler itself knows about, resolved once by the
+    // module loader from the prelude. Read rather than rediscovered by scanning
+    // trait declarations, so the post-mono pass - which has no trait nodes left,
+    // mono having dropped them - is as well informed as the first pass.
+    cx.delete_trait = defs.lang().delete;
 
     // --- forward declaration pass
 
@@ -618,16 +623,6 @@ pub fn typecheck_program<'a>(
     // substituted per-impl / per-bound later.
     for node in program {
         if let TopLevelNode::Trait { def, name, assoc_types, methods, .. } = &node.value {
-            // the one trait the compiler itself knows about. Matched on the
-            // *source* spelling and the declaring module, so a user's own
-            // `trait Delete` stays an ordinary trait rather than quietly
-            // acquiring destructor semantics. Not on `name`: by this point the
-            // resolver has rewritten that to the emitted symbol
-            // (`std.prelude$Delete`).
-            let d = defs.get(*def);
-            if d.source_name == "Delete" && defs.module(d.module).key == PRELUDE_KEY {
-                cx.delete_trait = Some(*def);
-            }
             let mut ms: HashMap<&'a str, TraitMethodSig<'a>> = HashMap::new();
             let mut dup = false;
             for m in methods {
