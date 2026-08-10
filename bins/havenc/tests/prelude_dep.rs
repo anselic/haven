@@ -134,55 +134,91 @@ fn nominating_a_prelude_displaces_the_embedded_one() {
     assert!(err.contains("println"), "diagnostic should name the unknown call; got: {err}");
 }
 
-/// A prelude package used as an *ordinary* dependency is a conflict, and a loud
-/// one. Its `@lang(delete)` would be a second answer to what owning a resource
-/// means, and the ownership pass can honour only one — so the other package's
-/// owners would quietly compile as `Copy`. Two stdlibs do not go in one program.
+/// A dependency that advertises a prelude (its source carries `@!prelude`) is
+/// *discovered* as the program's prelude with no `--prelude` flag — the mark is
+/// the single source of truth. `mini`'s `yell`/`double` come into scope
+/// unimported, and the embedded std is displaced (one prelude, never two merged).
 #[test]
-fn unnominated_prelude_package_conflicts_over_lang_items() {
+fn a_dependency_prelude_is_discovered_without_a_flag() {
     let dir = tempfile::tempdir().unwrap();
     scaffold(dir.path(), &mini_lib());
     assert!(build_mini(dir.path()).status.success());
 
     std::fs::write(dir.path().join("main.hv"),
-        "import mini { double }\n\
-         proc main() i32 { return double(1); }\n").unwrap();
+        "proc main() i32 { yell(\"hi\"); return double(21); }\n").unwrap();
 
-    // note: no `--prelude`, so this program's prelude is the embedded std's.
     let app = dir.path().join("app");
     let res = build_app(dir.path(), "main.hv", &["--dep", "mini=mini.hvmeta"], &app);
-    assert!(!res.status.success(), "two claimants for `@lang(delete)` must fail");
-    let err = stderr_of(&res);
-    assert!(err.contains("may only be declared by 'std'"),
-        "diagnostic should name the package that does supply the prelude; got: {err}");
+    assert!(res.status.success(), "mini should be discovered as the prelude: {}", stderr_of(&res));
+    let run = Command::new(exe(&app)).output().unwrap();
+    assert_eq!(stdout_of(&run), "(shouting)\nhi\n");
+    assert_eq!(run.status.code(), Some(42), "double(21) should be the exit code");
 }
 
-/// The asymmetric half: a stray `@!prelude` in a dependency is *inert*. Supplying
-/// a prelude is a legitimate thing for a package to do, and that same package is
-/// an ordinary library to whoever merely depends on it — its mark must not follow
-/// it in and displace the consumer's own prelude. (Contrast the test above: a
-/// lang item cannot be ignored this way without miscompiling.)
+/// The leaf cannot also declare `@!prelude` while its prelude comes from a
+/// dependency. A dependency's mark is discovered (above); the *leaf's* own mark on
+/// top of that is a contradiction — a program has one prelude — so it errors,
+/// naming the supplier and how to make this package the prelude instead. This is
+/// the `@lang`-like uniqueness you get once marking is the source of truth.
 #[test]
-fn stray_prelude_mark_in_a_dependency_is_inert() {
+fn leaf_cannot_declare_a_prelude_when_a_dependency_supplies_one() {
     let dir = tempfile::tempdir().unwrap();
-    scaffold(dir.path(), &[
-        ("hopeful/lib.hv",
-         "@!prelude\n\
-          pub proc triple(x: i32) i32 { return x * 3; }\n"),
-    ]);
-    assert!(build_lib(dir.path(), "hopeful/lib.hv", "hopeful", &[],
-                      &dir.path().join("hopeful")).status.success());
+    scaffold(dir.path(), &mini_lib());
+    assert!(build_mini(dir.path()).status.success());
 
-    // `triple` still has to be imported, and std's `println` still works.
     std::fs::write(dir.path().join("main.hv"),
-        "import hopeful { triple }\n\
-         proc main() i32 { println(triple(4)); return 0; }\n").unwrap();
+        "@!prelude\n\
+         proc main() i32 { return double(0); }\n").unwrap();
 
     let app = dir.path().join("app");
-    let res = build_app(dir.path(), "main.hv", &["--dep", "hopeful=hopeful.hvmeta"], &app);
-    assert!(res.status.success(), "an unnominated `@!prelude` must be ignored: {}", stderr_of(&res));
+    let res = build_app(dir.path(), "main.hv", &["--dep", "mini=mini.hvmeta"], &app);
+    assert!(!res.status.success(), "leaf + dependency prelude is one too many");
+    let err = stderr_of(&res);
+    assert!(err.contains("has no effect") && err.contains("mini"),
+        "should name the supplier and that the leaf's mark does nothing; got: {err}");
+}
+
+/// Two dependencies that each supply a prelude is the ambiguity `@!prelude` now
+/// rejects. Rather than silently pick, it asks for `--prelude`; nominating one
+/// resolves it and makes the other's mark inert (so that package stays usable for
+/// its other modules — the "usable as a plain dependency" escape).
+#[test]
+fn two_prelude_dependencies_conflict_until_one_is_nominated() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &mini_lib());
+    assert!(build_mini(dir.path()).status.success());
+    // a second, independent prelude-bearing package.
+    scaffold(dir.path(), &[
+        ("mini2/lib.hv",
+         "@!prelude\n\
+          extern rt_puts(s: str) void;\n\
+          @lang(delete)\n\
+          pub trait Delete {\n\
+          \x20   proc delete(*self);\n\
+          }\n\
+          pub proc hush(s: str) void { rt_puts(s); }\n"),
+    ]);
+    assert!(build_lib(dir.path(), "mini2/lib.hv", "mini2", &["--prelude", "mini2"],
+                      &dir.path().join("mini2")).status.success());
+
+    std::fs::write(dir.path().join("main.hv"),
+        "proc main() i32 { return double(21); }\n").unwrap();
+
+    // both provide a prelude, no `--prelude`: ambiguous, and it says so.
+    let app = dir.path().join("app");
+    let res = build_app(dir.path(), "main.hv",
+        &["--dep", "mini=mini.hvmeta", "--dep", "mini2=mini2.hvmeta"], &app);
+    assert!(!res.status.success(), "two prelude providers must not silently pick one");
+    let err = stderr_of(&res);
+    assert!(err.contains("more than one dependency supplies a prelude") && err.contains("--prelude"),
+        "got: {err}");
+
+    // nominate mini: mini2's mark goes inert, mini is the prelude, `double` in scope.
+    let res2 = build_app(dir.path(), "main.hv",
+        &["--dep", "mini=mini.hvmeta", "--dep", "mini2=mini2.hvmeta", "--prelude", "mini"], &app);
+    assert!(res2.status.success(), "nominating one must resolve the ambiguity: {}", stderr_of(&res2));
     let run = Command::new(exe(&app)).output().unwrap();
-    assert_eq!(stdout_of(&run), "12\n");
+    assert_eq!(run.status.code(), Some(42), "double(21) should be the exit code");
 }
 
 /// Nominating a package that is not bound as a dependency is caught up front,
@@ -222,28 +258,21 @@ fn nominated_package_must_claim_to_be_a_prelude() {
 
 /// Supplying the prelude and supplying the lang items are one job. A package
 /// that takes over the first and leaves `Delete` to nobody would compile a
-/// program in which every owning type is silently `Copy` — so it is rejected.
-///
-/// This path existed before `--prelude` and could not be reached from the CLI:
-/// the stdlib was embedded, and it does declare `Delete`.
+/// program in which every owning type is silently `Copy` — so it is rejected, at
+/// the point the package claims the prelude role (building it as its own prelude).
 #[test]
-fn nominated_package_must_supply_the_lang_items() {
+fn a_prelude_package_must_supply_the_lang_items() {
     let dir = tempfile::tempdir().unwrap();
     scaffold(dir.path(), &[
         ("half/lib.hv",
          "@!prelude\n\
           pub proc thing() i32 { return 1; }\n"),
     ]);
-    assert!(build_lib(dir.path(), "half/lib.hv", "half", &[],
-                      &dir.path().join("half")).status.success());
-    std::fs::write(dir.path().join("main.hv"), "proc main() i32 { return thing(); }\n").unwrap();
-
-    let app = dir.path().join("app");
-    let res = build_app(dir.path(), "main.hv",
-        &["--dep", "half=half.hvmeta", "--prelude", "half"], &app);
+    // half nominates itself the prelude but declares no `@lang(delete)`.
+    let res = build_lib(dir.path(), "half/lib.hv", "half", &["--prelude", "half"],
+                        &dir.path().join("half"));
     assert!(!res.status.success(), "a prelude with no `Delete` must be rejected");
-    let err = stderr_of(&res);
-    assert!(err.contains("declares no `@lang(delete)`"), "got: {err}");
+    assert!(stderr_of(&res).contains("declares no `@lang(delete)`"), "got: {}", stderr_of(&res));
 }
 
 /// `--no-prelude` and `--prelude` ask for contradictory things; clap rejects the
@@ -256,4 +285,109 @@ fn no_prelude_and_prelude_are_exclusive() {
     let res = build_app(dir.path(), "main.hv", &["--no-prelude", "--prelude", "mini"], &app);
     assert!(!res.status.success());
     assert!(stderr_of(&res).contains("cannot be used with"), "got: {}", stderr_of(&res));
+}
+
+/// A self-preluding stdlib stub built under the package name `std`, so it can be
+/// bound as `--dep std=...` — the "std is an ordinary dependency" case. `text.hv`
+/// is shipped only because the root reaches it, and the embedded stdlib has *no*
+/// `text` module: an `import std/text` that resolves is proof the dependency, not
+/// the embedded tree, served it.
+fn std_stub() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("stdsrc/lib.hv",
+         "@!prelude\n\
+          import text { shout }\n\
+          extern rt_puts(s: str) void;\n\
+          @lang(delete)\n\
+          pub trait Delete {\n\
+          \x20   proc delete(*self);\n\
+          }\n\
+          pub proc say(s: str) void { rt_puts(s); rt_puts(\"\\n\"); }\n\
+          pub proc double(x: i32) i32 { return x * 2; }\n"),
+        ("stdsrc/text.hv",
+         "pub proc shout(s: str) str { say(\"(shouting)\"); return s; }\n"),
+    ]
+}
+
+/// Build the stub into a `std.hvmeta` artifact, nominating itself as its own
+/// prelude (the only way a stdlib compiles). Its package name is `std`, which is
+/// what lets `--dep std=std.hvmeta` bind it without a name mismatch.
+fn build_std_stub(dir: &Path) -> std::process::Output {
+    build_lib(dir, "stdsrc/lib.hv", "std", &["--prelude", "std"], &dir.join("std"))
+}
+
+/// Binding `--dep std=...` makes that package *be* std: `import std/text` reaches
+/// the dependency, not the embedded tree (which has no `text` module and would
+/// error). Both the imported `shout` and the implicit-prelude `say`/`double` come
+/// from the dep. This is the gap that used to leave a std-bound package reachable
+/// only as the prelude.
+#[test]
+fn std_can_be_supplied_by_a_dependency() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &std_stub());
+    assert!(build_std_stub(dir.path()).status.success(),
+        "the std stub must build: {}", stderr_of(&build_std_stub(dir.path())));
+
+    std::fs::write(dir.path().join("main.hv"),
+        "import std/text { shout }\n\
+         proc main() i32 {\n\
+         \x20   say(shout(\"world\"));\n\
+         \x20   return double(21);\n\
+         }\n").unwrap();
+
+    let app = dir.path().join("app");
+    let res = build_app(dir.path(), "main.hv",
+        &["--dep", "std=std.hvmeta", "--prelude", "std"], &app);
+    assert!(res.status.success(), "std-from-dep build failed: {}", stderr_of(&res));
+
+    let run = Command::new(exe(&app)).output().unwrap();
+    // `shout` prints "(shouting)" and returns its arg; `say` then prints it.
+    assert_eq!(stdout_of(&run), "(shouting)\nworld\n");
+    assert_eq!(run.status.code(), Some(42), "double(21) should be the exit code");
+}
+
+/// With std bound as a dep, the *default* prelude (`PreludeSource::Auto`) is
+/// discovered there: no `--prelude` is passed, yet `say`/`double` are in implicit
+/// scope, which only holds if the std dep's `@!prelude` module became the prelude. The
+/// embedded stdlib must not be seeded alongside it — that pairing (embedded
+/// `std/prelude` + the dep's module under the same `std.` slug) is the silent
+/// double-load the fnv1a suffix hides. `--emit-ir` + a single-definition check is
+/// the only way to see it: a double-load *links fine*, under two distinct slugs.
+#[test]
+fn binding_std_moves_the_default_prelude_and_does_not_double_load() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &std_stub());
+    assert!(build_std_stub(dir.path()).status.success());
+
+    std::fs::write(dir.path().join("main.hv"),
+        "import std/text { shout }\n\
+         proc main() i32 {\n\
+         \x20   say(shout(\"hi\"));\n\
+         \x20   return double(0);\n\
+         }\n").unwrap();
+
+    // note: no `--prelude`. The default would be the embedded std's prelude;
+    // binding std redirects it to the dep.
+    let app = dir.path().join("app");
+    let res = Command::new(HAVENC)
+        .current_dir(dir.path())
+        .args(["main.hv", "--package-name", "app", "--dep", "std=std.hvmeta",
+               "--emit-ir", "-o"])
+        .arg(&app)
+        .output()
+        .expect("failed to spawn havenc");
+    assert!(res.status.success(),
+        "default prelude should follow std to the dep: {}", stderr_of(&res));
+
+    // exactly one definition of the imported std proc: a second (fnv1a-suffixed)
+    // copy would mean the embedded tree was loaded alongside the dep.
+    let ll = std::fs::read_to_string(app.with_extension("ll")).unwrap();
+    let defs = ll.lines()
+        .filter(|l| l.trim_start().starts_with("define") && l.contains("$shout"))
+        .count();
+    assert_eq!(defs, 1, "std/text::shout defined {defs} times (std double-loaded?)");
+
+    let run = Command::new(exe(&app)).output().unwrap();
+    assert_eq!(stdout_of(&run), "(shouting)\nhi\n");
+    assert_eq!(run.status.code(), Some(0));
 }

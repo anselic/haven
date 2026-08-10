@@ -1,0 +1,19 @@
+// The leaf cannot declare `@!prelude` while its prelude comes from elsewhere.
+//
+// `@!prelude` is the single source of truth for which module is the prelude, so
+// it is unique like `@lang`: a program has one prelude or none. Here nothing was
+// nominated and no dependency supplies one, so the prelude is the embedded
+// stdlib - and this leaf mark, which would make the module its own prelude, is a
+// contradiction rather than something to silently ignore. (Contrast a
+// *dependency's* mark, which is discovered as the prelude, or made inert by an
+// explicit `--prelude`; only the leaf's own redundant mark is the mistake named
+// here.) To make this package the prelude, nominate it with `--prelude`.
+//@ error: so this `@!prelude` has no effect
+
+@!prelude
+
+@export
+proc main() i32 {
+    println("unreachable");
+    return 0;
+}

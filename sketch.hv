@@ -1,0 +1,24 @@
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+extend Point {
+    proc new(x: i32, y: i32) Point {
+        return Point { x, y };
+    }
+}
+
+extend Point: Display {
+    proc display(*self) String {
+        return String::from_str(f"Point({self.x}, {self.y})".as_str());
+    }
+}
+
+proc main() i32 {
+    let x: Point = Point::new(1, 2);
+
+    println(f"x = {x}".as_str());
+
+    return 0;
+}

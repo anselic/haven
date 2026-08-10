@@ -26,12 +26,14 @@
 //!   unqualified as `sinf`.
 //!
 //! the prelude is an implicit import into every user module, with its `pub`
-//! symbols visible unqualified (it has no qualifier spelling). it is an
-//! *ordinary* std module, loaded from the embedded tree under the key
-//! `std/prelude` like any other - so writing `import std/prelude` explicitly (or
-//! pulling it in as part of a `import std` directory import) resolves to the
-//! same already-loaded module, rather than a second copy of every prelude type
-//! under its own identities.
+//! symbols visible unqualified (it has no qualifier spelling). which module *is*
+//! the prelude is found by the `@!prelude` mark it carries, not by its key or
+//! name (see [`PreludeSource`]): a bound dependency that advertises one supplies
+//! it, else the embedded stdlib's `std/prelude` serves by default. Either way it
+//! is an *ordinary* module - loaded under its own key like any other - so writing
+//! `import std/prelude` explicitly (when the embedded tree is the prelude)
+//! resolves to the same already-loaded module rather than a second copy of every
+//! prelude type under its own identities.
 //!
 //! ## visibility
 //!
@@ -126,6 +128,10 @@ struct Module<'a> {
     /// predicate for `@!prelude` and `@lang`, which only that package may make
     /// good on - see [`PreludeSource`].
     prelude_pkg: bool,
+    /// where this module's source came from. Kept so the post-load `@!prelude`
+    /// scan can tell a *leaf* mark (a mistake to name) from a *dependency's* one
+    /// (inert - a library is just a library to its consumer).
+    origin: Origin,
     /// the `@!name` marks written at this module's file scope. Statements about
     /// the file rather than about any of its declarations, so they are kept
     /// here rather than on an item.
@@ -1894,10 +1900,17 @@ pub enum PreludeSource<'p> {
     /// that may claim a lang item, since a program that imports `std/prelude` by
     /// hand still means the `Delete` it finds there.
     None,
-    /// The embedded stdlib's [`PRELUDE_KEY`] module. The default.
-    Std,
-    /// A dependency's, named by `--prelude <name>`; the name must also be bound
-    /// by a `--dep`.
+    /// No `--prelude` flag: *discover* it. The prelude is whichever loaded module
+    /// carries the `@!prelude` mark - a bound dependency that advertises one wins
+    /// (so `--dep std=stdpkg.hvmeta` needs no second flag), two providers is an
+    /// error, and none falls back to the embedded stdlib's [`PRELUDE_KEY`]. The
+    /// default. Resolved to a concrete choice at the top of [`load_and_merge`].
+    Auto,
+    /// A dependency's, named by `--prelude <name>` (the override); the name must
+    /// also be bound by a `--dep`, or be the package being compiled (a stdlib's
+    /// own build, whose `@!prelude` isn't visible until its modules are loaded).
+    /// A nomination makes every *other* `@!prelude` inert, so a prelude-bearing
+    /// package can still be consumed as a plain library.
     Package(&'p str),
 }
 
@@ -1906,6 +1919,31 @@ impl<'p> PreludeSource<'p> {
     fn provider(&self) -> &'p str {
         match self { PreludeSource::Package(n) => n, _ => "std" }
     }
+}
+
+/// Whether a dependency's artifact advertises a prelude: does any of its modules
+/// carry the `@!prelude` mark? Read by discovery to decide, with no nomination
+/// flag, which bound package (if any) supplies the prelude.
+///
+/// Parses each module's *attributes* only, and via the real lexer - a `@!prelude`
+/// written in a doc comment (as the embedded prelude's own documentation contains)
+/// is not a mark and must not count. Bails at the first hit: this is a cheap
+/// yes/no over source that is re-parsed in full later if the package turns out to
+/// be the prelude. A module that fails to lex/parse here is skipped, not reported;
+/// if it really is broken, loading it for real will say so with proper spans.
+fn meta_provides_prelude(meta: &HavenMeta) -> bool {
+    let scratch = Bump::new();
+    for m in &meta.modules {
+        let src: &str = scratch.alloc_str(&m.source);
+        let (tokens, lex_errs) = parse::lex(FileId::UNKNOWN, src);
+        let Some(tokens) = tokens.filter(|_| lex_errs.is_empty()) else { continue };
+        let tokens = &*scratch.alloc_slice_fill_iter(tokens);
+        let (parsed, parse_errs) = parse::parse(FileId::UNKNOWN, src.len(), tokens);
+        if let Some((mod_attrs, _, _)) = parsed.filter(|_| parse_errs.is_empty()) {
+            if mod_attrs.iter().any(|a| a.value.name == PRELUDE_ATTR) { return true; }
+        }
+    }
+    false
 }
 
 /// Load `entry` and everything it transitively imports, then merge the lot into
@@ -1925,9 +1963,11 @@ impl<'p> PreludeSource<'p> {
 /// leading segment is a key here resolves against that artifact's source, merged
 /// under package name `<name>` — the same "load a package's source under a
 /// namespace" path std travels, so the dep's items re-derive the exact
-/// package-anchored symbols they would emit standalone. Resolution tries
-/// `std/...` before the deps map, so a dependency can never shadow (or force a
-/// second copy of) the embedded stdlib.
+/// package-anchored symbols they would emit standalone. `std` is an ordinary key
+/// in this map: binding `--dep std=<pkg>.hvmeta` makes that package *be* std for
+/// the build, so `import std/...` resolves to it and the embedded tree is not
+/// consulted at all. Absent such a binding, `std/...` falls through to the
+/// embedded tree, which no dependency can then shadow or double-load.
 ///
 /// [`PreludeSource::Package`] names one of those deps as the prelude's supplier.
 /// It is loaded up front rather than on first import, since a program is not
@@ -1973,15 +2013,49 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         entry_path.file_stem().map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "pkg".to_string()));
 
+    // Discovery: with no `--prelude`, the prelude is found by the `@!prelude`
+    // mark, not named on the command line. A bound dependency that advertises one
+    // supplies it - so `--dep std=stdpkg.hvmeta` needs no second flag, and the
+    // embedded stdlib is not seeded alongside it (which would double-load the
+    // prelude under one `std.` slug). Exactly one provider may win; two is the
+    // same ambiguity `@lang` rejects, but resolvable, so it asks for `--prelude`
+    // rather than guessing. No provider falls back to the embedded stdlib. An
+    // explicit `--prelude`/`--no-prelude` skips all of this - that is the override
+    // half, and it also lets a prelude-bearing package be consumed as a plain
+    // library. The package being *compiled* still nominates itself the flagged way
+    // (`--prelude <self>`): its own mark is not visible here, before its modules
+    // are loaded.
+    let prelude = match prelude {
+        PreludeSource::Auto => {
+            let mut providers: Vec<&str> = deps.iter()
+                .filter_map(|(k, m)| meta_provides_prelude(m).then(|| k.as_str()))
+                .collect();
+            providers.sort_unstable();
+            match providers.as_slice() {
+                [] => PreludeSource::Auto,            // fall back to the embedded stdlib
+                [one] => PreludeSource::Package(one), // discovered, no flag needed
+                many => {
+                    diag::report_plain("Error", &format!(
+                        "more than one dependency supplies a prelude ({}). A program \
+                         has one prelude; nominate which with `--prelude <name>`, or \
+                         drop all but one", many.join(", ")));
+                    return Err(());
+                }
+            }
+        }
+        other => other,
+    };
+
     // the prelude's package goes on the worklist ahead of the entry, so it reads
     // first in dumped output and its modules are in hand before anything that
     // might want them. (Order is cosmetic - a slug is derived from the module's
     // path, never from its position here.)
     match prelude {
         PreludeSource::None => {}
-        // seeding under its real `std/...` key is what makes a later explicit
-        // `import std/prelude` hit `seen` and reuse this module.
-        PreludeSource::Std => {
+        // discovery found no dependency prelude: fall back to the embedded
+        // stdlib. Seeding under its real `std/...` key is what makes a later
+        // explicit `import std/prelude` hit `seen` and reuse this module.
+        PreludeSource::Auto => {
             let src = std_source(PRELUDE_KEY)
                 .expect("embedded std tree has no prelude.hv");
             worklist.push_back(Pending {
@@ -2096,7 +2170,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             (Some(dc), PreludeSource::Package(n)) => dc.package == n,
             // the package being compiled is its own prelude: a stdlib's build.
             (None, PreludeSource::Package(n)) => origin == Origin::Own && package == n,
-            (None, PreludeSource::Std | PreludeSource::None) => origin == Origin::Std,
+            (None, PreludeSource::Auto | PreludeSource::None) => origin == Origin::Std,
             (Some(_), _) => false,
         };
         let mid = match defs.add_module(slug_pkg, p.key.clone(), file, is_root, slug_root, origin) {
@@ -2109,11 +2183,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         };
 
         // resolve + enqueue each import. errors point at the import statement in
-        // this module. Resolution order is deliberate: `std/...` first (so a dep
-        // can never shadow — or force a second copy of — the embedded stdlib, the
-        // "std must not double-load" trap), then a named external dependency
-        // (`import foo/...`), then, for a module that itself came from a dep, that
-        // dep's own relative imports, and finally the leaf's on-disk imports.
+        // this module. Resolution order is deliberate: a named external dependency
+        // first (`import foo/...`, and `import std/...` too once `std` is *bound*
+        // as one - see below), then, for a module that itself came from a dep,
+        // that dep's own relative imports, and finally `std/...`-goes-embedded plus
+        // the leaf's on-disk imports.
         let mut import_keys = Vec::with_capacity(imports.len());
         for imp in &imports {
             let first = imp.path.first().copied();
@@ -2122,8 +2196,18 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // whole module set is enqueued, then this specific import is resolved
             // against it. (A dep supplying the prelude was already enqueued before
             // the loop, so `enqueue_dep` is a no-op for it here.)
-            if let Some(name) = first.filter(|f| *f != "std" && *f != SELF_SEG
-                                                 && deps.contains_key(*f)) {
+            //
+            // `std` is a dependency name like any other *when it is bound as one*
+            // (`--dep std=<pkg>.hvmeta`): binding it replaces the embedded stdlib
+            // wholesale, so every `import std/...` routes here instead of to the
+            // embedded tree, and the embedded tree is never loaded for this build
+            // (discovery up top makes that std the prelude too, rather than seeding
+            // the embedded one alongside it - that pairing was the double-load
+            // trap). Unbound, `deps.contains_key("std")` is false and this branch
+            // is skipped, leaving `resolve_target` to serve `std/...` from the
+            // embedded tree exactly as before. `self` is never a dep: it is the
+            // reserved package-root anchor.
+            if let Some(name) = first.filter(|f| *f != SELF_SEG && deps.contains_key(*f)) {
                 let meta = &deps[name];
                 enqueue_dep(name, meta, arena, &mut worklist, &seen, &mut dep_enqueued);
                 match resolve_within_dep(meta, name, &imp.path[1..], arena) {
@@ -2142,6 +2226,10 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // disk. Its whole module set is already enqueued, so nothing new is
             // pushed here — only the target is resolved for scope building.
             if let Some(dc) = &p.dep {
+                // an *unbound* `std` still means the embedded tree, even for a
+                // dep's own `import std/...` — so let it fall through to
+                // `resolve_target` below. A bound `std` never reaches here: the
+                // dependency branch above already claimed it.
                 if first != Some("std") {
                     // `self/...` is already package-root relative, so it skips
                     // this module's own directory prefix - the one difference
@@ -2209,6 +2297,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             file,
             mid,
             prelude_pkg,
+            origin,
             mod_attrs,
             imports,
             import_keys,
@@ -2243,20 +2332,30 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
     let mut prelude_errs: Vec<Error> = Vec::new();
     for (i, m) in modules.iter().enumerate() {
         let Some(attr) = m.mod_attrs.iter().find(|a| a.value.name == PRELUDE_ATTR) else { continue };
-        // only the package serving as the prelude may be the prelude. Unlike
-        // `@lang`, a mark elsewhere is *inert* rather than an error: providing a
-        // prelude is a legitimate thing for a package to do, and that same
-        // package is an ordinary library to any program that merely depends on
-        // it - its mark must not follow it in and displace that program's own
-        // prelude.
-        if !m.prelude_pkg { continue; }
-        if let Some(prev) = prelude_mod {
+        if m.prelude_pkg {
+            // the package serving as the prelude: exactly one of its modules may
+            // claim the role.
+            if let Some(prev) = prelude_mod {
+                prelude_errs.push(Error::new(attr.span.clone(), format!(
+                    "a second `@!{}`: '{}' already claims it, and a program has one \
+                     prelude or none", PRELUDE_ATTR, files.path(modules[prev].file))));
+            } else {
+                prelude_mod = Some(i);
+            }
+        } else if m.origin == Origin::Own && prelude != PreludeSource::None {
+            // the *leaf* marked `@!prelude`, but its prelude comes from elsewhere
+            // (a dependency that supplies one, or the embedded stdlib by default).
+            // A dependency's stray mark is inert - a library is just a library to
+            // its consumer - but the leaf's own mark is a mistake worth naming: it
+            // does nothing, and a program has one prelude. To make *this* package
+            // the prelude, nominate it (`--prelude`), which is also how a stdlib is
+            // built.
             prelude_errs.push(Error::new(attr.span.clone(), format!(
-                "a second `@!{}`: '{}' already claims it, and a program has one \
-                 prelude or none", PRELUDE_ATTR, files.path(modules[prev].file))));
-            continue;
+                "'{}' already supplies this program's prelude, so this `@!{}` has no \
+                 effect. Remove it, or build this package as the prelude with \
+                 `--prelude {}`", prelude.provider(), PRELUDE_ATTR, package)));
         }
-        prelude_mod = Some(i);
+        // a dependency's mark that isn't the chosen prelude stays inert.
     }
     // the prelude's package was enqueued, parsed, and then claimed nothing.
     // Loud, because the quiet version is a program compiled with no prelude in

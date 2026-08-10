@@ -55,7 +55,9 @@ fn main() {
     let prelude = match (&args.prelude, args.no_prelude) {
         (_, true) => module::PreludeSource::None,
         (Some(name), _) => module::PreludeSource::Package(name),
-        (None, false) => module::PreludeSource::Std,
+        // no flag: discover the prelude from `@!prelude` marks (a bound dependency
+        // that advertises one, else the embedded stdlib).
+        (None, false) => module::PreludeSource::Auto,
     };
 
     let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), prelude, &deps, &arena) {
