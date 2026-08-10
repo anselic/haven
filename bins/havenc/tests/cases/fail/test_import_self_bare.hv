@@ -1,0 +1,12 @@
+// `self` names the package root, which is a directory, not a module. A bare
+// `import self` therefore names nothing - and it cannot mean "the root module"
+// either, since on disk the root is whichever file the build was entered at.
+// Rejected with the shape it wants rather than resolved to something arbitrary.
+//@ error: `import self` names no module
+
+import self
+
+@export
+proc main() i32 {
+    return 0;
+}

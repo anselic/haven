@@ -5,7 +5,11 @@
 /// not bandlimited, so they alias at high frequencies. Frequencies and sample
 /// rate are in hertz; all sample outputs are single precision.
 
-import std/math { sinf, fabsf, fmodf, tau_f32 }
+// `self/` anchors at the package root, so this is *this* package's `math.hv` (a
+// sibling of `lib.hv`, one level up) rather than the embedded stdlib's. A plain
+// `import math` would look for `dsp/math.hv`: an ordinary import only reaches
+// downward, from the importing module's own directory.
+import self/math { sinf, fabsf, fmodf, tau_f32 }
 
 // --- Phasor ---------------------------------------------------------------
 

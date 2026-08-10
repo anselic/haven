@@ -1,6 +1,6 @@
 /// std/fmt: `Display`, a trait for rendering a value as an owned `String`.
 ///
-/// `import std/fmt { Display }` and every type here gains a `.display()` that
+/// `import fmt { Display }` and every type here gains a `.display()` that
 /// returns a fresh `String` you own (and that is dropped for you). Implement it
 /// for your own types to make them printable the same way:
 ///
@@ -18,8 +18,8 @@
 /// name. It is implemented here for the primitive integer types, `bool`, `str`,
 /// `String`, and `Vec<T>` (whenever `T: Display`).
 
-import std/string { String }
-import std/vec { Vec }
+import string { String }
+import vec { Vec }
 
 extern rt_f32_to_str(f: f32, precision: i32) str;
 extern rt_f64_to_str(d: f64, precision: i32) str;

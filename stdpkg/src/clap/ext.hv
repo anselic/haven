@@ -9,8 +9,8 @@
 // `char name[CLAP_NAME_SIZE]` fields are `[u8; 256]`; `char module[CLAP_PATH_SIZE]`
 // is `[u8; 1024]`. CLAP_NAME_SIZE = 256, CLAP_PATH_SIZE = 1024.
 
-import std/clap/plugin { ClapPlugin }
-import std/clap/events { ClapInputEvents, ClapOutputEvents }
+import plugin { ClapPlugin }
+import events { ClapInputEvents, ClapOutputEvents }
 
 pub const CLAP_NAME_SIZE: u64 = 256u64;
 pub const CLAP_PATH_SIZE: u64 = 1024u64;

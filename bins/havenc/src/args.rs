@@ -78,6 +78,16 @@ pub struct Args {
     #[arg(long)]
     pub no_prelude: bool,
 
+    /// Take the prelude from a package other than the embedded stdlib:
+    /// `--prelude <name>`, where `<name>` is bound by a `--dep` (or is the
+    /// package being compiled, which is how a stdlib is built). That package
+    /// supplies both the implicitly imported items and the lang items
+    /// (`@lang(delete)`), and is loaded whether or not the program imports it.
+    /// Which of its modules is the prelude is the package's own business, said
+    /// with `@!prelude` in its source.
+    #[arg(long, value_name = "NAME", conflicts_with = "no_prelude")]
+    pub prelude: Option<String>,
+
     /// The package name that anchors emitted symbol names
     /// (`<package>.<module>$<item>`). Defaults to the entry file's stem, so a
     /// bare `havenc foo.hv` names its package `foo`. The `haven` build tool

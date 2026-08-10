@@ -50,7 +50,15 @@ fn main() {
     // name/...` against it exactly the way it resolves `std/...`.
     let deps = load_deps(&args.dep);
 
-    let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), !args.no_prelude, &deps, &arena) {
+    // where the prelude comes from. `--no-prelude` and `--prelude <name>` are
+    // mutually exclusive at the CLI, so the three cases are disjoint.
+    let prelude = match (&args.prelude, args.no_prelude) {
+        (_, true) => module::PreludeSource::None,
+        (Some(name), _) => module::PreludeSource::Package(name),
+        (None, false) => module::PreludeSource::Std,
+    };
+
+    let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), prelude, &deps, &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };

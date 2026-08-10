@@ -4,7 +4,8 @@
 /// amplitude vs decibels, and MIDI note numbers vs frequency in hertz. All
 /// single precision.
 
-import std/math { powf, log10f, log2f }
+// `self/` anchors at the package root - see `dsp/osc.hv`.
+import self/math { powf, log10f, log2f }
 
 // TODO: the compiler should be able to infer these are `@alloc(false)`.
 

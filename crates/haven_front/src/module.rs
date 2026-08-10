@@ -122,6 +122,10 @@ struct Module<'a> {
     file: FileId,
     /// this module's entry in `Defs`, which owns its symbol slug.
     mid: ModId,
+    /// whether this module belongs to the package supplying the prelude. The
+    /// predicate for `@!prelude` and `@lang`, which only that package may make
+    /// good on - see [`PreludeSource`].
+    prelude_pkg: bool,
     /// the `@!name` marks written at this module's file scope. Statements about
     /// the file rather than about any of its declarations, so they are kept
     /// here rather than on an item.
@@ -267,10 +271,26 @@ fn dir_members<'a>(root: &FilePath, arena: &'a Bump) -> Result<Vec<DirMember<'a>
     Ok(out)
 }
 
+/// The leading path segment that anchors an import at its own package's root
+/// rather than at the importing module's directory.
+///
+/// Reserved, so it always means this and never a package or module of that name.
+/// An ordinary import reaches only *downward* - the segments are pushed onto the
+/// importing module's own directory - which leaves a nested module unable to name
+/// anything above it. `std/...` has always been that anchor for the embedded
+/// tree; this is the same thing for every other package.
+pub const SELF_SEG: &str = "self";
+
+/// The message for a bare `import self`, which names no module. Shared, because
+/// on-disk and dependency-internal resolution both have to reject it.
+const BARE_SELF: &str = "`import self` names no module: `self` is the package \
+                         root, so it needs a module under it - `import self/math`";
+
 /// Resolve an import to the module - or directory of modules - it names. No file
 /// read for `std`; for the relative case canonicalizes (so the path has to
-/// exist). `dir` is the importing module's directory.
-fn resolve_target<'a>(imp: &Import, dir: Option<&FilePath>, arena: &'a Bump)
+/// exist). `dir` is the importing module's directory, `root` its package's.
+fn resolve_target<'a>(imp: &Import, dir: Option<&FilePath>, root: Option<&FilePath>,
+                      arena: &'a Bump)
     -> Result<ImportTarget<'a>, String>
 {
     if imp.path.first() == Some(&"std") {
@@ -288,10 +308,15 @@ fn resolve_target<'a>(imp: &Import, dir: Option<&FilePath>, arena: &'a Bump)
         }
         Err(format!("unknown std module '{}'", key))
     } else {
-        let dir = dir.ok_or_else(||
+        // `self/...` measures from the package root, everything else from this
+        // module's own directory.
+        let anchored = imp.path.first() == Some(&SELF_SEG);
+        let segs = if anchored { &imp.path[1..] } else { &imp.path[..] };
+        if anchored && segs.is_empty() { return Err(BARE_SELF.to_string()); }
+        let dir = (if anchored { root } else { dir }).ok_or_else(||
             "cannot resolve a relative import from this module (std/prelude modules may only import `std/...`)".to_string())?;
         let mut base = dir.to_path_buf();
-        for seg in &imp.path { base.push(seg); }
+        for seg in segs { base.push(seg); }
         let mut file = base.clone();
         file.set_extension("hv");
         if let Ok(canon) = std::fs::canonicalize(&file) {
@@ -1801,11 +1826,93 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
     st
 }
 
+/// A module we've decided to load but haven't parsed yet.
+struct Pending<'a> {
+    key: String,
+    src: &'a str,
+    dir: Option<PathBuf>,
+    is_entry: bool,
+    /// `Some` when this module came from a dependency artifact rather than the
+    /// leaf's own source tree: carries the namespace it slugs under and its
+    /// position within the dep, for resolving the dep's *internal* imports.
+    dep: Option<DepCtx>,
+}
+
+/// Where a dependency module sits, so it slugs under the dep's package name and
+/// its own relative imports resolve against the dep's artifact, not the disk.
+struct DepCtx {
+    /// the dependency's package name (also the namespace it was imported as).
+    package: String,
+    /// this module's directory within the dep, for joining onto its relative
+    /// imports: `""` for a root-level module, `"dsp"` for `dsp/osc.hv`.
+    reldir: String,
+    /// the dep's package-root module, which slugs to the bare package name.
+    is_root: bool,
+}
+
+/// Enqueue a dependency's whole module set, once. v1 pulls a dep in wholesale on
+/// first touch: the artifact already carries all of it and the leaf recompiles
+/// every module regardless.
+///
+/// Called from two places, which is the reason it is a function: lazily, when an
+/// `import <name>/...` first names the dep, and eagerly for the package supplying
+/// the prelude - which nothing has to import, and which would therefore never be
+/// loaded at all.
+fn enqueue_dep<'a>(name: &str, meta: &HavenMeta, arena: &'a Bump,
+                   worklist: &mut VecDeque<Pending<'a>>,
+                   seen: &HashMap<String, usize>,
+                   dep_enqueued: &mut HashSet<String>)
+{
+    if !dep_enqueued.insert(name.to_string()) { return; }
+    for dm in &meta.modules {
+        let key = dep_key(name, &dm.key);
+        if seen.contains_key(&key) { continue; }
+        let reldir = dm.key.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+        worklist.push_back(Pending {
+            key,
+            src: arena.alloc_str(&dm.source),
+            dir: None,
+            is_entry: false,
+            dep: Some(DepCtx {
+                package: name.to_string(), reldir, is_root: dm.is_root,
+            }),
+        });
+    }
+}
+
+/// Where a program's prelude comes from - the module whose `pub` items every
+/// other module sees without an import, and the only package permitted to claim
+/// lang items.
+///
+/// Naming the *package* rather than a module is deliberate: which of its modules
+/// is the prelude is the package's own business, stated by the `@!prelude` mark
+/// in its source. A caller that had to name the module would be back to knowing
+/// another package's file layout.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PreludeSource<'p> {
+    /// No prelude (`--no-prelude`). The embedded stdlib is still the only thing
+    /// that may claim a lang item, since a program that imports `std/prelude` by
+    /// hand still means the `Delete` it finds there.
+    None,
+    /// The embedded stdlib's [`PRELUDE_KEY`] module. The default.
+    Std,
+    /// A dependency's, named by `--prelude <name>`; the name must also be bound
+    /// by a `--dep`.
+    Package(&'p str),
+}
+
+impl<'p> PreludeSource<'p> {
+    /// How to refer to the providing package in a diagnostic.
+    fn provider(&self) -> &'p str {
+        match self { PreludeSource::Package(n) => n, _ => "std" }
+    }
+}
+
 /// Load `entry` and everything it transitively imports, then merge the lot into
-/// one flat program. `inject_prelude` makes `std/prelude`'s `pub` items visible
-/// unqualified in every other module; the module itself is loaded like any other
-/// std module either way, so an explicit `import std/prelude` is not a second
-/// copy of it.
+/// one flat program. `prelude` says where the implicit prelude comes from: its
+/// `pub` items become visible unqualified in every other module. The prelude
+/// module is loaded like any other module of its package either way, so an
+/// explicit `import std/prelude` is not a second copy of it.
 ///
 /// `package` names the package being compiled, which anchors every emitted
 /// symbol (`<package>.<relpath>$<name>`); `None` defaults it to the entry file's
@@ -1821,45 +1928,19 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
 /// package-anchored symbols they would emit standalone. Resolution tries
 /// `std/...` before the deps map, so a dependency can never shadow (or force a
 /// second copy of) the embedded stdlib.
-pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelude: bool,
+///
+/// [`PreludeSource::Package`] names one of those deps as the prelude's supplier.
+/// It is loaded up front rather than on first import, since a program is not
+/// obliged to import the package its prelude comes from.
+pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: PreludeSource<'_>,
                           deps: &HashMap<String, HavenMeta>, arena: &'a Bump)
     -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>, String), ()>
 {
-    // a module we've decided to load but haven't parsed yet.
-    struct Pending<'a> {
-        key: String,
-        src: &'a str,
-        dir: Option<PathBuf>,
-        is_entry: bool,
-        /// `Some` when this module came from a dependency artifact rather than the
-        /// leaf's own source tree: carries the namespace it slugs under and its
-        /// position within the dep, for resolving the dep's *internal* imports.
-        dep: Option<DepCtx>,
-    }
-
-    // where a dependency module sits, so it slugs under the dep's package name and
-    // its own relative imports resolve against the dep's artifact, not the disk.
-    struct DepCtx {
-        /// the dependency's package name (also the namespace it was imported as).
-        package: String,
-        /// this module's directory within the dep, for joining onto its relative
-        /// imports: `""` for a root-level module, `"dsp"` for `dsp/osc.hv`.
-        reldir: String,
-        /// the dep's package-root module, which slugs to the bare package name.
-        is_root: bool,
-    }
-
     let mut worklist: VecDeque<Pending<'a>> = VecDeque::new();
-
-    // prelude first (id 0, if enabled) so it reads nicely in dumped output and
-    // becomes the implicit whole-module import of every user module. Seeding the
-    // worklist under its real `std/...` key is what makes a later explicit
-    // `import std/prelude` hit `seen` and reuse this module.
-    if inject_prelude {
-        let src = std_source(PRELUDE_KEY)
-            .expect("embedded std tree has no prelude.hv");
-        worklist.push_back(Pending { key: PRELUDE_KEY.into(), src, dir: None, is_entry: false, dep: None });
-    }
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    // dependencies whose whole module set has already been enqueued, so a program
+    // that imports both `foo/a` and `foo/b` pulls `foo` in exactly once.
+    let mut dep_enqueued: HashSet<String> = HashSet::new();
 
     // entry module. canonicalize *first* so its key matches how imports are
     // keyed (imports always canonicalize). otherwise a module that imports the
@@ -1892,6 +1973,42 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         entry_path.file_stem().map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "pkg".to_string()));
 
+    // the prelude's package goes on the worklist ahead of the entry, so it reads
+    // first in dumped output and its modules are in hand before anything that
+    // might want them. (Order is cosmetic - a slug is derived from the module's
+    // path, never from its position here.)
+    match prelude {
+        PreludeSource::None => {}
+        // seeding under its real `std/...` key is what makes a later explicit
+        // `import std/prelude` hit `seen` and reuse this module.
+        PreludeSource::Std => {
+            let src = std_source(PRELUDE_KEY)
+                .expect("embedded std tree has no prelude.hv");
+            worklist.push_back(Pending {
+                key: PRELUDE_KEY.into(), src, dir: None, is_entry: false, dep: None,
+            });
+        }
+        // the package being compiled supplies its own prelude. Nothing to seed -
+        // its modules load from disk anyway - but the case has to exist, or a
+        // prelude package could not be built at all: its `@lang` and `@!prelude`
+        // would be claims by a package that, during its own build, is nobody's
+        // prelude. This is how a stdlib is compiled.
+        PreludeSource::Package(name) if name == package => {}
+        // a dependency supplies it. Enqueued *eagerly*: the program is not
+        // required to import the package it takes its prelude from - that is
+        // rather the point - so nothing else would ever pull it in.
+        PreludeSource::Package(name) => {
+            let Some(meta) = deps.get(name) else {
+                diag::report_plain("Error", &format!(
+                    "--prelude names '{}', which is neither a dependency of this \
+                     build nor the package being compiled. Bind it first, e.g. \
+                     `--dep {}=<path>.hvmeta`", name, name));
+                return Err(());
+            };
+            enqueue_dep(name, meta, arena, &mut worklist, &seen, &mut dep_enqueued);
+        }
+    }
+
     worklist.push_back(Pending {
         key: entry_path.to_string_lossy().into_owned(),
         src: entry_src,
@@ -1908,10 +2025,6 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
     // a module's symbol slug is fixed before any of its items are named.
     let mut defs: Defs<'a> = Defs::new();
     let mut modules: Vec<Module<'a>> = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    // dependencies whose whole module set has already been enqueued, so a program
-    // that imports both `foo/a` and `foo/b` pulls `foo` in exactly once.
-    let mut dep_enqueued: HashSet<String> = HashSet::new();
     let mut had_error = false;
 
     while let Some(p) = worklist.pop_front() {
@@ -1971,6 +2084,21 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
             None if p.key.starts_with("std/") => Origin::Std,
             None => Origin::Own,
         };
+        // whether this module belongs to the package supplying the prelude, and
+        // may therefore claim to *be* the prelude or to declare a lang item.
+        //
+        // A separate question from `Origin`, which records where source came
+        // from and is fixed for the build; this depends on what the build was
+        // asked for. Under `--no-prelude` the embedded stdlib keeps the
+        // privilege even though nothing is injected: a program that imports
+        // `std/prelude` by hand still means the `Delete` it finds there.
+        let prelude_pkg = match (&p.dep, prelude) {
+            (Some(dc), PreludeSource::Package(n)) => dc.package == n,
+            // the package being compiled is its own prelude: a stdlib's build.
+            (None, PreludeSource::Package(n)) => origin == Origin::Own && package == n,
+            (None, PreludeSource::Std | PreludeSource::None) => origin == Origin::Std,
+            (Some(_), _) => false,
+        };
         let mid = match defs.add_module(slug_pkg, p.key.clone(), file, is_root, slug_root, origin) {
             Ok(mid) => mid,
             Err(msg) => {
@@ -1991,27 +2119,13 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
             let first = imp.path.first().copied();
 
             // a named external dependency, `import foo/geo`. On first touch its
-            // whole module set is enqueued (v1 pulls the dep in wholesale — the
-            // artifact already carries all of it and the leaf recompiles every
-            // module regardless), then this specific import is resolved against it.
-            if let Some(name) = first.filter(|f| *f != "std" && deps.contains_key(*f)) {
+            // whole module set is enqueued, then this specific import is resolved
+            // against it. (A dep supplying the prelude was already enqueued before
+            // the loop, so `enqueue_dep` is a no-op for it here.)
+            if let Some(name) = first.filter(|f| *f != "std" && *f != SELF_SEG
+                                                 && deps.contains_key(*f)) {
                 let meta = &deps[name];
-                if dep_enqueued.insert(name.to_string()) {
-                    for dm in &meta.modules {
-                        let key = dep_key(name, &dm.key);
-                        if seen.contains_key(&key) { continue; }
-                        let reldir = dm.key.rsplit_once('/').map_or("", |(d, _)| d).to_string();
-                        worklist.push_back(Pending {
-                            key,
-                            src: arena.alloc_str(&dm.source),
-                            dir: None,
-                            is_entry: false,
-                            dep: Some(DepCtx {
-                                package: name.to_string(), reldir, is_root: dm.is_root,
-                            }),
-                        });
-                    }
-                }
+                enqueue_dep(name, meta, arena, &mut worklist, &seen, &mut dep_enqueued);
                 match resolve_within_dep(meta, name, &imp.path[1..], arena) {
                     Ok(t) => import_keys.push(Some(t)),
                     Err(msg) => {
@@ -2029,10 +2143,23 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
             // pushed here — only the target is resolved for scope building.
             if let Some(dc) = &p.dep {
                 if first != Some("std") {
-                    let mut segs: Vec<&str> =
-                        dc.reldir.split('/').filter(|s| !s.is_empty()).collect();
-                    segs.extend(imp.path.iter().copied());
-                    match resolve_within_dep(&deps[&dc.package], &dc.package, &segs, arena) {
+                    // `self/...` is already package-root relative, so it skips
+                    // this module's own directory prefix - the one difference
+                    // between the two spellings, here as on disk.
+                    let segs: Vec<&str> = if first == Some(SELF_SEG) {
+                        imp.path[1..].to_vec()
+                    } else {
+                        let mut s: Vec<&str> =
+                            dc.reldir.split('/').filter(|s| !s.is_empty()).collect();
+                        s.extend(imp.path.iter().copied());
+                        s
+                    };
+                    let resolved = if first == Some(SELF_SEG) && segs.is_empty() {
+                        Err(BARE_SELF.to_string())
+                    } else {
+                        resolve_within_dep(&deps[&dc.package], &dc.package, &segs, arena)
+                    };
+                    match resolved {
                         Ok(t) => import_keys.push(Some(t)),
                         Err(msg) => {
                             diag::report("Import error", &msg, &imp.span, &files);
@@ -2045,7 +2172,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
             }
 
             // `std/...`, or the leaf's own on-disk relative import.
-            let target = match resolve_target(imp, p.dir.as_deref(), arena) {
+            let target = match resolve_target(imp, p.dir.as_deref(), entry_dir.as_deref(), arena) {
                 Ok(t) => t,
                 Err(msg) => {
                     diag::report("Import error", &msg, &imp.span, &files);
@@ -2081,6 +2208,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         modules.push(Module {
             file,
             mid,
+            prelude_pkg,
             mod_attrs,
             imports,
             import_keys,
@@ -2120,9 +2248,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         // prelude is a legitimate thing for a package to do, and that same
         // package is an ordinary library to any program that merely depends on
         // it - its mark must not follow it in and displace that program's own
-        // prelude. (Widens from "is std" to "is the nominated package" once one
-        // can be nominated.)
-        if defs.module(m.mid).origin != Origin::Std { continue; }
+        // prelude.
+        if !m.prelude_pkg { continue; }
         if let Some(prev) = prelude_mod {
             prelude_errs.push(Error::new(attr.span.clone(), format!(
                 "a second `@!{}`: '{}' already claims it, and a program has one \
@@ -2131,14 +2258,21 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         }
         prelude_mod = Some(i);
     }
-    // the prelude was enqueued, parsed, and then not found: the stdlib and the
-    // compiler disagree about which module is the prelude. Loud, because the
-    // quiet version is a program compiled with no prelude in scope at all.
-    if inject_prelude && prelude_mod.is_none() && prelude_errs.is_empty() {
-        diag::report_plain("Error", &format!(
-            "no module is marked `@!{}`. '{}' was loaded to serve as the prelude \
-             but does not claim to be one; this stdlib does not match this compiler",
-            PRELUDE_ATTR, PRELUDE_KEY));
+    // the prelude's package was enqueued, parsed, and then claimed nothing.
+    // Loud, because the quiet version is a program compiled with no prelude in
+    // scope at all - and, for a nominated package, the likeliest cause is that
+    // the caller nominated a package that simply is not a prelude.
+    if prelude != PreludeSource::None && prelude_mod.is_none() && prelude_errs.is_empty() {
+        diag::report_plain("Error", &match prelude {
+            PreludeSource::Package(name) => format!(
+                "package '{}' supplies no prelude: none of its modules is marked \
+                 `@!{}`. Only a package that says it is one can be nominated with \
+                 `--prelude`", name, PRELUDE_ATTR),
+            _ => format!(
+                "no module is marked `@!{}`. '{}' was loaded to serve as the prelude \
+                 but does not claim to be one; this stdlib does not match this compiler",
+                PRELUDE_ATTR, PRELUDE_KEY),
+        });
         return Err(());
     }
     if !prelude_errs.is_empty() {
@@ -2146,11 +2280,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         return Err(());
     }
     // whether the prelude goes into *scope* implicitly is a separate question:
-    // with `inject_prelude` off, a program may still `import std/prelude` by
-    // hand, and that must stay an ordinary import rather than silently going
-    // implicit everywhere. Its lang items still apply - the compiler knows what
-    // `Delete` means however the trait was brought into scope.
-    let prelude_id = if inject_prelude { prelude_mod } else { None };
+    // under `--no-prelude` a program may still `import std/prelude` by hand, and
+    // that must stay an ordinary import rather than silently going implicit
+    // everywhere. Its lang items still apply - the compiler knows what `Delete`
+    // means however the trait was brought into scope.
+    let prelude_id = if prelude == PreludeSource::None { None } else { prelude_mod };
 
     // lang items: the definitions the compiler itself knows about, found by the
     // `@lang(...)` each is marked with in source. Everything downstream reads
@@ -2171,18 +2305,24 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
             // unrecognized one, so this names something in `LANG_ITEMS`.
             let item = attr.value.value.as_deref().unwrap_or_default();
 
-            // only the standard library may claim a lang item. A lang item is
-            // program-global and unique, and claiming one is not a local
-            // decision: `@lang(delete)` in a user package would take over what
-            // owning a resource *means* for every type in the program. (Once a
-            // package can be nominated as the prelude, this widens from "is std"
-            // to "is the nominated package" - the same question, asked of a
-            // configurable answer.)
-            if defs.module(m.mid).origin != Origin::Std {
+            // only the package supplying the prelude may claim a lang item, and
+            // claiming one is not a local decision: `@lang(delete)` decides what
+            // owning a resource *means* for every type in the program.
+            //
+            // This is where the rule stops matching `@!prelude`'s, and it is not
+            // an oversight. An unnominated prelude package is still perfectly
+            // usable as a library right up until it declares a lang item - at
+            // which point two `Delete` traits exist and the ownership pass can
+            // only insert calls for one of them, silently treating the other
+            // package's owners as `Copy`. Ignoring the mark would be the
+            // miscompile; erroring says plainly that two stdlibs do not go into
+            // one program.
+            if !m.prelude_pkg {
                 lang_errs.push(Error::new(attr.span.clone(), format!(
-                    "`@{}({})` may only be declared by the standard library. A lang \
-                     item is one definition for the whole program, so a package \
-                     cannot introduce its own", LANG_ATTR, item)));
+                    "`@{}({})` may only be declared by '{}', the package this \
+                     program takes its prelude from. A lang item is one definition \
+                     for the whole program, so a second package cannot introduce \
+                     its own", LANG_ATTR, item, prelude.provider())));
                 continue;
             }
 
@@ -2212,19 +2352,21 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         return Err(());
     }
 
-    // A stdlib that declares no `Delete` is an error rather than a silent skip.
+    // A prelude that declares no `Delete` is an error rather than a silent skip.
     // The ownership pass treats a missing `Delete` as "nothing in this program
     // owns anything" - correct under `--no-prelude`, but if it could also mean
     // "nothing was found" then a mismatched stdlib would compile to a program
     // with no destructors at all, which is a miscompile and not a build failure.
+    // Supplying a prelude and supplying the lang items are therefore one job:
+    // a package cannot take over the first and leave the second to someone else.
     if let Some(pid) = prelude_mod {
         if lang.delete.is_none() {
             diag::report_plain("Error", &format!(
-                "the standard library declares no `@{}(delete)` trait. The compiler \
-                 needs it to know which types own memory and whose destructors to \
-                 insert; without it every value would silently be treated as \
-                 `Copy`. This stdlib is incomplete or does not match this compiler",
-                LANG_ATTR));
+                "'{}' supplies this program's prelude but declares no `@{}(delete)` \
+                 trait. The compiler needs it to know which types own memory and \
+                 whose destructors to insert; without it every value would silently \
+                 be treated as `Copy`",
+                prelude.provider(), LANG_ATTR));
             return Err(());
         }
         defs.set_lang_items(modules[pid].mid, lang);

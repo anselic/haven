@@ -385,6 +385,71 @@ fn mismatched_dep_name_errors_cleanly() {
         "diagnostic should name both the bound and actual package; got: {err}");
 }
 
+/// A package whose nested module needs one from the package *root*. An ordinary
+/// import only reaches downward — its segments are pushed onto the importing
+/// module's own directory — so `nest/deep/inner.hv` cannot say `import util`:
+/// that would name `nest/deep/util.hv`. `self/util` anchors at the root instead.
+///
+/// Both resolution paths are exercised: on disk while `nest` is compiled, and
+/// against the artifact when the program consumes it (a dep's internal imports
+/// resolve inside its `.hvmeta`, not on the filesystem).
+#[test]
+fn self_import_anchors_at_the_package_root() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("nest/lib.hv", "import deep/inner { boost }\n\
+                         pub proc go(n: i32) i32 { return boost(n); }\n"),
+        ("nest/util.hv", "pub proc scale(n: i32) i32 { return n * 5; }\n"),
+        ("nest/deep/inner.hv", "import self/util { scale }\n\
+                                pub proc boost(n: i32) i32 { return scale(n) + 1; }\n"),
+    ]);
+    let nest = dir.path().join("nest");
+    let built = build_lib(dir.path(), "nest/lib.hv", "nest", &nest);
+    assert!(built.status.success(),
+        "on-disk `self/` should resolve: {}", String::from_utf8_lossy(&built.stderr));
+
+    std::fs::write(dir.path().join("main.hv"),
+        "import nest { go }\nproc main() i32 { println(go(4)); return 0; }\n").unwrap();
+
+    let app = dir.path().join("app");
+    let res = build_app(dir.path(), "main.hv", "app", &["nest=nest.hvmeta"], &app);
+    assert!(res.status.success(),
+        "`self/` inside a dep should resolve: {}", String::from_utf8_lossy(&res.stderr));
+
+    let run = Command::new(exe(&app)).output().unwrap();
+    assert_eq!(stdout_of(&run), "21\n"); // 4*5 + 1
+
+    // exactly one `util` — `self/util` must not be a second copy of anything.
+    let syms = defined_symbols(&std::fs::read_to_string(app.with_extension("ll")).unwrap());
+    let utils: Vec<_> = syms.iter().filter(|s| s.contains("util$scale")).collect();
+    assert_eq!(utils, vec!["nest.util$scale"], "wrong or duplicated util module: {syms:?}");
+}
+
+/// `self` is reserved: it means the package root even when a dependency is bound
+/// under that name, so an import can never mean two things depending on flags.
+#[test]
+fn self_wins_over_a_dependency_named_self() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        // a dep that would answer to `self/thing` if `self` were an ordinary name.
+        ("self/lib.hv", "pub proc thing() i32 { return 99; }\n"),
+        ("self/thing.hv", "pub proc thing() i32 { return 99; }\n"),
+        // the program's own root-anchored module of the same path.
+        ("thing.hv", "pub proc thing() i32 { return 7; }\n"),
+    ]);
+    assert!(build_lib(dir.path(), "self/lib.hv", "self", &dir.path().join("self"))
+        .status.success());
+
+    std::fs::write(dir.path().join("main.hv"),
+        "import self/thing { thing }\nproc main() i32 { return thing(); }\n").unwrap();
+
+    let app = dir.path().join("app");
+    let res = build_app(dir.path(), "main.hv", "app", &["self=self.hvmeta"], &app);
+    assert!(res.status.success(), "build failed: {}", String::from_utf8_lossy(&res.stderr));
+    let run = Command::new(exe(&app)).output().unwrap();
+    assert_eq!(run.status.code(), Some(7), "`self/` must name the package root, not the dep");
+}
+
 /// Windows appends `.exe`; elsewhere the executable is the bare output path.
 fn exe(base: &Path) -> std::path::PathBuf {
     if cfg!(target_os = "windows") { base.with_extension("exe") } else { base.to_path_buf() }

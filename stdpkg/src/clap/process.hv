@@ -1,6 +1,6 @@
 // CLAP ABI bindings — audio-buffer.h + process.h
 
-import std/clap/events { ClapEventTransport, ClapInputEvents, ClapOutputEvents }
+import events { ClapEventTransport, ClapInputEvents, ClapOutputEvents }
 
 // typedef struct clap_audio_buffer — one per port; exactly one of data32/data64
 // is non-null. `float **data32` -> `**f32`.

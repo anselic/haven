@@ -1,11 +1,31 @@
-@prelude
+@!prelude
 
-pub import std/clone { Clone }
-pub import std/fmt { Display }
-pub import std/string { String }
-pub import std/vec { Vec }
+// The prelude proper: what every module in every program using this package
+// sees without an import. Deliberately tiny.
+pub import clone { Clone }
+pub import fmt { Display }
+pub import string { String }
+pub import vec { Vec }
 
-import std/fmt { display_print, display_println }
+import fmt { display_print, display_println }
+
+// Everything else the package ships, pulled in so that it *exists*. A `.hvmeta`
+// carries the modules that were loaded, and loading starts here - so a module
+// this root cannot reach is not merely unused, it is absent from the artifact
+// and no consumer can import it. These bind a module-private qualifier and
+// export nothing, so nothing here reaches a consumer's scope.
+import alloc
+import env
+import fs
+import iter
+import math
+import option
+import plug
+import process
+import result
+import simd
+import clap
+import dsp
 
 /// A destructor. Implement it to give a type ownership of a resource:
 ///
@@ -34,6 +54,13 @@ pub trait Delete {
 // backing symbols from crt/rt.c (always linked in)
 extern strlen(s: str) u64;
 extern rt_puts(s: str) void;
+
+// The runtime target of the `abort(msg)` intrinsic. The compiler lowers `abort`
+// to a direct call to this symbol and emits no declaration for it, so a package
+// supplying the prelude has to declare it here or every `abort()`/`panic()` in
+// the program fails to link. Not called directly - use `abort("...")`, whose
+// result type is `!`.
+extern rt_abort(msg: str) void;
 extern rt_slice_len<T>(slice: *[T]) u64;
 extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];
 

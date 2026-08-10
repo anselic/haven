@@ -9,8 +9,8 @@
 /// human-readable string) or its raw `errno()`. The pure queries `exists` and
 /// `is_dir` can't meaningfully fail, so they just return a `bool`.
 ///
-///     import std/fs
-///     import std/result { Result }
+///     import fs
+///     import result { Result }
 ///
 ///     match (fs::read("config.txt")) {
 ///         Result::Ok(text) -> { /* use text */ }
@@ -24,9 +24,9 @@
 // `Vec<u8>` via `from_raw_parts` (no copy), since rt_alloc and libc malloc are
 // the same allocator.
 
-import std/result { Result, Unit }
-import std/string { String }
-import std/vec { Vec }
+import result { Result, Unit }
+import string { String }
+import vec { Vec }
 
 extern rt_fs_read(path: str, out_len: *u64, out_err: *i32) *u8;
 extern rt_fs_write(path: str, data: *u8, len: u64, out_written: *u64) i32;

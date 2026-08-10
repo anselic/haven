@@ -11,7 +11,7 @@
 /// `x`, stopping at the first `None`. The iterand must be a place (a variable,
 /// field, index, or deref); bind a fresh-iterator expression to a `let` first.
 
-import std/option { Option }
+import option { Option }
 
 pub trait Iterator {
     type Item;

@@ -18,9 +18,9 @@
 /// `Err(ProcError)` case is reserved for the launch itself failing - program not
 /// found, out of memory - carrying the underlying C `errno`.
 ///
-///     import std/process { run, capture, Output }
-///     import std/result { Result }
-///     import std/vec { Vec }
+///     import process { run, capture, Output }
+///     import result { Result }
+///     import vec { Vec }
 ///
 ///     let args: Vec<str> = Vec::<str>::new();
 ///     args.push("build");
@@ -36,9 +36,9 @@
 // `capture` adopts the shim's two malloc'd, NUL-terminated buffers straight into
 // `String`s via `from_raw_parts`/`from_bytes` (no copy), exactly as `fs::read` does.
 
-import std/result { Result }
-import std/string { String }
-import std/vec { Vec }
+import result { Result }
+import string { String }
+import vec { Vec }
 
 extern rt_proc_run(program: str, args: *str, nargs: u64, out_code: *i32) i32;
 extern rt_proc_capture(program: str, args: *str, nargs: u64,

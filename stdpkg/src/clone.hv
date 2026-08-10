@@ -26,8 +26,8 @@
 ///         proc clone(*self) Point { return Point { x: self.x, y: self.y }; }
 ///     }
 
-import std/string { String }
-import std/vec { Vec }
+import string { String }
+import vec { Vec }
 
 pub trait Clone {
     proc clone(*self) Self;

@@ -5,8 +5,8 @@
 // must export exactly one symbol, `clap_entry`, a `ClapPluginEntry` const — see
 // the worked example in examples/3_clap.hv.
 
-import std/clap/version { ClapVersion }
-import std/clap/process { ClapProcess, ClapProcessStatus }
+import version { ClapVersion }
+import process { ClapProcess, ClapProcessStatus }
 
 // typedef struct clap_plugin_descriptor. `features` is `const char *const *`
 // (a NUL-terminated array of C strings) -> `*str` (char **).

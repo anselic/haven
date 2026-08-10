@@ -21,22 +21,22 @@
 //
 // See examples/4_gain_plug.hv for a complete worked plugin.
 
-import std/clap/version { ClapVersion }
-import std/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
-import std/clap/events {
+import clap/version { ClapVersion }
+import clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
+import clap/events {
     ClapEventHeader, ClapEventParamValue, ClapInputEvents, ClapOutputEvents,
     CLAP_EVENT_PARAM_VALUE,
 }
-import std/clap/plugin {
+import clap/plugin {
     ClapPlugin, ClapHost, ClapPluginDescriptor,
     ClapPluginFactory, ClapPluginEntry, CLAP_PLUGIN_FACTORY_ID,
 }
-import std/clap/ext {
+import clap/ext {
     ClapAudioPortInfo, ClapPluginAudioPorts, CLAP_EXT_AUDIO_PORTS,
     CLAP_AUDIO_PORT_IS_MAIN, CLAP_PORT_STEREO,
     ClapParamInfo, ClapPluginParams, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE,
 }
-import std/alloc { alloc, dealloc }
+import alloc { alloc, dealloc }
 
 extern strcmp(a: str, b: str) i32;
 extern strncpy(dst: *u8, src: str, n: u64) *u8;

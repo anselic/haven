@@ -27,7 +27,7 @@
 // no-op at the machine level, both are a bare pointer), and libc `strlen`
 // recovers a `str`'s length.
 
-import std/vec { Vec }
+import vec { Vec }
 
 extern strlen(s: str) u64;
 extern rt_str_as_bytes(s: str) *u8;

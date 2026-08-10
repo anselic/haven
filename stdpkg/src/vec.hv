@@ -23,8 +23,8 @@
 // which the ownership pass expands into one `T::delete` per element - and into
 // nothing when `T` owns nothing, so a `Vec<i32>` pays for none of this.
 
-import std/alloc { alloc, realloc, dealloc }
-import std/option { Option }
+import alloc { alloc, realloc, dealloc }
+import option { Option }
 
 pub struct Vec<T> {
     data: *T,  /// heap buffer, or null when cap == 0
