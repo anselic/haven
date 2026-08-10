@@ -1,0 +1,80 @@
+// CLAP ABI bindings — plugin.h + host.h + entry.h + factory/plugin-factory.h
+//
+// This module carries the core ABI: the descriptor, the host handle, the plugin
+// instance vtable, the factory, and the entry point. A `.clap` shared library
+// must export exactly one symbol, `clap_entry`, a `ClapPluginEntry` const — see
+// the worked example in examples/3_clap.hv.
+
+import std/clap/version { ClapVersion }
+import std/clap/process { ClapProcess, ClapProcessStatus }
+
+// typedef struct clap_plugin_descriptor. `features` is `const char *const *`
+// (a NUL-terminated array of C strings) -> `*str` (char **).
+@repr(C)
+pub struct ClapPluginDescriptor {
+    clap_version: ClapVersion,
+    id: str,
+    name: str,
+    vendor: str,
+    url: str,
+    manual_url: str,
+    support_url: str,
+    version: str,
+    description: str,
+    features: *str,
+}
+
+// typedef struct clap_host — the handle a plugin is given at create time and
+// keeps for its lifetime.
+@repr(C)
+pub struct ClapHost {
+    clap_version: ClapVersion,
+    host_data: *void,
+    name: str,
+    vendor: str,
+    url: str,
+    version: str,
+    get_extension: proc(*ClapHost, str) *void,
+    request_restart: proc(*ClapHost) void,
+    request_process: proc(*ClapHost) void,
+    request_callback: proc(*ClapHost) void,
+}
+
+// typedef struct clap_plugin — the instance vtable the plugin fills in. Every
+// callback takes the plugin back by pointer (C's `const clap_plugin_t *`).
+@repr(C)
+pub struct ClapPlugin {
+    desc: *ClapPluginDescriptor,
+    plugin_data: *void,
+    init: proc(*ClapPlugin) bool,
+    destroy: proc(*ClapPlugin) void,
+    activate: proc(*ClapPlugin, f64, u32, u32) bool,
+    deactivate: proc(*ClapPlugin) void,
+    start_processing: proc(*ClapPlugin) bool,
+    stop_processing: proc(*ClapPlugin) void,
+    reset: proc(*ClapPlugin) void,
+    process: proc(*ClapPlugin, *ClapProcess) ClapProcessStatus,
+    get_extension: proc(*ClapPlugin, str) *void,
+    on_main_thread: proc(*ClapPlugin) void,
+}
+
+// factory/plugin-factory.h
+pub const CLAP_PLUGIN_FACTORY_ID: str = "clap.plugin-factory";
+
+// typedef struct clap_plugin_factory — enumerates and instantiates plugins.
+@repr(C)
+pub struct ClapPluginFactory {
+    get_plugin_count: proc(*ClapPluginFactory) u32,
+    get_plugin_descriptor: proc(*ClapPluginFactory, u32) *ClapPluginDescriptor,
+    create_plugin: proc(*ClapPluginFactory, *ClapHost, str) *ClapPlugin,
+}
+
+// typedef struct clap_plugin_entry — the exported entry point. The `.clap`'s one
+// public symbol, `clap_entry`, is a const of this type.
+@repr(C)
+pub struct ClapPluginEntry {
+    clap_version: ClapVersion,
+    init: proc(str) bool,
+    deinit: proc() void,
+    get_factory: proc(str) *void,
+}

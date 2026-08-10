@@ -1,0 +1,125 @@
+/// std/fmt: `Display`, a trait for rendering a value as an owned `String`.
+///
+/// `import std/fmt { Display }` and every type here gains a `.display()` that
+/// returns a fresh `String` you own (and that is dropped for you). Implement it
+/// for your own types to make them printable the same way:
+///
+///     extend Point: Display {
+///         proc display(*self) String {
+///             let s: String = String::from_str("(");
+///             let x: String = self.x.display();
+///             s.push_str(x.as_str());
+///             ...
+///             return s;
+///         }
+///     }
+///
+/// This is an ordinary trait, not a lang item: nothing in the compiler knows its
+/// name. It is implemented here for the primitive integer types, `bool`, `str`,
+/// `String`, and `Vec<T>` (whenever `T: Display`).
+
+import std/string { String }
+import std/vec { Vec }
+
+extern rt_f32_to_str(f: f32, precision: i32) str;
+extern rt_f64_to_str(d: f64, precision: i32) str;
+
+pub trait Display {
+    proc display(*self) String;
+}
+
+/// Print `x.display()`, no trailing newline. Takes the value by borrow so it is
+/// only rendered, never moved out (and so an owning `x` survives the call).
+pub proc display_print<T: Display>(x: *T) {
+    let s: String = x.display();
+    print(s.as_str());
+}
+
+/// Print `x.display()` followed by a newline.
+pub proc display_println<T: Display>(x: *T) {
+    let s: String = x.display();
+    println(s.as_str());
+}
+
+// --- integers
+//
+// All integer rendering funnels through `push_u64`: it appends the decimal
+// digits of `n` to `s`, most-significant first, by recursing on `n / 10` before
+// emitting `n % 10`. `48` is ASCII '0'. Signed types print a '-' and then the
+// magnitude as a `u64` (the cast is on the already-negated value).
+
+proc push_u64(s: *String, n: u64) {
+    if (n >= 10u64) {
+        push_u64(s, n / 10u64);
+    }
+    s.push_byte(numerical_cast::<u8>(48u64 + (n % 10u64)));
+}
+
+proc u64_string(n: u64) String {
+    let s: String = String::new();
+    push_u64(&s, n);
+    return s;
+}
+
+proc i64_string(n: i64) String {
+    let s: String = String::new();
+    if (n < 0i64) {
+        s.push_byte(45u8); // '-'
+        push_u64(&s, numerical_cast::<u64>(0i64 - n));
+    } else {
+        push_u64(&s, numerical_cast::<u64>(n));
+    }
+    return s;
+}
+
+extend u8:  Display { proc display(*self) String { return u64_string(numerical_cast::<u64>(*self)); } }
+extend u16: Display { proc display(*self) String { return u64_string(numerical_cast::<u64>(*self)); } }
+extend i16: Display { proc display(*self) String { return i64_string(numerical_cast::<i64>(*self)); } }
+extend u32: Display { proc display(*self) String { return u64_string(numerical_cast::<u64>(*self)); } }
+extend u64: Display { proc display(*self) String { return u64_string(*self); } }
+extend i32: Display { proc display(*self) String { return i64_string(numerical_cast::<i64>(*self)); } }
+extend i64: Display { proc display(*self) String { return i64_string(*self); } }
+
+// --- floats
+
+extend f32: Display {
+    proc display(*self) String {
+        return String::from_str(rt_f32_to_str(*self, -1));
+    }
+}
+
+extend f64: Display {
+    proc display(*self) String {
+        return String::from_str(rt_f64_to_str(*self, -1));
+    }
+}
+
+// --- other scalars
+
+extend bool: Display {
+    proc display(*self) String {
+        if (*self) { return String::from_str("true"); }
+        return String::from_str("false");
+    }
+}
+
+// a `str` renders as its own text: a fresh owned copy of the bytes.
+extend str: Display {
+    proc display(*self) String { return String::from_str(*self); }
+}
+
+// a `String` renders as a copy of itself, so the result is independently owned.
+extend String: Display {
+    proc display(*self) String { return String::from_str(self.as_str()); }
+}
+
+// --- containers
+
+// A pointer to a displayable value is itself displayable, by rendering its
+// pointee. `self` is `**T` here, so `*self` is the `*T` receiver and `**self` is
+// the `T`; `(**self).display()` dispatches on `T`'s own head to reach `T`'s impl.
+// Writing `(*self).display()` instead would re-select this very blanket (a `*T`
+// receiver dispatches on the pointer head first) and recurse forever.
+extend *T: Display where T: Display {
+    proc display(*self) String { return (**self).display(); }
+}

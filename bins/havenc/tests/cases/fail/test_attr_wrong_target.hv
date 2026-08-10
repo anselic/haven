@@ -1,0 +1,12 @@
+// `@alloc` is read only for callables. On a struct it was accepted and never
+// looked at, which reads exactly like not writing it - the failure mode that
+// matters, since the whole point of `@alloc(false)` is to be checked.
+//@ error: cannot be written on a struct
+
+@alloc(false)
+struct Point { x: i32, y: i32 }
+
+@export
+proc main() i32 {
+    return 0;
+}

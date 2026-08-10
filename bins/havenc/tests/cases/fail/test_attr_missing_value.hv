@@ -1,0 +1,8 @@
+// A bare `@alloc` matches neither `is_true` nor `is_false`, so it used to mean
+// "unmarked" - the opposite of what someone writing it intends.
+//@ error: needs a value
+
+@alloc
+proc main() i32 {
+    return 0;
+}

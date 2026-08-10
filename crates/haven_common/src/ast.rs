@@ -931,6 +931,133 @@ impl<'a> Display for AttributeNode<'a> {
 
 pub type Attribute<'a> = Metadata<AttributeNode<'a>>;
 
+/// The kind of item an attribute is written on.
+///
+/// [`AttrTarget::Module`] is the odd one out: it is not an item at all, and its
+/// attributes are written `@!name` rather than `@name` precisely because there
+/// is no item to attach to. Without the `!` a mark meant for the file would be
+/// swallowed by whatever declaration happened to follow it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AttrTarget { Function, Extern, Struct, Enum, Global, Trait, Module }
+
+impl AttrTarget {
+    fn label(self) -> &'static str {
+        match self {
+            AttrTarget::Function => "a function",
+            AttrTarget::Extern   => "an extern declaration",
+            AttrTarget::Struct   => "a struct",
+            AttrTarget::Enum     => "an enum",
+            AttrTarget::Global   => "a global",
+            AttrTarget::Trait    => "a trait",
+            AttrTarget::Module   => "a module",
+        }
+    }
+}
+
+/// Marks a definition the compiler itself knows about: `@lang(delete)`. The
+/// spelling lives here because both the attribute table and the module loader
+/// (which reads the attribute back off the AST) need it.
+pub const LANG_ATTR: &str = "lang";
+
+/// Marks the module that is implicitly imported into every other one:
+/// `@!prelude`. Read by the module loader, same as [`LANG_ATTR`].
+pub const PRELUDE_ATTR: &str = "prelude";
+
+/// Whether an attribute is written bare (`@export`) or with a value
+/// (`@alloc(false)`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AttrValue { Never, Always, Optional }
+
+/// One attribute the compiler acts on: where it may be written, what shape it
+/// takes, and - where the set is small and this is the only place that knows it
+/// - which values it accepts.
+pub struct AttrSpec {
+    pub name: &'static str,
+    value: AttrValue,
+    /// `None` when the accepted values are not this table's business: `@repr`'s
+    /// are integer type names, checked against the type grammar in `enum_repr`.
+    values: Option<&'static [&'static str]>,
+    targets: &'static [AttrTarget],
+}
+
+/// Every attribute the compiler acts on.
+///
+/// Anything not listed here is rejected. An unrecognized attribute never did
+/// anything, but it also never *said* anything: a typo (`@expont`), a
+/// misplacement (`@alloc` on a struct) and a wrong shape (`@alloc` with no
+/// value, which neither `is_true` nor `is_false` matches) all parsed happily
+/// and then read downstream as "no attribute at all". For `@export` that is a
+/// symbol that silently fails to link; for `@alloc` it is the difference
+/// between a checked allocation contract and no check.
+///
+/// One table serves both spellings: an `@!name` is checked against
+/// [`AttrTarget::Module`], so an item attribute written `@!export` and a module
+/// attribute written `@prelude` are both caught by the ordinary target rule
+/// rather than by a second set of checks.
+pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
+    AttrSpec {
+        name: LANG_ATTR, value: AttrValue::Always, values: Some(crate::defs::LANG_ITEMS),
+        targets: &[AttrTarget::Trait],
+    },
+    AttrSpec {
+        name: PRELUDE_ATTR, value: AttrValue::Never, values: None,
+        targets: &[AttrTarget::Module],
+    },
+    AttrSpec {
+        name: "export", value: AttrValue::Never, values: None,
+        targets: &[AttrTarget::Function, AttrTarget::Struct,
+                   AttrTarget::Enum, AttrTarget::Global],
+    },
+    AttrSpec {
+        name: "alloc", value: AttrValue::Always, values: Some(&["true", "false"]),
+        targets: &[AttrTarget::Function, AttrTarget::Extern],
+    },
+    AttrSpec {
+        name: "repr", value: AttrValue::Optional, values: None,
+        targets: &[AttrTarget::Struct, AttrTarget::Enum],
+    },
+];
+
+/// Check one attribute written on `target`. `Err` carries a ready-to-report
+/// message; the caller supplies the span.
+pub fn check_attribute(attr: &AttributeNode<'_>, target: AttrTarget) -> Result<(), String> {
+    let Some(spec) = KNOWN_ATTRIBUTES.iter().find(|s| s.name == attr.name) else {
+        let known = KNOWN_ATTRIBUTES.iter()
+            .map(|s| format!("@{}", s.name)).collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "unknown attribute `@{}`. Known attributes are {}", attr.name, known));
+    };
+    match (spec.value, attr.value.is_some()) {
+        (AttrValue::Never, true) => return Err(format!(
+            "`@{}` takes no value; write `@{}` on its own", attr.name, attr.name)),
+        (AttrValue::Always, false) => return Err(format!(
+            "`@{}` needs a value, e.g. `@{}({})`", attr.name, attr.name,
+            spec.values.and_then(|v| v.first()).unwrap_or(&"..."))),
+        _ => {}
+    }
+    if let (Some(allowed), Some(written)) = (spec.values, attr.value.as_deref()) {
+        if !allowed.contains(&written) {
+            return Err(format!(
+                "`@{}({})` is not a valid value; expected {}",
+                attr.name, written, allowed.join(" or ")));
+        }
+    }
+    if !spec.targets.contains(&target) {
+        let ok = spec.targets.iter().map(|t| t.label()).collect::<Vec<_>>().join(", ");
+        // a module attribute misplaced onto an item is a spelling mistake more
+        // than a placement one - the name is right, the `!` is missing.
+        let hint = if spec.targets.contains(&AttrTarget::Module) {
+            format!(", and is written `@!{}`", attr.name)
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "`@{}` cannot be written on {}; it applies to {}{}",
+            attr.name, target.label(), ok, hint));
+    }
+    Ok(())
+}
+
 /// How a method takes `self`. `Associated` is no receiver at all - an associated
 /// function like `Point::new`, called as `Point::new(...)`. `Value` is a by-value
 /// `self`, `Pointer` is `*self` (a pointer receiver). Desugaring turns `Value`
@@ -1178,6 +1305,7 @@ pub enum TopLevelNode<'a> {
         /// is only the symbol it happens to be emitted under.
         def: DefId,
         is_pub: bool,
+        attributes: Vec<Attribute<'a>>,
         /// Names of the associated types the trait requires (`type Item;`). Each
         /// stands for a per-impl type that a method signature refers to as
         /// `Self::Item` — resolved to `Type::Param(name)` inside the signature,

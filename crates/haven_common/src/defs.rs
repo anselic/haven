@@ -54,12 +54,23 @@ use bumpalo::Bump;
 
 use crate::ast::{FileId, GenericParam, Receiver, Span, Type};
 
-/// The implicit prelude's canonical module key.
+/// Which embedded module the loader *loads* to serve as the prelude.
 ///
-/// Used by the module loader to find, load and inject the prelude. It is *not*
-/// how a lang item is identified: that would make a compiler-known definition
-/// depend on how its module happened to be keyed. See [`LangItems`].
+/// Only that. Which module then *is* the prelude, and which definitions are
+/// lang items, are answered by the `@!prelude` and `@lang(...)` marks in the
+/// source - not by this key. Recognizing either by module key would make a
+/// language rule out of how the embedded tree happens to be laid out, and would
+/// have nothing to say the moment a prelude arrives from a package whose files
+/// are named however that package likes. See [`LangItems`].
 pub const PRELUDE_KEY: &str = "std/prelude";
+
+/// Every lang item name, as written in `@lang(...)`.
+///
+/// One list, read twice: the attribute table validates a written name against
+/// it, and the module loader matches on it to fill [`LangItems`]. Adding a lang
+/// item means adding a name here, a field below, and an arm in the loader - and
+/// the loader reports rather than panics if the last is forgotten.
+pub const LANG_ITEMS: &[&str] = &["delete"];
 
 /// The definitions the compiler itself knows about.
 ///
@@ -331,14 +342,36 @@ pub struct Instance {
 /// Every monomorphized instance in the program, keyed by its own identity.
 pub type Instances = HashMap<DefId, Instance>;
 
+/// Where a module's source came from.
+///
+/// Recorded at load rather than re-derived from the key, because the key only
+/// half-answers the question: `std/...` is recognizable by its prefix, but a
+/// dependency module's key (`foo/geo.hv`) looks like nothing in particular, so
+/// a test written against the key shape reads "not std" as "the package being
+/// compiled" and quietly counts a dependency's modules as the leaf's own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Origin {
+    /// Loaded from the source tree of the package being compiled.
+    Own,
+    /// The embedded standard library.
+    Std,
+    /// Loaded out of a dependency's `.hvmeta`.
+    Dep,
+}
+
 pub struct ModInfo {
     pub file: FileId,
-    /// Canonical key: an absolute path, or `std/...` (the prelude included -
-    /// it is keyed `std/prelude` like any other embedded std module).
+    /// Canonical key: an absolute path for a module of the package being
+    /// compiled, `std/...` for an embedded std module (the prelude included -
+    /// it is keyed `std/prelude` like any other), and `<dep>/<relative path>`
+    /// for one that came out of a dependency's artifact.
     pub key: String,
     /// Path-derived, load-order-independent symbol prefix, e.g. `std.math`.
     pub slug: String,
     pub is_entry: bool,
+    /// Whether this module belongs to the package being compiled, and if not,
+    /// where it came from instead.
+    pub origin: Origin,
 }
 
 #[derive(Default)]
@@ -377,7 +410,8 @@ impl<'a> Defs<'a> {
     /// root — the case the old absolute-path hash silently absorbed, now a
     /// diagnosable error rather than a symbol that bakes in a filesystem path.
     pub fn add_module(&mut self, package: &str, key: String, file: FileId,
-                      is_entry: bool, root: Option<&Path>) -> Result<ModId, String> {
+                      is_entry: bool, root: Option<&Path>, origin: Origin)
+                      -> Result<ModId, String> {
         let id = ModId(self.mods.len() as u32);
         let Some(mut slug) = module_slug(package, &key, root, is_entry) else {
             return Err(format!(
@@ -397,7 +431,7 @@ impl<'a> Defs<'a> {
             slug = format!("{}_{:08x}", slug, fnv1a(&rel_seed(&key, root)));
         }
         self.slugs.insert(slug.clone(), id);
-        self.mods.push(ModInfo { file, key, slug, is_entry });
+        self.mods.push(ModInfo { file, key, slug, is_entry, origin });
         Ok(id)
     }
 

@@ -1,0 +1,8 @@
+// Same silent-no-op shape as a missing value: `@alloc(1)` is neither `true` nor
+// `false`, so every reader of it fell through to "unmarked".
+//@ error: is not a valid value
+
+@alloc(1)
+proc main() i32 {
+    return 0;
+}

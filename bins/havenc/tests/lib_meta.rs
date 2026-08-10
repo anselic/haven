@@ -22,14 +22,24 @@ fn scaffold(root: &Path, files: &[(&str, &str)]) {
 
 /// Run `havenc <entry> --package-name <pkg> --lib -o <out>` from `cwd`.
 fn build_lib(cwd: &Path, entry: &str, pkg: &str, out: &Path) -> std::process::Output {
-    Command::new(HAVENC)
-        .current_dir(cwd)
+    build_lib_with_deps(cwd, entry, pkg, &[], out)
+}
+
+/// As [`build_lib`], with one `--dep name=path` per entry of `deps` — a library
+/// that is itself built against other libraries.
+fn build_lib_with_deps(cwd: &Path, entry: &str, pkg: &str, deps: &[&str], out: &Path)
+    -> std::process::Output
+{
+    let mut cmd = Command::new(HAVENC);
+    cmd.current_dir(cwd)
         .arg(entry)
         .arg("--package-name").arg(pkg)
         .arg("--lib")
-        .arg("-o").arg(out)
-        .output()
-        .expect("failed to spawn havenc")
+        .arg("-o").arg(out);
+    for d in deps {
+        cmd.arg("--dep").arg(d);
+    }
+    cmd.output().expect("failed to spawn havenc")
 }
 
 /// A representative multi-module lib: a root, a sibling module, a nested one, and
@@ -96,6 +106,53 @@ fn round_trips_with_correct_modules_and_no_std() {
     let recomputed = haven_meta::fingerprint(
         &meta.header.package_name, &meta.header.havenc_version, &meta.modules);
     assert_eq!(meta.header.fingerprint, recomputed);
+}
+
+/// A library may itself be built against another library, and its artifact then
+/// carries its *own* source only — not a copy of the dependency's.
+///
+/// The producer decides what belongs to this package by asking each module where
+/// its source came from. It used to ask the module *key* instead, excluding
+/// anything under `std/`; a dependency module is keyed `deep/lib.hv`, which is
+/// neither `std/` nor under this package's root, so it fell through to the
+/// "outside the package root" error and building such a library was impossible.
+///
+/// Shipping the dependency's source would be wrong even if it worked: the
+/// consumer resolves `deep` from `deep.hvmeta` itself, so a second copy inside
+/// `mid.hvmeta` is either redundant or — once versions exist — a conflict.
+#[test]
+fn library_with_a_dependency_ships_only_its_own_source() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("deep/lib.hv", "pub proc base(n: i32) i32 { return n + 1; }\n"),
+        ("mid/lib.hv", "import deep { base }\n\
+                        import util { twice }\n\
+                        pub proc bump(n: i32) i32 { return twice(base(n)); }\n"),
+        ("mid/util.hv", "pub proc twice(n: i32) i32 { return n * 2; }\n"),
+    ]);
+
+    let deep_out = dir.path().join("deep_art");
+    assert!(build_lib(dir.path(), "deep/lib.hv", "deep", &deep_out).status.success());
+    let deep_art = deep_out.with_extension("hvmeta");
+
+    let mid_out = dir.path().join("mid_art");
+    let dep = format!("deep={}", deep_art.display());
+    let res = build_lib_with_deps(dir.path(), "mid/lib.hv", "mid", &[&dep], &mid_out);
+    assert!(res.status.success(),
+        "a library with a dependency must build: {}", String::from_utf8_lossy(&res.stderr));
+
+    let meta = haven_meta::read(&mid_out.with_extension("hvmeta")).unwrap();
+    assert_eq!(meta.header.package_name, "mid");
+
+    // exactly mid's own two modules: no `deep/...` module and no std module.
+    let keys: Vec<&str> = {
+        let mut k: Vec<&str> = meta.modules.iter().map(|m| m.key.as_str()).collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys, vec!["lib.hv", "util.hv"], "artifact carries foreign modules");
+    assert!(meta.modules.iter().all(|m| !m.source.contains("proc base")),
+        "the dependency's source travelled inside the artifact");
 }
 
 #[test]

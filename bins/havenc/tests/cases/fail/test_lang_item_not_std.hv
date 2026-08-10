@@ -1,0 +1,21 @@
+// A lang item may only be claimed by the standard library.
+//
+// `@lang(delete)` does not merely name a trait - it decides what *owning a
+// resource* means for every type in the program, and there is exactly one such
+// decision. A package that could claim it would take that over for code it has
+// never seen, so claiming one is not a local choice to make.
+//
+// This also pins the grammar: attributes on a `trait` must reach lang-item
+// checking at all. Before traits carried attributes this died in the parser
+// with "found 'trait' expected 'proc', 'extern', 'struct', 'enum', or 'const'".
+//@ error: may only be declared by the standard library
+
+@lang(delete)
+pub trait Marker {
+    proc mark(*self);
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

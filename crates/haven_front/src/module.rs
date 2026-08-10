@@ -85,7 +85,7 @@ use haven_meta::HavenMeta;
 
 use haven_common::ast::*;
 use crate::parse;
-use haven_common::defs::{Def, DefKind, DefId, Defs, Linkage, Member, MemberTable, ModId, TyHead};
+use haven_common::defs::{Def, DefKind, DefId, Defs, Linkage, Member, MemberTable, ModId, Origin, TyHead};
 
 use haven_common::diag::{self, Files};
 use haven_common::intrinsics::Intrinsic;
@@ -95,10 +95,11 @@ use haven_common::intrinsics::Intrinsic;
 static STD_DIR: include_dir::Dir<'static> =
     include_dir::include_dir!("$CARGO_MANIFEST_DIR/../../std");
 
-/// The implicit prelude's canonical key. It is a plain `std/...` module: this is
-/// exactly the key `resolve_target` produces for an explicit `import
-/// std/prelude`, so the two share one entry in `seen` and therefore one set of
-/// definitions - and therefore one prelude, whichever way it was reached.
+/// `PRELUDE_KEY` is which embedded module gets *loaded* to serve as the prelude,
+/// not which module *is* one - that is the `@!prelude` mark. It is a plain
+/// `std/...` key: exactly what `resolve_target` produces for an explicit
+/// `import std/prelude`, so the two share one entry in `seen` and therefore one
+/// set of definitions - one prelude, whichever way it was reached.
 use haven_common::defs::{LangItems, PRELUDE_KEY};
 
 /// Source of an embedded stdlib module, by its `std/...` import path. The key is
@@ -121,6 +122,10 @@ struct Module<'a> {
     file: FileId,
     /// this module's entry in `Defs`, which owns its symbol slug.
     mid: ModId,
+    /// the `@!name` marks written at this module's file scope. Statements about
+    /// the file rather than about any of its declarations, so they are kept
+    /// here rather than on an item.
+    mod_attrs: Vec<Attribute<'a>>,
     imports: Vec<Import<'a>>,
     /// what each import resolved to (parallel to `imports`), or `None` if it
     /// failed to resolve (error already recorded).
@@ -864,7 +869,8 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
 /// them for `'a`. `extend`/method blocks are desugared to functions here, so the
 /// returned items are already method-free.
 fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'a>)
-    -> Result<(Vec<Import<'a>>, Vec<TopLevel<'a>>, Vec<RawImpl<'a>>, Vec<RawMethod<'a>>), ()>
+    -> Result<(Vec<Attribute<'a>>, Vec<Import<'a>>, Vec<TopLevel<'a>>,
+               Vec<RawImpl<'a>>, Vec<RawMethod<'a>>), ()>
 {
     let (tokens, lex_errs) = parse::lex(file, src);
     for e in &lex_errs {
@@ -880,10 +886,23 @@ fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'
     for e in &parse_errs {
         diag::report("Parse error", &e.reason().to_string(), e.span(), files);
     }
-    let (imports, mut items) = match parsed {
+    let (mod_attrs, imports, mut items) = match parsed {
         Some(pi) if parse_errs.is_empty() => pi,
         _ => return Err(()),
     };
+
+    // reject attributes the compiler does not act on, before any stage reads the
+    // ones it does. Runs here, ahead of `lower_methods`, because an `extend`
+    // block's methods still exist as methods at this point - once desugared they
+    // are indistinguishable from top-level functions, which happens to be the
+    // right target for them anyway, but their spans read better this way.
+    let attr_errs = check_attributes(&mod_attrs, &items);
+    if !attr_errs.is_empty() {
+        for e in &attr_errs {
+            diag::report_error("Attribute error", e, files);
+        }
+        return Err(());
+    }
 
     // desugar `extend`/method blocks into functions before anything else looks at
     // the items.
@@ -895,7 +914,51 @@ fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'
         return Err(());
     }
 
-    Ok((imports, items, impls, methods))
+    Ok((mod_attrs, imports, items, impls, methods))
+}
+
+/// Check every attribute in one module - the module's own `@!name` marks and
+/// the ones on its items - against the table of attributes the compiler acts on
+/// ([`ast::KNOWN_ATTRIBUTES`]).
+///
+/// The parser accepts any `@name` or `@name(value)`, which is what lets one
+/// grammar serve every attribute - but it also meant an attribute the compiler
+/// had never heard of, or one written somewhere it is never read, compiled
+/// silently and did nothing.
+fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], items: &[TopLevel<'a>]) -> Vec<Error> {
+    let mut errs = Vec::new();
+    let check = |attrs: &[Attribute<'a>], target: AttrTarget, errs: &mut Vec<Error>| {
+        for a in attrs {
+            if let Err(msg) = check_attribute(&a.value, target) {
+                errs.push(Error::new(a.span.clone(), msg));
+            }
+        }
+    };
+    check(mod_attrs, AttrTarget::Module, &mut errs);
+    for tl in items {
+        match &tl.value {
+            TopLevelNode::Function { attributes, .. } =>
+                check(attributes, AttrTarget::Function, &mut errs),
+            TopLevelNode::Extern { attributes, .. } =>
+                check(attributes, AttrTarget::Extern, &mut errs),
+            TopLevelNode::Struct { attributes, .. } =>
+                check(attributes, AttrTarget::Struct, &mut errs),
+            TopLevelNode::Enum { attributes, .. } =>
+                check(attributes, AttrTarget::Enum, &mut errs),
+            TopLevelNode::Global { attributes, .. } =>
+                check(attributes, AttrTarget::Global, &mut errs),
+            TopLevelNode::Trait { attributes, .. } =>
+                check(attributes, AttrTarget::Trait, &mut errs),
+            // an `extend` block takes no attributes of its own; each of its
+            // methods is checked as the function it desugars into.
+            TopLevelNode::Extend { methods, .. } => {
+                for m in methods {
+                    check(&m.value.attributes, AttrTarget::Function, &mut errs);
+                }
+            }
+        }
+    }
+    errs
 }
 
 /// Name-resolution scopes for one module.
@@ -1859,7 +1922,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         // register the source before parsing: its spans carry this id, and any
         // lex/parse diagnostic has to be able to quote it.
         let file = files.add(p.key.clone(), p.src);
-        let (imports, mut items, impls, methods) = match parse_module(file, p.src, arena, &files) {
+        let (mod_attrs, imports, mut items, impls, methods) = match parse_module(file, p.src, arena, &files) {
             Ok(pi) => pi,
             Err(()) => { had_error = true; continue; }
         };
@@ -1896,7 +1959,19 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
             None => (&package, entry_dir.as_deref(), p.is_entry),
             Some(dc) => (&dc.package, Some(FilePath::new(&dc.package)), dc.is_root),
         };
-        let mid = match defs.add_module(slug_pkg, p.key.clone(), file, is_root, slug_root) {
+        // where the source came from, which the slug deliberately does not
+        // record: an embedded std module and one of the leaf's own both slug
+        // from `(package, relative path)`, and that is what keeps them
+        // location-independent. Anything that needs to know whose source a
+        // module *is* - the `.hvmeta` producer, which must ship this package's
+        // own modules and no one else's - asks `Origin` instead of trying to
+        // read it back out of the key.
+        let origin = match &p.dep {
+            Some(_) => Origin::Dep,
+            None if p.key.starts_with("std/") => Origin::Std,
+            None => Origin::Own,
+        };
+        let mid = match defs.add_module(slug_pkg, p.key.clone(), file, is_root, slug_root, origin) {
             Ok(mid) => mid,
             Err(msg) => {
                 diag::report("Module error", &msg, &Span::new(file, 0, 0), &files);
@@ -2006,6 +2081,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
         modules.push(Module {
             file,
             mid,
+            mod_attrs,
             imports,
             import_keys,
             items,
@@ -2024,10 +2100,51 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
     let symtabs: Vec<SymTab> = modules.iter()
         .map(|m| build_symtab(m, &mut defs, arena, &mut errs))
         .collect();
-    // looked up rather than assumed to be 0: the prelude is enqueued first, but
-    // an explicit `import std/prelude` shares its entry, so its position depends
-    // on nothing but `seen`.
-    let prelude_mod = seen.get(PRELUDE_KEY).copied();
+    // the prelude: the module whose `pub` items every other module sees without
+    // an import. Found by the `@!prelude` it marks *itself* with, so the loader
+    // no longer has to recognize it by the key it happened to be loaded under -
+    // which was a rule about the embedded tree's directory layout masquerading
+    // as a rule about the language (`std/prelude` vs `std/prelude.hv` vs a
+    // package whose prelude is its root `lib.hv`).
+    //
+    // Marking is also the only workable rule once the prelude arrives as a
+    // dependency: what a package calls its files is its own business, and
+    // `.hvmeta` ships source with no manifest alongside it, so the mark has to
+    // travel *in* the source.
+    let mut prelude_mod: Option<usize> = None;
+    let mut prelude_errs: Vec<Error> = Vec::new();
+    for (i, m) in modules.iter().enumerate() {
+        let Some(attr) = m.mod_attrs.iter().find(|a| a.value.name == PRELUDE_ATTR) else { continue };
+        // only the package serving as the prelude may be the prelude. Unlike
+        // `@lang`, a mark elsewhere is *inert* rather than an error: providing a
+        // prelude is a legitimate thing for a package to do, and that same
+        // package is an ordinary library to any program that merely depends on
+        // it - its mark must not follow it in and displace that program's own
+        // prelude. (Widens from "is std" to "is the nominated package" once one
+        // can be nominated.)
+        if defs.module(m.mid).origin != Origin::Std { continue; }
+        if let Some(prev) = prelude_mod {
+            prelude_errs.push(Error::new(attr.span.clone(), format!(
+                "a second `@!{}`: '{}' already claims it, and a program has one \
+                 prelude or none", PRELUDE_ATTR, files.path(modules[prev].file))));
+            continue;
+        }
+        prelude_mod = Some(i);
+    }
+    // the prelude was enqueued, parsed, and then not found: the stdlib and the
+    // compiler disagree about which module is the prelude. Loud, because the
+    // quiet version is a program compiled with no prelude in scope at all.
+    if inject_prelude && prelude_mod.is_none() && prelude_errs.is_empty() {
+        diag::report_plain("Error", &format!(
+            "no module is marked `@!{}`. '{}' was loaded to serve as the prelude \
+             but does not claim to be one; this stdlib does not match this compiler",
+            PRELUDE_ATTR, PRELUDE_KEY));
+        return Err(());
+    }
+    if !prelude_errs.is_empty() {
+        for e in &prelude_errs { diag::report_error("Prelude error", e, &files); }
+        return Err(());
+    }
     // whether the prelude goes into *scope* implicitly is a separate question:
     // with `inject_prelude` off, a program may still `import std/prelude` by
     // hand, and that must stay an ordinary import rather than silently going
@@ -2035,31 +2152,82 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, inject_prelud
     // `Delete` means however the trait was brought into scope.
     let prelude_id = if inject_prelude { prelude_mod } else { None };
 
-    // lang items: the definitions the compiler itself knows about, resolved here
-    // from the prelude's own symbol table. This is the only place that knows
-    // which module *is* the prelude by identity; everything downstream reads
-    // `defs.lang()` and so cannot be fooled by a module that merely keys or
-    // spells itself like the prelude.
+    // lang items: the definitions the compiler itself knows about, found by the
+    // `@lang(...)` each is marked with in source. Everything downstream reads
+    // `defs.lang()`, so nothing else has to recognize a lang item - by name, by
+    // declaring module, or by anything else it might coincidentally match.
     //
-    // A prelude that declares no `Delete` is an error rather than a silent skip.
+    // Marking beats locating. The predecessor rule was "the trait named `Delete`
+    // declared in the prelude", which ties a compiler-known definition to where
+    // it happens to be filed: the moment a lang item lives outside the prelude
+    // module (`Clone`, in `std/clone.hv`) that anchor is gone.
+    let mut lang = LangItems::default();
+    let mut lang_errs: Vec<Error> = Vec::new();
+    for (i, m) in modules.iter().enumerate() {
+        for tl in &m.items {
+            let TopLevelNode::Trait { name, attributes, .. } = &tl.value else { continue };
+            let Some(attr) = attributes.iter().find(|a| a.value.name == LANG_ATTR) else { continue };
+            // `check_attributes` already rejected a `@lang` with no value or an
+            // unrecognized one, so this names something in `LANG_ITEMS`.
+            let item = attr.value.value.as_deref().unwrap_or_default();
+
+            // only the standard library may claim a lang item. A lang item is
+            // program-global and unique, and claiming one is not a local
+            // decision: `@lang(delete)` in a user package would take over what
+            // owning a resource *means* for every type in the program. (Once a
+            // package can be nominated as the prelude, this widens from "is std"
+            // to "is the nominated package" - the same question, asked of a
+            // configurable answer.)
+            if defs.module(m.mid).origin != Origin::Std {
+                lang_errs.push(Error::new(attr.span.clone(), format!(
+                    "`@{}({})` may only be declared by the standard library. A lang \
+                     item is one definition for the whole program, so a package \
+                     cannot introduce its own", LANG_ATTR, item)));
+                continue;
+            }
+
+            // the AST's `def` is filled by name resolution, which has not run
+            // yet; the module's own symbol table already has the identity.
+            let Some(sym) = symtabs[i].structs.get(*name) else { continue };
+            let slot = match item {
+                "delete" => &mut lang.delete,
+                // reachable only if `LANG_ITEMS` grew without an arm here.
+                other => {
+                    lang_errs.push(Error::new(attr.span.clone(), format!(
+                        "lang item '{}' is accepted by the parser but not wired up \
+                         in the compiler", other)));
+                    continue;
+                }
+            };
+            if slot.is_some() {
+                lang_errs.push(Error::new(attr.span.clone(), format!(
+                    "duplicate `@{}({})`: the program already has one", LANG_ATTR, item)));
+                continue;
+            }
+            *slot = Some(sym.def);
+        }
+    }
+    if !lang_errs.is_empty() {
+        for e in &lang_errs { diag::report_error("Lang item error", e, &files); }
+        return Err(());
+    }
+
+    // A stdlib that declares no `Delete` is an error rather than a silent skip.
     // The ownership pass treats a missing `Delete` as "nothing in this program
     // owns anything" - correct under `--no-prelude`, but if it could also mean
-    // "the lookup failed" then a mismatched stdlib would compile to a program
+    // "nothing was found" then a mismatched stdlib would compile to a program
     // with no destructors at all, which is a miscompile and not a build failure.
     if let Some(pid) = prelude_mod {
-        let delete = symtabs[pid].structs.get("Delete")
-            .map(|s| s.def)
-            .filter(|d| defs.get(*d).kind == DefKind::Trait);
-        let Some(delete) = delete else {
+        if lang.delete.is_none() {
             diag::report_plain("Error", &format!(
-                "the prelude ('{}') declares no `Delete` trait. The compiler needs \
-                 it to know which types own memory and whose destructors to insert; \
-                 without it every value would silently be treated as `Copy`. This \
-                 stdlib is incomplete or does not match this compiler",
-                PRELUDE_KEY));
+                "the standard library declares no `@{}(delete)` trait. The compiler \
+                 needs it to know which types own memory and whose destructors to \
+                 insert; without it every value would silently be treated as \
+                 `Copy`. This stdlib is incomplete or does not match this compiler",
+                LANG_ATTR));
             return Err(());
-        };
-        defs.set_lang_items(modules[pid].mid, LangItems { delete: Some(delete) });
+        }
+        defs.set_lang_items(modules[pid].mid, lang);
     }
 
     // re-exports: fold every `pub import`'s symbols into the importing module's

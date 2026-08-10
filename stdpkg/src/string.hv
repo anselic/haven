@@ -1,0 +1,190 @@
+/// std/string: an owned, growable text buffer.
+///
+/// `String` is a heap-backed, growable string, a thin wrapper over a `Vec<u8>`
+/// of bytes exactly as Rust's `String` wraps a `Vec<u8>`. Build one with
+/// `String::new` (or `String::from_str` to seed it from a literal), append with
+/// `s.push_byte`/`s.push_str`, compare with `s.eq`, and hand a borrowable C
+/// string to `print`/`printf` via `s.as_str`.
+///
+/// A `String` owns its heap allocation and frees it for you: it holds a `Vec<u8>`
+/// field, and `Vec` implements `Delete`, so a String is destroyed - buffer freed
+/// - when it goes out of scope, with no manual free to call. A fresh `String::new`
+/// allocates nothing, so an empty String is cheap and the first push performs the
+/// initial allocation. No UTF-8 validation is done: `s.push_byte` can build
+/// ill-formed sequences, so treat the contents as raw bytes unless you know they
+/// are valid text.
+
+// All the growth/allocation machinery is inherited from `Vec<u8>` (see std/vec);
+// this module only adds string-flavored operations, built entirely on Vec's
+// public API. Bytes are stored WITHOUT a trailing NUL - `len` is the exact byte
+// count - and the NUL a C `str` needs is written on demand by `as_str`.
+//
+// destruction is inherited too: a `String` owns nothing of its own beyond the
+// `buf: Vec<u8>` field, so the compiler drops it by dropping `buf`, whose own
+// `Delete` frees the bytes. No `String`-level `Delete` impl is needed or wanted.
+// `str` is haven's own type (not a `*u8`), so it cannot be indexed or `ptr_cast`;
+// the two runtime shims below reinterpret between a `str` and its raw bytes (a
+// no-op at the machine level, both are a bare pointer), and libc `strlen`
+// recovers a `str`'s length.
+
+import std/vec { Vec }
+
+extern strlen(s: str) u64;
+extern rt_str_as_bytes(s: str) *u8;
+extern rt_bytes_as_str(p: *u8) str;
+
+pub struct String {
+    buf: Vec<u8>,  /// the raw bytes, without a trailing NUL
+
+    /// An empty String that owns no allocation yet.
+    pub proc new() String {
+        return String { buf: Vec::<u8>::new() };
+    }
+
+    /// An empty String with room for `cap` bytes already reserved.
+    pub proc with_capacity(cap: u64) String {
+        return String { buf: Vec::<u8>::with_capacity(cap) };
+    }
+
+    /// A String seeded with a copy of the bytes of the `str` `text`.
+    pub proc from_str(text: str) String {
+        let s: String = String::new();
+        s.push_str(text);
+        return s;
+    }
+
+    /// A String that takes ownership of an existing `Vec<u8>` of bytes, with no
+    /// copy. No UTF-8 validation is done: the bytes are adopted as-is. Used to
+    /// wrap a buffer read from the outside world (e.g. `fs::read`).
+    pub proc from_bytes(bytes: Vec<u8>) String {
+        return String { buf: bytes };
+    }
+
+    /// The number of bytes in the String (not counting any scratch NUL).
+    pub proc len(*self) u64 { return self.buf.len(); }
+    /// The number of bytes the buffer can hold before it must grow.
+    pub proc cap(*self) u64 { return self.buf.cap(); }
+    /// Whether the String holds no bytes.
+    pub proc is_empty(*self) bool { return self.buf.is_empty(); }
+
+    /// Append a single raw byte, growing the buffer if it is full. No UTF-8
+    /// checking is done.
+    pub proc push_byte(*self, b: u8) {
+        self.buf.push(b);
+    }
+
+    /// Append a copy of the bytes of the `str` `text`.
+    pub proc push_str(*self, text: str) {
+        let n: u64 = strlen(text);
+        let src: *u8 = rt_str_as_bytes(text);
+        // one reserve up front, then fill - avoids re-checking capacity per byte.
+        self.buf.reserve(self.len() + n);
+        let i: u64 = 0u64;
+        while (i < n) {
+            self.buf.push(src[i]);
+            i = i + 1u64;
+        }
+    }
+
+    /// f-string desugaring helpers. `f"a {x} b"` lowers (in the parser) to
+    ///     String::new().fstr_lit("a ").fstr_val(x.display()).fstr_lit(" b")
+    /// Each takes the accumulator `self` by value and returns it, so the chain
+    /// threads one owned buffer through with no borrow of a temporary. `fstr_lit`
+    /// appends a literal chunk; `fstr_val` appends an already-rendered value
+    /// (from `x.display()`) and consumes that String. Living on `String` keeps
+    /// the mechanism self-contained - it needs nothing from std/fmt, though the
+    /// `.display()` in an interpolation resolves against `Display` (which the
+    /// prelude re-exports, so `f"..."` needs no import at all). Not meant to be
+    /// called by hand.
+    pub proc fstr_lit(self, piece: str) String {
+        self.push_str(piece);
+        return self;
+    }
+    pub proc fstr_val(self, piece: String) String {
+        self.push_str(piece.as_str());
+        return self;
+    }
+
+    pub proc push_string(*self, other: *String) {
+        let n: u64 = other.len();
+        let src: *u8 = other.buf.as_ptr();
+        self.buf.reserve(self.len() + n);
+        let i: u64 = 0u64;
+        while (i < n) {
+            self.buf.push(src[i]);
+            i = i + 1u64;
+        }
+    }
+
+    /// Logically empty the String without shrinking its buffer. The bytes own
+    /// nothing, so this just resets the length.
+    pub proc clear(*self) { self.buf.clear(); }
+
+    /// Whether this String and `other` hold exactly the same bytes.
+    pub proc eq(*self, other: *String) bool {
+        if (self.len() != other.len()) { return false; }
+        let n: u64 = self.len();
+        let i: u64 = 0u64;
+        while (i < n) {
+            if (self.buf.get(i).unwrap() != other.buf.get(i).unwrap()) { return false; }
+            i = i + 1u64;
+        }
+        return true;
+    }
+
+    /// Split into segments on every occurrence of the byte `sep`, returning them
+    /// as owned `String`s. Like Rust's `str::split`, the separators are consumed
+    /// and empty segments are kept: `n` separators always yield `n + 1` segments,
+    /// so a leading/trailing `sep` produces an empty segment at that end and a run
+    /// of `sep`s produces empty segments between them. Splitting an empty String
+    /// yields a single empty segment. Each segment owns a fresh copy of its bytes.
+    pub proc split(*self, sep: u8) Vec<String> {
+        let result: Vec<String> = Vec::<String>::new();
+        let n: u64 = self.len();
+        let start: u64 = 0u64;
+        let i: u64 = 0u64;
+        // walk one past the end so the final segment [start, n) flushes uniformly;
+        // `||` short-circuits, so `get(i)` is never read at `i == n`.
+        while (i <= n) {
+            if (i == n || self.buf.get(i).unwrap() == sep) {
+                // build this segment as a fresh local, then move it into `result`;
+                // a new binding each flush keeps the ownership pass happy.
+                let seg: String = String::new();
+                let j: u64 = start;
+                while (j < i) {
+                    seg.push_byte(self.buf.get(j).unwrap());
+                    j = j + 1u64;
+                }
+                result.push(seg);
+                start = i + 1u64;
+            }
+            i = i + 1u64;
+        }
+        return result;
+    }
+
+    /// A read-only pointer to the raw bytes, with no trailing NUL guaranteed -
+    /// exactly `len` bytes are valid. Points into the buffer, so it is invalidated
+    /// by the next mutation or free; for an empty String it is null. Pair it with
+    /// `len` to hand the bytes to a byte-oriented sink like `fs::write`.
+    pub proc as_bytes(*self) *u8 {
+        return self.buf.as_ptr();
+    }
+
+    /// A borrowable, NUL-terminated `str` view of the bytes, valid until the next
+    /// mutation or free. Writes a scratch NUL one past the last byte (growing the
+    /// buffer if needed) without changing the logical length, so the returned
+    /// `str` stops exactly where the String's bytes do.
+    pub proc as_str(*self) str {
+        self.buf.reserve(self.len() + 1u64);
+        self.buf.set(self.len(), 0u8);
+        return rt_bytes_as_str(self.buf.as_ptr());
+    }
+}
+
+// A `String`'s clone is a fresh String seeded from its own bytes - the same body
+// as `Display for String`, and for the same reason: `from_str` copies the bytes
+// into a buffer the result owns independently.
+extend String: Clone {
+    proc clone(*self) String { return String::from_str(self.as_str()); }
+}

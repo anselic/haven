@@ -184,7 +184,7 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
     };
     let tokens = arena.alloc_slice_fill_iter(tokens);
     let (parsed, parse_errs) = parse::parse(key, src_ref.len(), tokens);
-    let (_imports, items) = match parsed {
+    let (_mod_attrs, _imports, items) = match parsed {
         Some(pi) if parse_errs.is_empty() => pi,
         _ => return Err(()),
     };

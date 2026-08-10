@@ -1,10 +1,9 @@
 // A program's own `trait Delete` is an ordinary trait.
 //
-// The compiler knows exactly one trait by that spelling - the prelude's - and it
-// knows it by *identity*: the module loader resolves the lang item out of the
-// prelude's own symbol table and records it in `Defs`, so no later stage has to
-// re-recognize the prelude from a module key string. A trait a program declares
-// for itself therefore stays a plain trait whatever it is named.
+// The destructor trait is identified by the `@lang(delete)` the stdlib marks it
+// with, not by its name and not by the module it is declared in. So the name is
+// free: declaring one here shadows the prelude's in this module's scope and
+// still means nothing to the compiler.
 //
 // So `Token` keeps every non-owner property: it stays `Copy` (the call below
 // does not move it, and it is still readable afterwards), nothing synthesizes a

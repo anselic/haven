@@ -1,0 +1,107 @@
+/// std/math: scalar math constants and the C standard-library math functions.
+///
+/// Two layers: a handful of convenience constants/helpers written in haven, and
+/// direct bindings to libm. Every libm function comes in an `f64` form and an
+/// `f32` form (suffixed `f`) so single-precision DSP code never widens to double.
+/// Angles are in radians throughout.
+
+/// `x` squared (`x * x`).
+pub proc square(x: f64) f64 { return x * x; }
+/// The constant pi as an `f64`.
+pub proc pi() f64 { return 3.14159265358979323846f64; }
+/// The constant tau (2*pi) as an `f64`.
+pub proc tau() f64 { return 6.28318530717958647692f64; }
+/// The constant pi as an `f32`.
+pub proc pi_f32() f32 { return 3.14159265358979323846f32; }
+/// The constant tau (2*pi) as an `f32`.
+pub proc tau_f32() f32 { return 6.28318530717958647692f32; }
+
+/// Clamp `x` into the inclusive range [lo, hi].
+pub proc clampf(x: f64, lo: f64, hi: f64) f64 {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+// libm, linked via -lm. the extern name IS the C link symbol, so these bind
+// straight to the platform math library; no wrapper runtime is involved.
+
+// f64 (C `double`) variants:
+/// Sine of `x` (radians).
+@alloc(false) pub extern sin(x: f64) f64;
+/// Cosine of `x` (radians).
+@alloc(false) pub extern cos(x: f64) f64;
+/// Tangent of `x` (radians).
+@alloc(false) pub extern tan(x: f64) f64;
+/// Arcsine of `x`, in radians. `x` must be in [-1, 1].
+@alloc(false) pub extern asin(x: f64) f64;
+/// Arccosine of `x`, in radians. `x` must be in [-1, 1].
+@alloc(false) pub extern acos(x: f64) f64;
+/// Arctangent of `x`, in radians.
+@alloc(false) pub extern atan(x: f64) f64;
+/// Arctangent of `y/x` in radians, using the signs of both to pick the quadrant.
+@alloc(false) pub extern atan2(y: f64, x: f64) f64;
+/// Hyperbolic sine of `x`.
+@alloc(false) pub extern sinh(x: f64) f64;
+/// Hyperbolic cosine of `x`.
+@alloc(false) pub extern cosh(x: f64) f64;
+/// Hyperbolic tangent of `x`.
+@alloc(false) pub extern tanh(x: f64) f64;
+/// e raised to the power `x`.
+@alloc(false) pub extern exp(x: f64) f64;
+/// Natural (base-e) logarithm of `x`. `x` must be positive.
+@alloc(false) pub extern log(x: f64) f64;
+/// Base-2 logarithm of `x`. `x` must be positive.
+@alloc(false) pub extern log2(x: f64) f64;
+/// Base-10 logarithm of `x`. `x` must be positive.
+@alloc(false) pub extern log10(x: f64) f64;
+/// `base` raised to the power `exp`.
+@alloc(false) pub extern pow(base: f64, exp: f64) f64;
+/// Square root of `x`. `x` must be non-negative.
+@alloc(false) pub extern sqrt(x: f64) f64;
+/// Cube root of `x`.
+@alloc(false) pub extern cbrt(x: f64) f64;
+/// Absolute value of `x`.
+@alloc(false) pub extern fabs(x: f64) f64;
+/// Largest integer value not greater than `x`, as an `f64`.
+@alloc(false) pub extern floor(x: f64) f64;
+/// Smallest integer value not less than `x`, as an `f64`.
+@alloc(false) pub extern ceil(x: f64) f64;
+/// `x` rounded to the nearest integer, halves away from zero, as an `f64`.
+@alloc(false) pub extern round(x: f64) f64;
+/// `x` truncated toward zero, as an `f64`.
+@alloc(false) pub extern trunc(x: f64) f64;
+/// Floating-point remainder of `x / y`, with the sign of `x`.
+@alloc(false) pub extern fmod(x: f64, y: f64) f64;
+
+// f32 (C `float`) variants, for single-precision DSP:
+/// Sine of `x` (radians), single precision.
+@alloc(false) pub extern sinf(x: f32) f32;
+/// Cosine of `x` (radians), single precision.
+@alloc(false) pub extern cosf(x: f32) f32;
+/// Tangent of `x` (radians), single precision.
+@alloc(false) pub extern tanf(x: f32) f32;
+/// Arctangent of `y/x` (radians), quadrant-aware, single precision.
+@alloc(false) pub extern atan2f(y: f32, x: f32) f32;
+/// Hyperbolic tangent of `x`, single precision.
+@alloc(false) pub extern tanhf(x: f32) f32;
+/// e raised to the power `x`, single precision.
+@alloc(false) pub extern expf(x: f32) f32;
+/// Natural (base-e) logarithm of `x`, single precision. `x` must be positive.
+@alloc(false) pub extern logf(x: f32) f32;
+/// Base-2 logarithm of `x`, single precision. `x` must be positive.
+@alloc(false) pub extern log2f(x: f32) f32;
+/// Base-10 logarithm of `x`, single precision. `x` must be positive.
+@alloc(false) pub extern log10f(x: f32) f32;
+/// `base` raised to the power `exp`, single precision.
+@alloc(false) pub extern powf(base: f32, exp: f32) f32;
+/// Square root of `x`, single precision. `x` must be non-negative.
+@alloc(false) pub extern sqrtf(x: f32) f32;
+/// Absolute value of `x`, single precision.
+@alloc(false) pub extern fabsf(x: f32) f32;
+/// Largest integer value not greater than `x`, single precision.
+@alloc(false) pub extern floorf(x: f32) f32;
+/// Smallest integer value not less than `x`, single precision.
+@alloc(false) pub extern ceilf(x: f32) f32;
+/// Floating-point remainder of `x / y` with the sign of `x`, single precision.
+@alloc(false) pub extern fmodf(x: f32, y: f32) f32;

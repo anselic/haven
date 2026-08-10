@@ -1,0 +1,12 @@
+// `@prelude` says something about a *file*, so it is written `@!prelude` and
+// belongs to no item. Without the `!` it is an ordinary item attribute, and an
+// ordinary item attribute at file scope attaches to whatever declaration comes
+// next - here `main` would silently absorb a mark meant for the module, and the
+// program would compile with no prelude having been claimed at all.
+//@ error: it applies to a module, and is written `@!prelude`
+
+@prelude
+@export
+proc main() i32 {
+    return 0;
+}

@@ -1204,15 +1204,17 @@ fn parse_stmt<'tks, 'src: 'tks>()
     })
 }
 
-fn parse_attribute<'tks, 'src: 'tks>()
+/// Everything in an attribute after the sigil: `name` and an optional
+/// `(value)`. Shared so that the item and module spellings cannot drift into
+/// accepting different values.
+fn attribute_tail<'tks, 'src: 'tks>()
 -> impl Parser<
     'tks,
     MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    Attribute<'src>,
+    AttributeNode<'src>,
     extra::Err<Rich<'tks, Token<'src>, Span>>,
 > {
-    just(Token::At)
-        .ignore_then(select_ref! { Token::Var(ident) => ident })
+    select_ref! { Token::Var(ident) => ident }
         .then(
             just(Token::LParen)
                 .ignore_then(select_ref! {
@@ -1225,6 +1227,41 @@ fn parse_attribute<'tks, 'src: 'tks>()
                 .or_not()
         )
         .map(|(name, value)| AttributeNode::new(name, value))
+        .boxed()
+}
+
+/// An attribute on the item that follows it: `@name` or `@name(value)`.
+fn parse_attribute<'tks, 'src: 'tks>()
+-> impl Parser<
+    'tks,
+    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
+    Attribute<'src>,
+    extra::Err<Rich<'tks, Token<'src>, Span>>,
+> {
+    just(Token::At)
+        .ignore_then(attribute_tail())
+        .map_with(|attr, e| Metadata::new(attr, e.span()))
+        .boxed()
+}
+
+/// An attribute on the *enclosing module*: `@!name`. Says something about the
+/// file it appears in rather than about any declaration, which is what the `!`
+/// marks - an ordinary `@name` sitting at file scope would silently attach to
+/// whatever item came next, so the two spellings have to be distinguishable
+/// before the file's items are even known.
+///
+/// It parses anywhere an item may appear. Convention is the top of the file,
+/// but position carries no meaning: the statement is about the whole module.
+fn parse_mod_attribute<'tks, 'src: 'tks>()
+-> impl Parser<
+    'tks,
+    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
+    Attribute<'src>,
+    extra::Err<Rich<'tks, Token<'src>, Span>>,
+> {
+    just(Token::At)
+        .ignore_then(just(Token::UnaryOp(UnaryOp::Not)))
+        .ignore_then(attribute_tail())
         .map_with(|attr, e| Metadata::new(attr, e.span()))
         .boxed()
 }
@@ -1664,14 +1701,12 @@ fn parse_toplevel<'tks, 'src: 'tks>()
             (TopLevelNode::Extend { target, trait_, where_bounds, assoc_bindings, methods }, Vec::new())
         });
 
-    // `[pub] trait Name { proc m(...) Ret; ... }`. Like `extend`, `trait` lexes as
-    // a `Var` (not a reserved keyword), so match it by text - which is why this
-    // can't use the shared `item_header` combinator (that one ends with a real
-    // keyword token). The `pub` marker is spelled out here instead; attributes on
-    // a trait are still not accepted, since `TopLevelNode::Trait` has nowhere to
-    // put them. `pub` is real: trait names are module-namespaced like struct and
-    // enum names, so a private trait is invisible to other modules rather than
-    // merely un-importable.
+    // `[attrs] [pub] trait Name { proc m(...) Ret; ... }`. Like `extend`, `trait`
+    // lexes as a `Var` (not a reserved keyword), so it is matched by text rather
+    // than by a token - but the header before it is the same one every other item
+    // has, so `item_header` covers it. `pub` is real: trait names are
+    // module-namespaced like struct and enum names, so a private trait is
+    // invisible to other modules rather than merely un-importable.
     // a `trait` body item: an associated-type requirement `type Item;` (tried
     // first, since it is the only one that leads with `type`) or a method sig.
     let assoc_decl = select_ref! { Token::Var(s) if *s == "type" => () }
@@ -1682,7 +1717,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         assoc_decl,
         parse_trait_method().map(TraitItem::Method),
     ));
-    let trait_ = just(Token::Pub).or_not().map(|o| o.is_some())
+    let trait_ = item_header.clone()
         .then_ignore(select_ref! { Token::Var(s) if *s == "trait" => () })
         .then(var.map(|s| *s))
         .then(
@@ -1691,7 +1726,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|((is_pub, name), items)| {
+        .map(|(((attributes, is_pub), name), items)| {
             let mut assoc_types = Vec::new();
             let mut methods = Vec::new();
             for it in items {
@@ -1700,7 +1735,9 @@ fn parse_toplevel<'tks, 'src: 'tks>()
                     TraitItem::Method(m) => methods.push(m),
                 }
             }
-            (TopLevelNode::Trait { name, def: DefId::UNRESOLVED, is_pub, assoc_types, methods }, Vec::new())
+            (TopLevelNode::Trait {
+                name, def: DefId::UNRESOLVED, is_pub, attributes, assoc_types, methods,
+            }, Vec::new())
         });
 
     choice((
@@ -1794,20 +1831,27 @@ fn parse_import<'tks, 'src: 'tks>()
         .boxed()
 }
 
-/// One item at file scope: an `import` or a real top-level definition. parsed
-/// from the same stream and partitioned by `parse`.
+/// One item at file scope: a module attribute, an `import`, or a real top-level
+/// definition. parsed from the same stream and partitioned by `parse`.
 enum FileItem<'a> {
+    ModAttr(Attribute<'a>),
     Import(Import<'a>),
     // one source item can expand to several top-levels: a struct/enum with a body
     // of methods yields the type node plus a synthesized `Extend`.
     Items(Vec<TopLevel<'a>>),
 }
 
+/// Parse one file into its module attributes, its imports, and its items.
 pub fn parse<'a>(file: FileId, len: usize, tokens: &'a [Metadata<Token<'a>>]) -> (
-    Option<(Vec<Import<'a>>, Vec<TopLevel<'a>>)>,
+    Option<(Vec<Attribute<'a>>, Vec<Import<'a>>, Vec<TopLevel<'a>>)>,
     Vec<chumsky::error::Rich<'a, Token<'a>, Span>>,
 ) {
     let (out, errs) = choice((
+            // first: `@!` is the only file-scope construct starting with two
+            // fixed tokens, so trying it here costs nothing and keeps a module
+            // attribute from being offered to `parse_toplevel` as a malformed
+            // item header.
+            parse_mod_attribute().map(FileItem::ModAttr),
             parse_import().map(FileItem::Import),
             parse_toplevel().map(FileItem::Items),
         ))
@@ -1821,15 +1865,17 @@ pub fn parse<'a>(file: FileId, len: usize, tokens: &'a [Metadata<Token<'a>>]) ->
         .into_output_errors();
 
     let split = out.map(|items| {
+        let mut mod_attrs = Vec::new();
         let mut imports = Vec::new();
         let mut tops = Vec::new();
         for item in items {
             match item {
+                FileItem::ModAttr(a) => mod_attrs.push(a),
                 FileItem::Import(i) => imports.push(i),
                 FileItem::Items(ts) => tops.extend(ts),
             }
         }
-        (imports, tops)
+        (mod_attrs, imports, tops)
     });
 
     (split, errs)

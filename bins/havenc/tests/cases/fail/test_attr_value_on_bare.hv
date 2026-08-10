@@ -1,0 +1,7 @@
+// `@export` carries no value. One written here was dropped on the floor.
+//@ error: takes no value
+
+@export(true)
+proc main() i32 {
+    return 0;
+}

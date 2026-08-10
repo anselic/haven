@@ -1,24 +1,11 @@
-/// std/prelude: the automatically imported module.
-///
-/// The prelude is imported implicitly into every module, so these items are in
-/// scope everywhere without an `import`. It is deliberately tiny.
-///
-/// The `@!prelude` below is what says so. It is a *module* attribute - the `!`
-/// marks it as a statement about this file rather than about the declaration
-/// that follows it - and it is the whole reason this module is the prelude:
-/// nothing keys off the name `prelude` or off where the file sits.
-@!prelude
+@prelude
 
-// backing symbols from crt/rt.c (always linked in). these are raw runtime
-// plumbing, kept private; call the `pub` wrappers below instead.
-extern strlen(s: str) u64;
-
-// re-exports
 pub import std/clone { Clone }
 pub import std/fmt { Display }
-import std/fmt { display_print, display_println }
 pub import std/string { String }
 pub import std/vec { Vec }
+
+import std/fmt { display_print, display_println }
 
 /// A destructor. Implement it to give a type ownership of a resource:
 ///
@@ -26,10 +13,9 @@ pub import std/vec { Vec }
 ///         proc delete(*self) { dealloc::<u8>(self.data, self.cap); }
 ///     }
 ///
-/// This is a *lang item*: the `@lang(delete)` below is what tells the compiler
-/// which trait this is, so implementing it is a statement about ownership and
-/// not merely a conformance. The mark is the whole identification - the name and
-/// the module are ordinary, so your own `trait Delete` is an ordinary trait.
+/// This is a *lang item*: the compiler looks this exact trait up (by name, in
+/// the prelude) and treats implementing it as a statement about ownership, not
+/// merely as conformance.
 ///
 ///   * the type stops being `Copy`, and so does anything holding one, so
 ///     assigning or passing it by value **moves** it and the source can no
@@ -45,15 +31,11 @@ pub trait Delete {
     proc delete(*self);
 }
 
+// backing symbols from crt/rt.c (always linked in)
+extern strlen(s: str) u64;
 extern rt_puts(s: str) void;
-
 extern rt_slice_len<T>(slice: *[T]) u64;
 extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];
-
-// The runtime target of the `abort(msg)` intrinsic. Declared here so a `declare`
-// for it is always in scope; the intrinsic lowers to a direct call to it. Not
-// called directly from haven - use `abort("...")`, whose result type is `!`.
-extern rt_abort(msg: str) void;
 
 /// Write `s` to stdout with no trailing newline.
 pub proc print<T: Display>(x: T) void {

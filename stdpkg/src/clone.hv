@@ -1,0 +1,52 @@
+/// std/clone: `Clone`, a trait for making an independent, deeply-copied duplicate
+/// of a value.
+///
+/// `Clone` is the dual of the prelude's `Delete`. `Delete` *releases* an owned
+/// resource (and, by existing, makes a type move rather than alias); `Clone`
+/// *duplicates* one into a second owner that is wholly independent of the first,
+/// so destroying either leaves the other intact. For a `Copy` type - an integer,
+/// a plain struct - a duplicate is just a bitwise copy, and `clone` returns
+/// `*self`. For an owning type, a bitwise copy would alias the heap buffer and
+/// double-free it, so `clone` must genuinely re-allocate: `String::clone` copies
+/// the bytes, `Vec<T>::clone` allocates a new buffer and clones each element.
+///
+///     let a: String = String::from_str("hi");
+///     let b: String = a.clone();   // a still usable; a and b own separate buffers
+///
+/// Unlike `Delete`, this is an ordinary trait, not a lang item: nothing in the
+/// compiler knows its name, and a clone never happens implicitly. You always
+/// write `.clone()`, so every heap copy is visible at the call site - which is
+/// exactly the point. Because both the original and the clone are ordinary
+/// owners, the compiler's automatic `delete` runs once on each, with no special
+/// handling here.
+///
+/// Implement it for your own types to make them duplicable the same way:
+///
+///     extend Point: Clone {
+///         proc clone(*self) Point { return Point { x: self.x, y: self.y }; }
+///     }
+
+import std/string { String }
+import std/vec { Vec }
+
+pub trait Clone {
+    proc clone(*self) Self;
+}
+
+// --- scalars
+//
+// Every scalar is `Copy`, so its clone is the value itself. `str` is a borrowed
+// view (also `Copy`), and cloning it yields the same view - copying the *text*
+// into an owned buffer is `String::from_str`, a different operation.
+
+extend u8:  Clone { proc clone(*self) u8  { return *self; } }
+extend u16: Clone { proc clone(*self) u16 { return *self; } }
+extend u32: Clone { proc clone(*self) u32 { return *self; } }
+extend u64: Clone { proc clone(*self) u64 { return *self; } }
+extend i16: Clone { proc clone(*self) i16 { return *self; } }
+extend i32: Clone { proc clone(*self) i32 { return *self; } }
+extend i64: Clone { proc clone(*self) i64 { return *self; } }
+extend f32: Clone { proc clone(*self) f32 { return *self; } }
+extend f64: Clone { proc clone(*self) f64 { return *self; } }
+extend bool: Clone { proc clone(*self) bool { return *self; } }
+extend str: Clone { proc clone(*self) str { return *self; } }

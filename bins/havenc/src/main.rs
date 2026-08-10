@@ -7,6 +7,7 @@ use clap::Parser;
 //   haven_mid    - typecheck, safety-check, monomorphize, lower to MIL
 //   haven_back   - ABI/layout, LLVM IR emission
 use haven_common::{ast, diag};
+use haven_common::defs::Origin;
 use haven_front::module;
 use haven_mid::{typecheck, mono, own, safecheck, mil};
 use haven_back::llvm;
@@ -401,11 +402,27 @@ fn write_lib_metadata(
 
     let mut modules = Vec::new();
     for m in defs.modules() {
-        if m.key.starts_with("std/") { continue; }
+        // a library artifact carries this package's own source and nothing else.
+        // Everything else `load_and_merge` pulled in is already available to the
+        // consumer from the same place this build got it - the compiler's
+        // embedded std, or the dependency's own `.hvmeta` - and shipping a second
+        // copy inside this one would give the consumer two of it.
+        //
+        // Asked of `Origin` rather than of the key. Testing `!key.starts_with(
+        // "std/")` looks equivalent and is not: a *dependency* module's key is
+        // `foo/geo.hv`, which passes that test, is not under this package's root,
+        // and so tripped the error below - making a library that has dependencies
+        // of its own impossible to build.
+        if m.origin != Origin::Own { continue; }
         let rel = match root.as_deref()
             .and_then(|r| std::path::Path::new(&m.key).strip_prefix(r).ok())
         {
             Some(rel) => rel.to_string_lossy().replace('\\', "/"),
+            // unreachable in practice - `Defs::add_module` already refuses a
+            // module of this package that resolves outside its root, since it
+            // has no location-independent slug to give it. Kept as the local
+            // statement of the same invariant, this being the point where a
+            // location would otherwise be written into a shipped artifact.
             None => {
                 diag::report_plain("Error", &format!(
                     "library module '{}' is outside the package root; cannot record \

@@ -1,0 +1,12 @@
+// The `@!` spelling is not an escape from the attribute table: a module is a
+// target like any other, so an item attribute written as a module one is caught
+// by the same rule that catches `@alloc` on a struct. `@!export` has nothing to
+// export - a module is not a symbol.
+//@ error: `@export` cannot be written on a module
+
+@!export
+
+@export
+proc main() i32 {
+    return 0;
+}

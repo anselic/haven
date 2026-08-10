@@ -1,0 +1,149 @@
+/// std/simd: portable wrappers over the compiler's SIMD intrinsics.
+///
+/// A `simd<T, N>` type is a fixed-width vector of `N` lanes of the numeric
+/// scalar `T` (`iN`/`uN`/`fN`); arithmetic on it is applied lane-wise and lowers
+/// to hardware vector instructions. The lane count `N` is a `const` generic
+/// resolved at monomorphization, so every vector width is a distinct concrete
+/// type with no runtime shape.
+///
+/// Constraints shared by every proc here:
+///   - `T` must be a numeric scalar (`iN`, `uN`, or `fN`) - the valid SIMD
+///     element types. Structs, pointers and `bool` are rejected.
+///   - `N` (a `u64` lane count) must be in `1..=64`.
+///   - The width-changing ops (`simd_concat`, `simd_low`, `simd_high`)
+///     additionally require even lane counts.
+///
+/// Load/store come in two buffer forms, because the underlying intrinsic accepts
+/// either a slice or a raw pointer but haven has no overloading and no slice/
+/// pointer coercion, so one proc can't take both: `simd_load`/`simd_store` over a
+/// bounds-carrying `[T]` slice, and `simd_load_ptr`/`simd_store_ptr` over a raw
+/// `*T` (for DSP loops that already hold a bare pointer, e.g. from `alloc`).
+
+// each proc is a one-line forward to the corresponding `__simd_*` intrinsic; the
+// intrinsic is what the middle-end recognizes and lowers, the wrapper only gives
+// it a stable public name and documentation. because the const generic `N` is
+// forwarded by name into the intrinsic turbofish, mono bakes the concrete lane
+// count straight through with no wrapper frame surviving.
+
+/// Broadcast a scalar into every lane of an `N`-wide vector.
+///
+/// `simd_splat::<f32, 4>(1.0)` yields `simd<f32, 4>` = `(1.0, 1.0, 1.0, 1.0)`.
+/// `x` must have the element type `T`.
+pub proc simd_splat<T, const N: u64>(x: T) simd<T, N> {
+    return __simd_splat::<T, N>(x);
+}
+
+/// Load `N` contiguous elements starting at `offset` into a vector.
+///
+/// Reads `src[offset .. offset + N]` as one `simd<T, N>`. `src` is a slice of
+/// the element type and `offset` is an element (not byte) index; the caller is
+/// responsible for keeping `offset + N` within bounds.
+pub proc simd_load<T, const N: u64>(src: [T], offset: u64) simd<T, N> {
+    return __simd_load::<T, N>(src, offset);
+}
+
+/// Store an `N`-wide vector into `N` contiguous elements starting at `offset`.
+///
+/// Writes `value` to `dst[offset .. offset + N]`. `dst` is a slice of the
+/// element type and `offset` is an element (not byte) index; the caller is
+/// responsible for keeping `offset + N` within bounds.
+pub proc simd_store<T, const N: u64>(dst: [T], offset: u64, value: simd<T, N>) void {
+    __simd_store::<T, N>(dst, offset, value);
+}
+
+/// Load `N` contiguous elements starting at `offset` into a vector, from a raw
+/// pointer.
+///
+/// The `*T` counterpart to `simd_load` for buffers held as bare pointers rather
+/// than slices. Reads `src[offset .. offset + N]`; `offset` is an element (not
+/// byte) index and bounds are the caller's responsibility (a raw pointer carries
+/// no length).
+pub proc simd_load_ptr<T, const N: u64>(src: *T, offset: u64) simd<T, N> {
+    return __simd_load::<T, N>(src, offset);
+}
+
+/// Store an `N`-wide vector into `N` contiguous elements starting at `offset`,
+/// through a raw pointer.
+///
+/// The `*T` counterpart to `simd_store`. Writes `value` to
+/// `dst[offset .. offset + N]`; `offset` is an element (not byte) index and
+/// bounds are the caller's responsibility (a raw pointer carries no length).
+pub proc simd_store_ptr<T, const N: u64>(dst: *T, offset: u64, value: simd<T, N>) void {
+    __simd_store::<T, N>(dst, offset, value);
+}
+
+/// Concatenate two `N`-wide vectors into one `M`-wide vector, where `M == 2*N`.
+///
+/// The lanes of `lo` occupy the low half of the result and the lanes of `hi`
+/// the high half. Two const params are needed because the grammar can't spell
+/// `2*N` in a type position: pass the input width `N` and the output width `M`.
+/// `M` must be even and equal to twice `N`.
+///
+/// `simd_concat::<f32, 2, 4>(a, b)` -> `simd<f32, 4>` = `(a0, a1, b0, b1)`.
+pub proc simd_concat<T, const N: u64, const M: u64>(lo: simd<T, N>, hi: simd<T, M>) simd<T, M> {
+    return __simd_concat::<T, M>(lo, hi);
+}
+
+// Two const params are needed because the grammar can't spell `N/2` in a type
+// position yet so we pass the input width `N` and the (narrower) output width `M`
+/// Extract the low half of a vector: the first `M` lanes of an `N`-wide input,
+/// where `M < N`. Both must be even (preferably M = N/2).
+///
+/// `simd_low::<f32, 4, 2>(v)` -> `simd<f32, 2>` = `(v0, v1)`.
+pub proc simd_low<T, const N: u64, const M: u64>(value: simd<T, N>) simd<T, M> {
+    return __simd_low::<T, M>(value);
+}
+
+/// Extract the high half of a vector: the last `M` lanes of an `N`-wide input,
+/// where `M < N`. Both must be even (preferably M = N/2).
+///
+/// `simd_high::<f32, 4, 2>(v)` -> `simd<f32, 2>` = `(v2, v3)`.
+pub proc simd_high<T, const N: u64, const M: u64>(value: simd<T, N>) simd<T, M> {
+    return __simd_high::<T, M>(value);
+}
+
+// Composite helpers made with the above primitives.
+
+/// Copy `count` elements from `src` to `dst`, `N` lanes at a time (slices).
+pub proc simd_copy<T, const N: u64>(dst: [T], src: [T], count: u64) void {
+    let i: u64 = 0u64;
+    while (i + N <= count) {
+        let v: simd<T, N> = simd_load::<T, N>(src, i);
+        simd_store::<T, N>(dst, i, v);
+        i = i + N;
+    }
+    while (i < count) {
+        dst[i] = src[i];
+        i = i + 1u64;
+    }
+}
+
+/// Copy `count` elements from `src` to `dst`, `N` lanes at a time (raw pointers).
+/// Because raw pointers carry no length, the caller is responsible for ensuring
+/// that `count` is within the bounds of both buffers.
+pub proc simd_copy_ptr<T, const N: u64>(dst: *T, src: *T, count: u64) void {
+    let i: u64 = 0u64;
+    while (i + N <= count) {
+        let v: simd<T, N> = simd_load_ptr::<T, N>(src, i);
+        simd_store_ptr::<T, N>(dst, i, v);
+        i = i + N;
+    }
+    while (i < count) {
+        dst[i] = src[i];
+        i = i + 1u64;
+    }
+}
+
+/// Set `count` elements of `dst` to `value`, `N` lanes at a time (slices).
+pub proc simd_fill<T, const N: u64>(dst: [T], value: T, count: u64) void {
+    let v: simd<T, N> = simd_splat::<T, N>(value);
+    let i: u64 = 0u64;
+    while (i + N <= count) {
+        simd_store::<T, N>(dst, i, v);
+        i = i + N;
+    }
+    while (i < count) {
+        dst[i] = value;
+        i = i + 1u64;
+    }
+}

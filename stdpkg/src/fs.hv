@@ -1,0 +1,176 @@
+/// std/fs: filesystem operations, for build scripts and tooling.
+///
+/// A small, portable set of file and directory operations - read/write a whole
+/// file, copy, make/remove a directory, rename, and existence queries - enough
+/// to drive a post-build `build.hv`. Paths are plain `str`s.
+///
+/// Fallible calls return a `Result`: the value on `Ok`, or an `FsError` carrying
+/// the underlying C `errno` on `Err`. Ask an `FsError` for its `message()` (a
+/// human-readable string) or its raw `errno()`. The pure queries `exists` and
+/// `is_dir` can't meaningfully fail, so they just return a `bool`.
+///
+///     import std/fs
+///     import std/result { Result }
+///
+///     match (fs::read("config.txt")) {
+///         Result::Ok(text) -> { /* use text */ }
+///         Result::Err(e)   -> { println(e.message()); }
+///     }
+
+// Every operation is a thin wrapper over a platform-normalized `rt_fs_*` shim in
+// crt/rt.c (see there for the Windows/POSIX differences it papers over). The
+// shims report failure as a nonzero `errno`; the wrappers turn that into an
+// `Err(FsError)`. `read` adopts the shim's malloc'd buffer straight into a
+// `Vec<u8>` via `from_raw_parts` (no copy), since rt_alloc and libc malloc are
+// the same allocator.
+
+import std/result { Result, Unit }
+import std/string { String }
+import std/vec { Vec }
+
+extern rt_fs_read(path: str, out_len: *u64, out_err: *i32) *u8;
+extern rt_fs_write(path: str, data: *u8, len: u64, out_written: *u64) i32;
+extern rt_fs_copy(src: str, dst: str, out_bytes: *u64) i32;
+extern rt_fs_mkdir(path: str) i32;
+extern rt_fs_remove(path: str) i32;
+extern rt_fs_rename(src: str, dst: str) i32;
+extern rt_fs_exists(path: str) i32;
+extern rt_fs_is_dir(path: str) i32;
+extern rt_fs_strerror(code: i32) str;
+
+/// A filesystem error, wrapping the C `errno` captured where the call failed.
+pub struct FsError {
+    code: i32,
+
+    /// The raw C `errno` for this error (e.g. `2` for "no such file").
+    pub proc errno(*self) i32 { return self.code; }
+
+    /// A borrowable, human-readable description of the error, from `strerror`.
+    /// Valid until the next `strerror` call; copy it into a `String` to keep it.
+    pub proc message(*self) str { return rt_fs_strerror(self.code); }
+}
+
+/// Read the entire contents of the file at `path` into an owned `String` (with
+/// no UTF-8 validation - treat the bytes as raw unless you know they are text).
+pub proc read(path: str) Result<String, FsError> {
+    let len: u64 = 0u64;
+    let err: i32 = 0i32;
+    let buf: *u8 = rt_fs_read(path, &len, &err);
+    if (buf == null::<*u8>()) {
+        return Result::Err::<String, FsError>(FsError { code: err });
+    }
+    // adopt the malloc'd buffer directly: `len` bytes are live, and the shim over-
+    // allocated one byte for the NUL, so the true capacity is at least `len + 1`.
+    let bytes: Vec<u8> = Vec::<u8>::from_raw_parts(buf, len, len + 1u64);
+    return Result::Ok::<String, FsError>(String::from_bytes(bytes));
+}
+
+/// Write the bytes of `contents` to `path`, creating it or truncating an existing
+/// file. On success yields the number of bytes written. Borrows `contents`.
+pub proc write(path: str, contents: *String) Result<u64, FsError> {
+    let written: u64 = 0u64;
+    let data: *u8 = contents.as_bytes();
+    let e: i32 = rt_fs_write(path, data, contents.len(), &written);
+    if (e != 0i32) {
+        return Result::Err::<u64, FsError>(FsError { code: e });
+    }
+    return Result::Ok::<u64, FsError>(written);
+}
+
+/// Copy the file `src` to `dst`, creating or truncating `dst`. On success yields
+/// the number of bytes copied.
+pub proc copy(src: str, dst: str) Result<u64, FsError> {
+    let bytes: u64 = 0u64;
+    let e: i32 = rt_fs_copy(src, dst, &bytes);
+    if (e != 0i32) {
+        return Result::Err::<u64, FsError>(FsError { code: e });
+    }
+    return Result::Ok::<u64, FsError>(bytes);
+}
+
+/// Create the directory `path`. Fails if it already exists or a parent is
+/// missing (this creates a single level, not the whole chain).
+pub proc mkdir(path: str) Result<Unit, FsError> {
+    let e: i32 = rt_fs_mkdir(path);
+    if (e != 0i32) {
+        return Result::Err::<Unit, FsError>(FsError { code: e });
+    }
+    return Result::Ok::<Unit, FsError>(Unit::Unit);
+}
+
+/// Create the directory `path` and any missing parents, like Rust's
+/// `fs::create_dir_all`. Components are split on `/` (the separator this project
+/// uses throughout), and each prefix is created in turn; a level that already
+/// exists as a directory is not an error, so calling it on an existing tree is a
+/// no-op. Only a genuine failure - a missing permission, a parent that is a file,
+/// etc. - yields `Err`. A leading `/` is kept (absolute paths), and repeated or
+/// trailing separators collapse away.
+pub proc mkdir_all(path: str) Result<Unit, FsError> {
+    let full: String = String::from_str(path);
+    let parts: Vec<String> = full.split(47u8);  // '/'
+    let acc: String = String::new();            // the prefix built up so far
+    let ends_sep: bool = false;                 // does `acc` already end with '/'?
+    let n: u64 = parts.len();
+    let i: u64 = 0u64;
+    while (i < n) {
+        let part: *String = parts.get_ptr(i).unwrap();
+        if (part.is_empty()) {
+            // a leading empty component means an absolute path ("/..."): keep the
+            // root slash. Interior/trailing empties come from "//" or a trailing
+            // "/", and collapse away.
+            if (i == 0u64) {
+                acc.push_byte(47u8);
+                ends_sep = true;
+            }
+            i = i + 1u64;
+            continue;
+        }
+        // join onto the prefix with a separator, unless there is nothing to join
+        // to yet or one is already there.
+        if (!acc.is_empty() && !ends_sep) {
+            acc.push_byte(47u8);
+        }
+        acc.push_string(part);
+        ends_sep = false;
+        // create this prefix; an already-present directory is fine, anything else
+        // (checked via `is_dir` so we don't depend on a specific errno) is fatal.
+        match (mkdir(acc.as_str())) {
+            Result::Ok(_)  -> {}
+            Result::Err(e) -> {
+                if (!is_dir(acc.as_str())) {
+                    return Result::Err::<Unit, FsError>(e);
+                }
+            }
+        }
+        i = i + 1u64;
+    }
+    return Result::Ok::<Unit, FsError>(Unit::Unit);
+}
+
+/// Remove the file or empty directory at `path`.
+pub proc remove(path: str) Result<Unit, FsError> {
+    let e: i32 = rt_fs_remove(path);
+    if (e != 0i32) {
+        return Result::Err::<Unit, FsError>(FsError { code: e });
+    }
+    return Result::Ok::<Unit, FsError>(Unit::Unit);
+}
+
+/// Rename (or move) `src` to `dst`.
+pub proc rename(src: str, dst: str) Result<Unit, FsError> {
+    let e: i32 = rt_fs_rename(src, dst);
+    if (e != 0i32) {
+        return Result::Err::<Unit, FsError>(FsError { code: e });
+    }
+    return Result::Ok::<Unit, FsError>(Unit::Unit);
+}
+
+/// Whether anything (file or directory) exists at `path`.
+pub proc exists(path: str) bool {
+    return rt_fs_exists(path) == 1i32;
+}
+
+/// Whether `path` exists and is a directory.
+pub proc is_dir(path: str) bool {
+    return rt_fs_is_dir(path) == 1i32;
+}

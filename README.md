@@ -21,6 +21,7 @@ This repository includes:
 
 Install the binaries using the provided `install.py` script:
 ```shell
+$ cargo build --release
 $ python install.py [--debug] [--path <install_path>]
 # To remove the installed binaries with the script, you can also run:
 $ python install.py --remove [--path <install_path>]

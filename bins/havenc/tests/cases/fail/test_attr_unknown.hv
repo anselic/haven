@@ -1,0 +1,8 @@
+// An attribute the compiler has never heard of used to parse and then do
+// nothing, so a typo silently removed whatever the author meant to say.
+//@ error: unknown attribute `@expont`
+
+@expont
+proc main() i32 {
+    return 0;
+}
