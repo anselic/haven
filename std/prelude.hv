@@ -50,10 +50,16 @@ extern rt_puts(s: str) void;
 extern rt_slice_len<T>(slice: *[T]) u64;
 extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];
 
-// The runtime target of the `abort(msg)` intrinsic. Declared here so a `declare`
-// for it is always in scope; the intrinsic lowers to a direct call to it. Not
-// called directly from haven - use `abort("...")`, whose result type is `!`.
-extern rt_abort(msg: str) void;
+// The runtime target of `abort`, defined in rt.c. It returns `!`: control never
+// comes back, so a call to it (or to `abort`) diverges - the compiler emits it as
+// a void call followed by `unreachable`.
+extern rt_abort(msg: str) !;
+
+/// Print `msg` and terminate the process. Its result type is the bottom type `!`,
+/// so it coerces to any expected type - `return abort("...")` type-checks in a
+/// function of any return type, and a bare `abort("...")` ends a `match` arm
+/// without a value.
+pub proc abort(msg: str) ! { rt_abort(msg); }
 
 /// Write `s` to stdout with no trailing newline.
 pub proc print<T: Display>(x: T) void {

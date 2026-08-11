@@ -341,14 +341,6 @@ fn typecheck_intrinsic<'a>(
             cx.node_types.insert(expr_id, Type::Void);
             Ok(Type::Void)
         }
-        Intrinsic::Abort => {
-            // abort(msg: str) -> !. Checked (not inferred) so a bare string
-            // literal takes `str`. The result is the bottom type, which
-            // `check_expr` lets coerce to whatever the context expects.
-            check_expr(cx, &Type::Str, &args[0])?;
-            cx.node_types.insert(expr_id, Type::Never);
-            Ok(Type::Never)
-        }
         Intrinsic::SimdSplat => {
             let ty = tys[0].clone();
             let size = consts[0].clone();

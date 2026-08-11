@@ -104,23 +104,6 @@ fn lower_intrinsic<'a>(
             lower_expr(cx, &args[1]);
             Value::Const(Const::Undef)
         }
-        Intrinsic::Abort => {
-            // call the runtime `rt_abort(msg)` (declared as an extern in the
-            // prelude), then terminate the block with `unreachable`: control
-            // never leaves the call. The statement lowerer sees the block is
-            // terminated and drops whatever tail followed (e.g. the enclosing
-            // `return`). The returned value is never observed.
-            let msg = lower_expr(cx, &args[0]);
-            cx.emit(Inst::Call {
-                dst: None,
-                callee: Callee::Direct("rt_abort"),
-                args: vec![(msg, Type::Str)],
-                return_type: Type::Void,
-                sret: None,
-            });
-            cx.terminate(Terminator::Unreachable);
-            Value::Const(Const::Undef)
-        }
         Intrinsic::SimdSplat => {
             let ty = ta_type(type_args, 0);
             let size = ta_const(type_args, 1);

@@ -38,15 +38,6 @@ pub enum Intrinsic {
     /// written generically over `T`.
     DropInPlace,
 
-    /// `abort(msg: str) -> !` : print `msg` and terminate the process. Its
-    /// result type is the bottom type `!`, so it coerces to any expected type -
-    /// `return abort("...")` type-checks in a function of any return type. This
-    /// is what lets a fallible generic accessor bail on the impossible case
-    /// without inventing a value of the return type (e.g. `Option::unwrap`'s
-    /// `None` arm). Lowers to a call to the runtime `rt_abort` followed by an
-    /// `unreachable` terminator.
-    Abort,
-
     /// `__simd_splat::<T, N>(value) -> T where T = simd<T, N>`
     /// e.g. `value = __simd_splat::<f32, 4>(1.0) -> simd<f32, 4> (1.0, 1.0, 1.0, 1.0)`
     SimdSplat,
@@ -74,7 +65,6 @@ impl Intrinsic {
             "ptr_cast" => Some(Self::PtrCast),
             "ptr_write" => Some(Self::PtrWrite),
             "drop_in_place" => Some(Self::DropInPlace),
-            "abort" => Some(Self::Abort),
             "__simd_splat" => Some(Self::SimdSplat),
             "__simd_load" => Some(Self::SimdLoad),
             "__simd_store" => Some(Self::SimdStore),
@@ -95,7 +85,6 @@ impl std::fmt::Display for Intrinsic {
             Self::PtrCast => "ptr_cast",
             Self::PtrWrite => "ptr_write",
             Self::DropInPlace => "drop_in_place",
-            Self::Abort => "abort",
             Self::SimdSplat => "__simd_splat",
             Self::SimdLoad => "__simd_load",
             Self::SimdStore => "__simd_store",
@@ -169,9 +158,6 @@ impl Intrinsic {
             // element type is written once and the argument types follow from it.
             Self::PtrWrite      => (&[Any],     &[],           2),
             Self::DropInPlace   => (&[Any],     &[],           2),
-            // no turbofish, no const params: a single `str` message argument,
-            // checked directly in `typecheck_intrinsic`.
-            Self::Abort         => (&[],        &[],           1),
             Self::SimdSplat     => (&[Numeric], &[LANES],      1),
             Self::SimdLoad      => (&[Numeric], &[LANES],      2),
             Self::SimdStore     => (&[Numeric], &[LANES],      3),
