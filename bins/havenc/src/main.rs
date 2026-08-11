@@ -124,7 +124,7 @@ fn main() {
             // past this point (mono, MIL, LLVM, and the post-mono ownership/alloc
             // checks) operates on concrete instances a lib does not have; those
             // are deferred to the leaf, where instantiation happens.
-            write_lib_metadata(input, &package_name, &defs, &files, &args.output);
+            write_lib_metadata(input, &package_name, &defs, &files, &args.c_file, &args.link_lib, &args.output);
             return;
         } else {
             // expand generics into concrete instances, then re-typecheck the
@@ -235,17 +235,83 @@ fn main() {
                 std::process::exit(0);
             }
 
+            // Turn each dependency's shipped C into machine code the leaf can
+            // link. A `.hvmeta` carries C *source* (it must stay
+            // target-independent), so the leaf is where it becomes an object -
+            // compiled here at -O3 to match the embedded runtime, which
+            // `bins/havenc/build.rs` builds with the `cc` crate at -O3, so a
+            // dependency's runtime does not silently regress against the
+            // compiler's own. Objects rather than a throwaway shared lib, so they
+            // drop into an executable, a shared lib, or a static archive the same
+            // way. Deps are visited in name order so the link line is
+            // reproducible; the temp `.c`/`.o` files are held in `native_temps`
+            // until the link command below has run and read them.
+            let mut native_temps: Vec<tempfile::NamedTempFile> = Vec::new();
+            let mut native_objs: Vec<std::path::PathBuf> = Vec::new();
+            let mut dep_link_libs: Vec<String> = Vec::new();
+            let mut dep_names: Vec<&String> = deps.keys().collect();
+            dep_names.sort();
+            for name in &dep_names {
+                let meta = &deps[*name];
+                for lib in &meta.link_libs {
+                    if !dep_link_libs.iter().any(|l| l == lib) {
+                        dep_link_libs.push(lib.clone());
+                    }
+                }
+                for src in &meta.native {
+                    let mut c_temp = tempfile::Builder::new()
+                        .suffix(".c")
+                        .tempfile()
+                        .expect("Failed to create temp C file");
+                    c_temp.write_all(src.source.as_bytes())
+                        .expect("Failed to write dependency C source to temp file");
+                    let o_temp = tempfile::Builder::new()
+                        .suffix(".o")
+                        .tempfile()
+                        .expect("Failed to create temp object file");
+                    let status = std::process::Command::new(&args.compiler)
+                        .arg("-c")
+                        .arg("-O3")
+                        .arg(c_temp.path())
+                        .arg("-o")
+                        .arg(o_temp.path())
+                        .status()
+                        .expect("Failed to execute compiler for dependency C source");
+                    if !status.success() {
+                        eprintln!(
+                            "Compiler exited with non-zero status compiling '{}' from dependency '{}': {}",
+                            src.name, name, status);
+                        std::process::exit(1);
+                    }
+                    native_objs.push(o_temp.path().to_path_buf());
+                    native_temps.push(c_temp);
+                    native_temps.push(o_temp);
+                }
+            }
+            // `-l` flags for the libraries the deps declared (e.g. std's
+            // `libs = ["m"]`). Owned here so they outlive the borrowed
+            // `compiler_args` below.
+            let dep_lib_flags: Vec<String> =
+                dep_link_libs.iter().map(|l| format!("-l{}", l)).collect();
+
             let mut compiler_args = vec![
                 llvm_ir_output_path.to_str().unwrap(),
                 temp_runtime.path().to_str().unwrap(),
             ];
             compiler_args.extend(args.compiler_flags.split_whitespace());
+            // dependency C objects, ahead of the `-l` flags they may reference
+            compiler_args.extend(native_objs.iter().map(|p| p.to_str().unwrap()));
 
             // add -lm on non-Windows platforms because math library is
-            // in the CRT for MSVC and MinGW
-            if !cfg!(target_os = "windows") {
+            // in the CRT for MSVC and MinGW. Skipped when a dependency already
+            // declares `m`, which is where this hardcode goes to die: once the
+            // runtime is std's and std ships `libs = ["m"]`, the compiler stops
+            // asserting libm on its own.
+            if !cfg!(target_os = "windows") && !dep_link_libs.iter().any(|l| l == "m") {
                 compiler_args.push("-lm");
             }
+            // libraries the dependencies asked for, after every object
+            compiler_args.extend(dep_lib_flags.iter().map(|s| s.as_str()));
 
             let status = if args.shared {
                 let shared_output_path = if cfg!(target_os = "windows") {
@@ -296,18 +362,20 @@ fn main() {
 
                 let mut archive_cmd = std::process::Command::new(archiver);
                 if cfg!(target_os = "windows") {
-                    // llvm-lib: /OUT:foo.lib foo.o libruntime.a
+                    // llvm-lib: /OUT:foo.lib foo.o libruntime.a dep0.o ...
                     archive_cmd
                         .arg(format!("/OUT:{}", lib_path.display()))
                         .arg(&obj_path)
-                        .arg(temp_runtime.path());
+                        .arg(temp_runtime.path())
+                        .args(&native_objs);
                 } else {
-                    // llvm-ar: crs foo.a foo.o libruntime.a
+                    // llvm-ar: crs foo.a foo.o libruntime.a dep0.o ...
                     archive_cmd
                         .arg("crs")
                         .arg(&lib_path)
                         .arg(&obj_path)
-                        .arg(temp_runtime.path());
+                        .arg(temp_runtime.path())
+                        .args(&native_objs);
                 }
 
                 let archive_status = archive_cmd
@@ -391,17 +459,21 @@ fn load_deps(specs: &[String]) -> std::collections::HashMap<String, haven_meta::
     deps
 }
 
-/// Assemble and write a native library's `.hvmeta` artifact: a header plus every
-/// one of the package's OWN source modules. `std`/prelude are excluded - they are
-/// embedded in every `havenc`, so a consumer re-resolves `import std/...` against
-/// its own copy. Module keys are made package-root-relative and forward-slashed,
-/// so the artifact carries no absolute path and fingerprints identically from any
-/// checkout location. Exits the process on any error.
+/// Assemble and write a native library's `.hvmeta` artifact: a header, every one
+/// of the package's OWN source modules, and its native code (the `--c-file`
+/// sources and `--link-lib` names). `std`/prelude are excluded - they are embedded
+/// in every `havenc`, so a consumer re-resolves `import std/...` against its own
+/// copy. Module keys are made package-root-relative and forward-slashed, so the
+/// artifact carries no absolute path and fingerprints identically from any checkout
+/// location; the C files are carried by base name only, for the same reason. Exits
+/// the process on any error.
 fn write_lib_metadata(
     entry: &std::path::Path,
     package_name: &str,
     defs: &haven_common::defs::Defs<'_>,
     files: &haven_common::diag::Files<'_>,
+    c_files: &[std::path::PathBuf],
+    link_libs: &[String],
     output: &std::path::Path,
 ) {
     // the package root is the entry file's directory; module keys are the
@@ -444,8 +516,41 @@ fn write_lib_metadata(
         modules.push(haven_meta::MetaModule { key: rel, source, is_root: m.is_entry });
     }
 
+    // read each `--c-file` and carry it by base name. The source travels verbatim;
+    // a consumer writes it back out and compiles it for its own target (see the
+    // leaf link step). Two files sharing a base name would shadow each other at the
+    // consumer, so reject it here rather than silently ship one.
+    let mut native = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+    for path in c_files {
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => {
+                diag::report_plain("Error", &format!(
+                    "C source '{}' has no usable file name", path.display()));
+                std::process::exit(1);
+            }
+        };
+        if !seen_names.insert(name.clone()) {
+            diag::report_plain("Error", &format!(
+                "two --c-file arguments share the base name '{}'; the artifact carries \
+                 C by name, so they would collide at a consumer", name));
+            std::process::exit(1);
+        }
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                diag::report_plain("Error", &format!(
+                    "cannot read C source '{}': {}", path.display(), e));
+                std::process::exit(1);
+            }
+        };
+        native.push(haven_meta::NativeSource { name, source });
+    }
+    let link_libs = link_libs.to_vec();
+
     let havenc_version = env!("CARGO_PKG_VERSION").to_string();
-    let fingerprint = haven_meta::fingerprint(package_name, &havenc_version, &modules);
+    let fingerprint = haven_meta::fingerprint(package_name, &havenc_version, &modules, &native, &link_libs);
     let meta = haven_meta::HavenMeta {
         header: haven_meta::Header {
             format_version: haven_meta::FORMAT_VERSION,
@@ -454,6 +559,8 @@ fn write_lib_metadata(
             fingerprint,
         },
         modules,
+        native,
+        link_libs,
     };
 
     let out_path = output.with_extension("hvmeta");

@@ -16,6 +16,7 @@ pub const MANIFEST: &str = "haven.toml";
 
 /// A parsed `haven.toml` together with the directory it was found in. Every
 /// relative path in the manifest (e.g. `entry`) is resolved against `root`.
+#[derive(Debug)]
 pub struct Project {
     /// Absolute path to the directory containing `haven.toml`.
     pub root: PathBuf,
@@ -24,13 +25,43 @@ pub struct Project {
     /// Ordered so a build's dependency order - and therefore its `havenc`
     /// command line - is deterministic.
     pub dependencies: BTreeMap<String, DepSpec>,
+    /// The `[[c]]` tables verbatim. Flattened for callers by
+    /// [`Project::c_source_files`] and [`Project::link_libs`].
+    pub c: Vec<CTable>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub project: ProjectTable,
     #[serde(default)]
     pub dependencies: BTreeMap<String, DepSpec>,
+    /// `[[c]]` native-code tables: C sources this package ships and the native
+    /// libraries they need linked. Empty when the manifest declares none.
+    ///
+    /// An *array* of tables (`[[c]]`) rather than a single `[c]` so a package can
+    /// group its C by concern (`files = [...]` for one subsystem, another block
+    /// for another) if it wants; they are flattened by [`Project::c_source_files`]
+    /// and [`Project::link_libs`]. `deny_unknown_fields` above is what makes a
+    /// mistyped table name (`[[cc]]`) or key an error instead of silently dropped
+    /// - the trap `[dependencies]` used to have, and the reason a `.hvmeta` could
+    /// be built with no native code and fail to link with no explanation.
+    #[serde(default)]
+    pub c: Vec<CTable>,
+}
+
+/// One `[[c]]` table: C sources a package ships and libraries they link against.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CTable {
+    /// C source files, relative to the manifest directory. Compiled and linked
+    /// into any program that (transitively) depends on this package.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Native libraries to link, by bare name: `["m"]` becomes `-lm`. Rides in the
+    /// package's artifact so a consumer links them without knowing they exist.
+    #[serde(default)]
+    pub libs: Vec<String>,
 }
 
 /// One entry of `[dependencies]`.
@@ -67,6 +98,7 @@ pub struct ResolvedDep {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectTable {
     /// Human-readable project name. Also the default binary name (slugified).
     pub name: String,
@@ -163,6 +195,7 @@ impl Project {
             root,
             project: manifest.project,
             dependencies: manifest.dependencies,
+            c: manifest.c,
         })
     }
 
@@ -305,6 +338,26 @@ impl Project {
         self.root.join(entry)
     }
 
+    /// Every `[[c]]` source file, resolved to an absolute path against the
+    /// manifest root and flattened across all `[[c]]` tables, in manifest order.
+    /// Empty when the package ships no native code.
+    pub fn c_source_files(&self) -> Vec<PathBuf> {
+        self.c.iter()
+            .flat_map(|table| table.files.iter())
+            .map(|rel| self.root.join(rel))
+            .collect()
+    }
+
+    /// Every native library named across all `[[c]]` tables (`-l<name>`), in
+    /// manifest order. These ride in the package's artifact so a consumer links
+    /// them transitively.
+    pub fn link_libs(&self) -> Vec<String> {
+        self.c.iter()
+            .flat_map(|table| table.libs.iter())
+            .cloned()
+            .collect()
+    }
+
     /// The build-output directory, `.haven/target/` under the project root.
     pub fn target_dir(&self) -> PathBuf {
         self.root.join(".haven").join("target")
@@ -342,5 +395,86 @@ impl Project {
         }
         let trimmed = out.trim_matches('-');
         if trimmed.is_empty() { "output".to_string() } else { trimmed.to_string() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `Project` from raw manifest text, rooted at `/pkg`, so the accessors
+    /// can be tested without touching the filesystem. `Manifest`'s fields are the
+    /// same the loader fills from `toml::from_str`, so this mirrors `Project::load`.
+    fn project_from(toml_src: &str) -> Result<Project, String> {
+        let manifest: Manifest = toml::from_str(toml_src).map_err(|e| e.to_string())?;
+        Ok(Project {
+            root: PathBuf::from("/pkg"),
+            project: manifest.project,
+            dependencies: manifest.dependencies,
+            c: manifest.c,
+        })
+    }
+
+    const LIB: &str = "[project]\nname = \"std\"\nkind = [\"lib\"]\n";
+
+    #[test]
+    fn no_c_table_is_empty() {
+        let p = project_from(LIB).unwrap();
+        assert!(p.c_source_files().is_empty());
+        assert!(p.link_libs().is_empty());
+    }
+
+    #[test]
+    fn parses_c_files_and_libs() {
+        let p = project_from(&format!(
+            "{LIB}\n[[c]]\nfiles = [\"c/env.c\", \"c/rt.c\"]\nlibs = [\"m\"]\n"
+        )).unwrap();
+        // files resolve to absolute paths under the manifest root
+        assert_eq!(p.c_source_files(), vec![
+            PathBuf::from("/pkg/c/env.c"),
+            PathBuf::from("/pkg/c/rt.c"),
+        ]);
+        assert_eq!(p.link_libs(), vec!["m".to_string()]);
+    }
+
+    #[test]
+    fn flattens_multiple_c_tables_in_order() {
+        let p = project_from(&format!(
+            "{LIB}\n[[c]]\nfiles = [\"c/a.c\"]\nlibs = [\"m\"]\n\
+             \n[[c]]\nfiles = [\"c/b.c\"]\nlibs = [\"pthread\"]\n"
+        )).unwrap();
+        assert_eq!(p.c_source_files(), vec![
+            PathBuf::from("/pkg/c/a.c"),
+            PathBuf::from("/pkg/c/b.c"),
+        ]);
+        assert_eq!(p.link_libs(), vec!["m".to_string(), "pthread".to_string()]);
+    }
+
+    #[test]
+    fn a_c_table_may_omit_files_or_libs() {
+        let p = project_from(&format!("{LIB}\n[[c]]\nlibs = [\"m\"]\n")).unwrap();
+        assert!(p.c_source_files().is_empty());
+        assert_eq!(p.link_libs(), vec!["m".to_string()]);
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_table() {
+        // the whole point of `deny_unknown_fields`: a mistyped `[[cc]]` is an error,
+        // not a silently dropped native-code block that fails to link later.
+        let err = project_from(&format!("{LIB}\n[[cc]]\nfiles = [\"c/rt.c\"]\n")).unwrap_err();
+        assert!(err.contains("cc") || err.contains("unknown"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_unknown_c_key() {
+        let err = project_from(&format!("{LIB}\n[[c]]\nfils = [\"c/rt.c\"]\n")).unwrap_err();
+        assert!(err.contains("fils") || err.contains("unknown"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_unknown_project_key() {
+        let err = project_from("[project]\nnaem = \"std\"\nkind = [\"lib\"]\n").unwrap_err();
+        assert!(err.contains("naem") || err.contains("unknown") || err.contains("missing"),
+            "got: {err}");
     }
 }

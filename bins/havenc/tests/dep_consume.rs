@@ -328,7 +328,7 @@ fn version_mismatch_errors_cleanly() {
         source: "pub proc thing() i32 { return 1; }\n".into(),
         is_root: true,
     }];
-    let fp = haven_meta::fingerprint("qux", "0.0.0", &modules);
+    let fp = haven_meta::fingerprint("qux", "0.0.0", &modules, &[], &[]);
     let bad = haven_meta::HavenMeta {
         header: haven_meta::Header {
             format_version: haven_meta::FORMAT_VERSION + 1,
@@ -337,6 +337,8 @@ fn version_mismatch_errors_cleanly() {
             fingerprint: fp,
         },
         modules,
+        native: vec![],
+        link_libs: vec![],
     };
     let art = dir.path().join("qux.hvmeta");
     haven_meta::write(&art, &bad).unwrap();
@@ -448,6 +450,78 @@ fn self_wins_over_a_dependency_named_self() {
     assert!(res.status.success(), "build failed: {}", String::from_utf8_lossy(&res.stderr));
     let run = Command::new(exe(&app)).output().unwrap();
     assert_eq!(run.status.code(), Some(7), "`self/` must name the package root, not the dep");
+}
+
+/// `havenc <entry> --lib --package-name <pkg> [--c-file..] [--link-lib..] -o out`
+/// — produce a `.hvmeta` that ships native C and/or declares libraries to link.
+fn build_lib_native(cwd: &Path, entry: &str, pkg: &str, c_files: &[&str],
+                    libs: &[&str], out: &Path) -> std::process::Output {
+    let mut cmd = Command::new(HAVENC);
+    cmd.current_dir(cwd)
+        .args([entry, "--package-name", pkg, "--lib", "-o"])
+        .arg(out);
+    for c in c_files { cmd.arg("--c-file").arg(c); }
+    for l in libs { cmd.arg("--link-lib").arg(l); }
+    cmd.output().expect("failed to spawn havenc")
+}
+
+/// The Stage 3 payoff: a dep ships C *source* in its `.hvmeta`, and the leaf
+/// compiles and links it — the package's native code travels without the
+/// compiler embedding it. The C here leans on libm, so the dep also declares
+/// `--link-lib m`; the program runs only if both the object and the `-lm` it
+/// needs made it onto the link line.
+#[test]
+fn dep_ships_c_compiled_and_linked_at_leaf() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("mathx/lib.hv", "extern mathx_root(x: i32) i32;\n\
+                          pub proc root(x: i32) i32 { return mathx_root(x); }\n"),
+        ("mathx/root.c", "#include <math.h>\n\
+                          int mathx_root(int x) { return (int)llround(sqrt((double)x)); }\n"),
+    ]);
+    let built = build_lib_native(dir.path(), "mathx/lib.hv", "mathx",
+        &["mathx/root.c"], &["m"], &dir.path().join("mathx"));
+    assert!(built.status.success(), "lib build failed: {}",
+        String::from_utf8_lossy(&built.stderr));
+
+    std::fs::write(dir.path().join("main.hv"),
+        "import mathx { root }\nproc main() i32 { println(root(16)); return 0; }\n").unwrap();
+
+    let app = dir.path().join("app");
+    let res = build_app(dir.path(), "main.hv", "app", &["mathx=mathx.hvmeta"], &app);
+    assert!(res.status.success(),
+        "leaf should compile and link the dep's C: {}",
+        String::from_utf8_lossy(&res.stderr));
+
+    let run = Command::new(exe(&app)).output().unwrap();
+    assert!(run.status.success());
+    assert_eq!(stdout_of(&run), "4\n"); // llround(sqrt(16))
+}
+
+/// A dep's declared `--link-lib` becomes a real `-l` on the leaf's link line,
+/// independent of the always-on `-lm`. Proven negatively: a library that does
+/// not exist makes the *link* fail, naming it — so the flag demonstrably
+/// reached the linker rather than being dropped.
+#[test]
+fn dep_link_lib_reaches_the_linker() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("z/lib.hv", "pub proc id(x: i32) i32 { return x; }\n"),
+    ]);
+    let built = build_lib_native(dir.path(), "z/lib.hv", "z",
+        &[], &["nonexistentlib_zzz"], &dir.path().join("z"));
+    assert!(built.status.success());
+
+    std::fs::write(dir.path().join("main.hv"),
+        "import z { id }\nproc main() i32 { return id(0); }\n").unwrap();
+
+    let app = dir.path().join("app");
+    let res = build_app(dir.path(), "main.hv", "app", &["z=z.hvmeta"], &app);
+    assert!(!res.status.success(),
+        "a dep's declared `-l` must reach the linker (and here fail to resolve)");
+    let err = String::from_utf8_lossy(&res.stderr);
+    assert!(err.contains("nonexistentlib_zzz"),
+        "linker should report the missing dep lib; got: {err}");
 }
 
 /// Windows appends `.exe`; elsewhere the executable is the bare output path.

@@ -72,6 +72,71 @@ fn emits_metadata_and_no_llvm() {
 }
 
 #[test]
+fn embeds_c_sources_and_link_libs() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("src/lib.hv", "pub proc one() i32 { return 1; }\n"),
+        ("c/rt.c", "void rt_thing(void) {}\n"),
+        ("c/util.c", "int util_thing(void) { return 7; }\n"),
+    ]);
+    let out = dir.path().join("libp");
+
+    let res = Command::new(HAVENC)
+        .current_dir(dir.path())
+        .arg("src/lib.hv")
+        .arg("--package-name").arg("libp")
+        .arg("--lib")
+        .arg("--c-file").arg("c/rt.c")
+        .arg("--c-file").arg("c/util.c")
+        .arg("--link-lib").arg("m")
+        .arg("-o").arg(&out)
+        .output().expect("failed to spawn havenc");
+    assert!(res.status.success(), "havenc --lib failed: {}", String::from_utf8_lossy(&res.stderr));
+
+    let meta = haven_meta::read(&out.with_extension("hvmeta")).unwrap();
+    // C rides by base name, source verbatim, directory layout stripped.
+    let by_name: BTreeMap<_, _> = meta.native.iter().map(|n| (n.name.as_str(), n)).collect();
+    assert_eq!(by_name.len(), 2);
+    assert!(by_name["rt.c"].source.contains("rt_thing"));
+    assert!(by_name["util.c"].source.contains("util_thing"));
+    assert_eq!(meta.link_libs, vec!["m".to_string()]);
+
+    // the native code is in the fingerprint: the header matches a fresh recompute
+    // that includes it, and dropping it changes the digest.
+    let recomputed = haven_meta::fingerprint(
+        &meta.header.package_name, &meta.header.havenc_version, &meta.modules,
+        &meta.native, &meta.link_libs);
+    assert_eq!(meta.header.fingerprint, recomputed);
+    let without_native = haven_meta::fingerprint(
+        &meta.header.package_name, &meta.header.havenc_version, &meta.modules, &[], &[]);
+    assert_ne!(meta.header.fingerprint, without_native);
+}
+
+#[test]
+fn rejects_c_files_sharing_a_base_name() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("src/lib.hv", "pub proc one() i32 { return 1; }\n"),
+        ("a/rt.c", "void a(void) {}\n"),
+        ("b/rt.c", "void b(void) {}\n"),
+    ]);
+    let out = dir.path().join("libp");
+
+    let res = Command::new(HAVENC)
+        .current_dir(dir.path())
+        .arg("src/lib.hv")
+        .arg("--package-name").arg("libp")
+        .arg("--lib")
+        .arg("--c-file").arg("a/rt.c")
+        .arg("--c-file").arg("b/rt.c")
+        .arg("-o").arg(&out)
+        .output().expect("failed to spawn havenc");
+    assert!(!res.status.success(), "expected a base-name collision to fail the build");
+    assert!(String::from_utf8_lossy(&res.stderr).contains("rt.c"));
+    assert!(!out.with_extension("hvmeta").exists(), "no artifact should be written on error");
+}
+
+#[test]
 fn round_trips_with_correct_modules_and_no_std() {
     let dir = tempfile::tempdir().unwrap();
     scaffold(dir.path(), &sample_files());
@@ -104,7 +169,8 @@ fn round_trips_with_correct_modules_and_no_std() {
 
     // fingerprint in the header matches a fresh recompute over the modules.
     let recomputed = haven_meta::fingerprint(
-        &meta.header.package_name, &meta.header.havenc_version, &meta.modules);
+        &meta.header.package_name, &meta.header.havenc_version, &meta.modules,
+        &meta.native, &meta.link_libs);
     assert_eq!(meta.header.fingerprint, recomputed);
 }
 
@@ -204,8 +270,8 @@ fn fingerprint_ignores_module_load_order() {
     let mut reversed = meta.modules.clone();
     reversed.reverse();
     assert_eq!(
-        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &meta.modules),
-        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &reversed),
+        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &meta.modules, &meta.native, &meta.link_libs),
+        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &reversed, &meta.native, &meta.link_libs),
     );
 }
 

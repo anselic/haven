@@ -104,6 +104,21 @@ pub struct Args {
     #[arg(long = "dep", value_name = "NAME=PATH")]
     pub dep: Vec<String>,
 
+    /// A C source file this package ships (`--c-file <path>`, repeatable). Only
+    /// meaningful with `--lib`: the source is embedded verbatim into the emitted
+    /// `.hvmeta`, and a consumer compiles and links it when it builds a program.
+    /// This is how a package's native code travels without the compiler embedding
+    /// it. Ignored (with no error) for a non-`--lib` build, which links its own C.
+    #[arg(long = "c-file", value_name = "PATH")]
+    pub c_file: Vec<PathBuf>,
+
+    /// A native library this package needs linked (`--link-lib <name>`, e.g.
+    /// `--link-lib m` for `-lm`; repeatable). With `--lib` it is recorded in the
+    /// `.hvmeta` so a consumer adds the `-l` flag transitively; the package need
+    /// not know who links it.
+    #[arg(long = "link-lib", value_name = "NAME")]
+    pub link_lib: Vec<String>,
+
     /// Diagnostic output format. `human` (default) is the pretty terminal
     /// renderer; `json` emits one NDJSON diagnostic per line on stderr for
     /// tooling (LSP, the `haven` build orchestrator) to parse.
