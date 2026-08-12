@@ -42,7 +42,7 @@ fn c_file_is_compiled_and_linked_into_executable() {
 
     let run = std::process::Command::new(&out).output().expect("failed to run built binary");
     assert!(run.status.success(), "the built binary exited non-zero");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "42\n");
 }
 
 /// A `--link-lib` name reaches the executable's link line as `-l<name>`: a library

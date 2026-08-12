@@ -355,8 +355,18 @@ fn main() {
             // `-l` flags for every library the deps and the leaf declared (e.g.
             // std's `libs = ["m"]`, or a binary's `libs = ["raylib"]`). Owned here
             // so they outlive the borrowed `compiler_args` below.
-            let lib_flags: Vec<String> =
-                link_libs.iter().map(|l| format!("-l{}", l)).collect();
+            //
+            // `m` is dropped on Windows, for the same reason the hardcoded `-lm`
+            // below is: libm is part of the CRT under both MSVC and MinGW, and
+            // there is no `m.lib` on disk to find - `lld-link` fails the entire
+            // link over a library that was never needed. A manifest says what its
+            // C *needs* (`libs = ["m"]` is true of std's runtime everywhere);
+            // translating that into flags for the host is this side's job.
+            let lib_flags: Vec<String> = link_libs
+                .iter()
+                .filter(|l| !(cfg!(target_os = "windows") && *l == "m"))
+                .map(|l| format!("-l{}", l))
+                .collect();
 
             // The compiler embeds no runtime of its own. Every program's C runtime
             // rides in a dependency (std ships `rt.c`/`env.c`/..., compiled to
