@@ -97,7 +97,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {}", e);
+            status(Status::Error, e);
             ExitCode::FAILURE
         }
     }
@@ -148,7 +148,7 @@ fn cmd_new(path: &Path, is_lib: bool) -> Result<(), String> {
     write_new_file(&path.join(".gitignore"), "/.haven\n")?;
 
     let what = if is_lib { "library" } else { "executable" };
-    status("Created", format_args!("{} `{}` at `{}`", what, name, path.display()));
+    status(Status::Created, format_args!("{} `{}` at `{}`", what, name, path.display()));
     Ok(())
 }
 
@@ -249,7 +249,7 @@ fn build_project(
     }
 
     let label = describe(project);
-    status("Compiling", format_args!("{} ({})", label, output.label()));
+    status(Status::Compiling, format_args!("{} ({})", label, output.label()));
 
     let exit = cmd
         .status()
@@ -261,7 +261,7 @@ fn build_project(
     // Resolve the actual artifact path from the output kind, mirroring `havenc`'s
     // extension choices, so callers (chiefly `run`) know what to launch.
     let artifact = artifact_path(&out_base, output);
-    status("Finished", &label);
+    status(Status::Finished, &label);
     Ok(artifact)
 }
 
@@ -307,7 +307,7 @@ fn cmd_run(fmt: MessageFormat, args: &[String]) -> Result<(), String> {
     }
     let bin = build_project(&project, fmt, /*force_executable=*/ true)?;
 
-    status("Running", project.bin_name());
+    status(Status::Running, project.bin_name());
     let exit = Command::new(&bin)
         .args(args)
         .status()
@@ -341,7 +341,7 @@ fn cmd_doc() -> Result<(), String> {
         .map_err(|e| format!("cannot create `{}`: {}", out.display(), e))?;
 
     let havendoc = tool_path("havendoc");
-    status("Documenting", describe(&project));
+    status(Status::Compiling, describe(&project));
     let exit = Command::new(&havendoc)
         .arg(&input)
         .arg("--out")
@@ -353,7 +353,7 @@ fn cmd_doc() -> Result<(), String> {
     }
     // The generated docs are what the user opens next, so name where they landed
     // - but relative to the project root, not as a long absolute path.
-    status("Generated", relative_to(&project.root, &out).display());
+    status(Status::Finished, relative_to(&project.root, &out).display());
     Ok(())
 }
 
@@ -361,20 +361,42 @@ fn cmd_doc() -> Result<(), String> {
 // helpers
 // ---------------------------------------------------------------------------
 
-/// Width of the status verb column. Verbs are right-aligned within it, so the
-/// messages that follow all start in the same place and the verbs read as a
-/// column of their own:
-///
-/// ```text
-///    Compiling example v0.1.0 (executable)
-///     Finished example v0.1.0
-///      Running example
-/// ```
-const STATUS_WIDTH: usize = 12;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    /// Created a new project, file, or directory.
+    Created,
+    /// Compiling a project or dependency.
+    Compiling,
+    /// Finished compiling a project or dependency.
+    Finished,
+    /// Running a built executable.
+    Running,
 
-/// Print one progress line: a right-aligned verb followed by its detail.
-fn status(verb: &str, detail: impl std::fmt::Display) {
-    println!("{:>width$} {}", verb, detail, width = STATUS_WIDTH);
+    Error,
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use colored::Colorize;
+
+        let width = 10;
+
+        match self {
+            Status::Created   => write!(f, "{:>width$}", "Created".green()),
+            Status::Compiling => write!(f, "{:>width$}", "Compiling".blue()),
+            Status::Finished  => write!(f, "{:>width$}", "Finished".green()),
+            Status::Running   => write!(f, "{:>width$}", "Running".green()),
+            Status::Error     => write!(f, "{:>width$}", "Error".red()),
+        }
+    }
+}
+
+fn status(verb: Status, detail: impl std::fmt::Display) {
+    if verb == Status::Error {
+        eprintln!("{} {}", verb, detail);
+    } else {
+        println!("{} {}", verb, detail);
+    }
 }
 
 /// How a project is named in progress lines: `name v1.2.3`, or just the name

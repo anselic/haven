@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import os
 import sys
 import shutil
@@ -36,6 +38,8 @@ def build_std(source_dir, dest_dir):
         # stderr; show both so a failure is not a bare "compilation failed".
         print(f"Failed to build {STD_ARTIFACT}:\n{result.stdout}{result.stderr}")
         return
+    else:
+        print(result.stdout, end="")
     artifact = std_dir / ".haven" / "target" / STD_ARTIFACT
     if not artifact.exists():
         print(f"Failed to build {STD_ARTIFACT}: `haven build` produced no artifact "
@@ -44,7 +48,7 @@ def build_std(source_dir, dest_dir):
     out = dest_dir / STD_ARTIFACT
     try:
         shutil.copy2(artifact, out)
-        print(f"Success: Built and installed {STD_ARTIFACT} to {out}")
+        print(f"Built and installed {STD_ARTIFACT} to {out}")
     except Exception as e:
         print(f"Failed to install {STD_ARTIFACT}: {e}")
 
@@ -52,7 +56,7 @@ def main():
     parser = argparse.ArgumentParser(description="Manage haven binaries.")
     parser.add_argument("--debug", action="store_true", help="Copy debug builds instead of release.")
     parser.add_argument("--path", type=str, help="Specific destination directory (e.g., ~/.local/bin).")
-    parser.add_argument("--remove", action="store_true", help="Delete the binaries instead of installing them.")
+    parser.add_argument("--uninstall", action="store_true", help="Delete the binaries instead of installing them.")
     args = parser.parse_args()
 
     is_windows = platform.system() == "Windows"
@@ -63,8 +67,8 @@ def main():
         f"havendoc{exe_ext}",
     ]
 
-    # Handle removal
-    if args.remove:
+    # Handle uninstall
+    if args.uninstall:
         dirs_to_check = []
         if args.path:
             dest_dir = Path(args.path).expanduser().resolve()
@@ -85,7 +89,7 @@ def main():
                 if target_file.exists():
                     try:
                         target_file.unlink()
-                        print(f"Success: Deleted {target_file}")
+                        print(f"Deleted {target_file}")
                         removed_any = True
                     except Exception as e:
                         print(f"Failed to delete {target_file}: {e}")
@@ -99,9 +103,18 @@ def main():
         source_dir = Path("target") / build_type
 
         if not source_dir.exists():
-            print(f"Error: Directory '{source_dir}' does not exist.")
-            print("Did you forget to build the damn project?")
-            sys.exit(1)
+            # Build the binaries if they don't exist
+            print(f"Building {build_type} binaries...")
+            result = subprocess.run(
+                ["cargo", "build",
+                "--bin", "haven",
+                "--bin", "havenc",
+                "--bin", "havendoc"]
+                + (["--release"] if not args.debug else []),
+                capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Failed to build binaries:\n{result.stdout}{result.stderr}")
+                sys.exit(1)
 
         dest_dir = None
 
@@ -144,7 +157,7 @@ def main():
                 dest_file = dest_dir / bin_name
                 try:
                     shutil.copy2(src_file, dest_file)
-                    print(f"Success: Copied {bin_name} to {dest_file}")
+                    print(f"Copied {bin_name} to {dest_file}")
                 except Exception as e:
                     print(f"Failed to copy {bin_name}: {e}")
             else:

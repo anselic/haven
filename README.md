@@ -25,8 +25,8 @@ Install the binaries using the provided `install.py` script:
 ```shell
 $ cargo build --release
 $ python install.py [--debug] [--path <install_path>]
-# To remove the installed binaries with the script, you can also run:
-$ python install.py --remove [--path <install_path>]
+# To uninstall the binaries with the script, you can also run:
+$ python install.py --uninstall [--path <install_path>]
 ```
 The script will also install and compile the standard library, which is required
 for compiling any haven program.
