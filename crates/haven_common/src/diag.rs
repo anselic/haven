@@ -1,9 +1,52 @@
+use std::io::IsTerminal;
 use std::ops::Range;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use ariadne::{Color, Label, Report, ReportKind};
+use ariadne::{Color, Config, Label, Report, ReportKind};
 
 use crate::ast::{Error, FileId, Span};
+
+/// Whether diagnostics may use ANSI colour. Decided once, from stderr - which is
+/// where every diagnostic goes.
+///
+/// ariadne colours unconditionally by default, so a captured diagnostic arrived
+/// with escape codes baked into it: `install.py` reading our stderr got literal
+/// `\x1b[31m` in the text it printed, and CI logs get the same. A subprocess
+/// inherits its parent's stderr, so a `havenc` driven by `haven` sees whatever
+/// `haven` was given and this stays right either way.
+///
+/// `NO_COLOR` wins over the terminal check, per <https://no-color.org>: set and
+/// non-empty disables, whatever the value.
+///
+/// Turning the answer *off* takes two switches, because ariadne's own config only
+/// covers part of its output. [`Config::with_color`] governs the frame, labels and
+/// margins, but the header's colour comes from the `ReportKind`, and the `Custom`
+/// kind we use to print a stage name returns its colour unconditionally where the
+/// built-in kinds filter theirs through the config - so `with_color(false)` alone
+/// still emitted a red `Lang item error:`. Disabling yansi (ariadne's backend, and
+/// the same instance thanks to the unified dependency) covers everything ariadne
+/// paints, whichever route it took.
+fn color_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let on = decide_color(std::env::var_os("NO_COLOR"), std::io::stderr().is_terminal());
+        if !on {
+            yansi::disable();
+        }
+        on
+    })
+}
+
+/// The rule itself, split out from the environment it reads so both answers can
+/// be tested - a test process has no terminal, so the enabled case is otherwise
+/// unreachable.
+fn decide_color(no_color: Option<std::ffi::OsString>, stderr_is_tty: bool) -> bool {
+    match no_color {
+        Some(v) if !v.is_empty() => false,
+        _ => stderr_is_tty,
+    }
+}
 
 /// Every source file a diagnostic might point into, indexed by [`FileId`].
 ///
@@ -186,6 +229,7 @@ pub fn report(stage: &str, msg: &str, span: &Span, files: &Files) {
 
     let span = to_span(src, path, span);
     Report::build(ReportKind::Custom(stage, Color::Red), span.clone())
+        .with_config(Config::default().with_color(color_enabled()))
         .with_message(msg)
         .with_label(Label::new(span).with_color(Color::Red).with_message(msg))
         .finish()
@@ -207,5 +251,32 @@ pub fn report_plain(stage: &str, msg: &str) {
     match format() {
         Format::Json => emit_json(stage, msg, None, None),
         Format::Human => eprintln!("{}: {}", stage, msg),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decide_color;
+    use std::ffi::OsString;
+
+    #[test]
+    fn no_color_beats_a_terminal() {
+        // https://no-color.org: present and non-empty disables, whatever the value
+        assert!(!decide_color(Some(OsString::from("1")), true));
+        assert!(!decide_color(Some(OsString::from("0")), true));
+        assert!(!decide_color(Some(OsString::from("anything")), true));
+    }
+
+    #[test]
+    fn empty_no_color_does_not_count() {
+        // an empty value is "unset" per the spec, so the terminal decides
+        assert!(decide_color(Some(OsString::new()), true));
+        assert!(!decide_color(Some(OsString::new()), false));
+    }
+
+    #[test]
+    fn unset_defers_to_the_terminal() {
+        assert!(decide_color(None, true));
+        assert!(!decide_color(None, false));
     }
 }

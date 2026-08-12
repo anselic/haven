@@ -333,6 +333,7 @@ dependencies = [
  "ariadne",
  "bumpalo",
  "chumsky",
+ "yansi",
 ]
 
 [[package]]

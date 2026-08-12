@@ -4,7 +4,7 @@
 /// of bytes exactly as Rust's `String` wraps a `Vec<u8>`. Build one with
 /// `String::new` (or `String::from_str` to seed it from a literal), append with
 /// `s.push_byte`/`s.push_str`, compare with `s.eq`, and hand a borrowable C
-/// string to `print`/`printf` via `s.as_str`.
+/// string to `print`/`println` via `s.as_str`.
 ///
 /// A `String` owns its heap allocation and frees it for you: it holds a `Vec<u8>`
 /// field, and `Vec` implements `Delete`, so a String is destroyed - buffer freed

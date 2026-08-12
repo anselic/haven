@@ -1,0 +1,42 @@
+// A package name starting with a digit. Symbols are mangled `<package>.<module>$<item>`
+// and the package defaults to this file's stem, so every symbol here begins `2_`.
+//
+// LLVM's bare identifier cannot start with a digit: `%2_digit_package_name$Vec2`
+// parses as the *unnamed value* `%2` followed by garbage, and the IR parser
+// rejects the whole module without naming what upset it. Such symbols must be
+// emitted in quoted form (`%"2_..."`). This fixture exists to compile at all -
+// the arithmetic is incidental. It covers the three kinds of symbol that carry
+// the package prefix: a named struct type, a global, and functions.
+//
+// The filename is load-bearing. Renaming it to `test_*` like its neighbours
+// removes the leading digit and the fixture stops testing anything.
+//@ exit: 30
+
+const SCALE: i32 = 3;
+
+struct Vec2 {
+    x: i32,
+    y: i32,
+
+    proc new(x: i32, y: i32) Vec2 {
+        return Vec2 { x: x, y: y };
+    }
+
+    // a `*self` method: emits a `%"2_..."` type reference in its signature
+    proc sum(*self) i32 {
+        return self.x + self.y;
+    }
+}
+
+// returning the struct by value exercises the aggregate paths (byval/sret),
+// which name the type again at every call site
+proc scaled(v: Vec2) Vec2 {
+    return Vec2 { x: v.x * SCALE, y: v.y * SCALE };
+}
+
+@export
+proc main() i32 {
+    let v: Vec2 = Vec2::new(4, 6);
+    println(scaled(v).sum());
+    return scaled(v).sum();
+}

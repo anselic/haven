@@ -1860,9 +1860,45 @@ pub enum PreludeSource<'p> {
 }
 
 impl<'p> PreludeSource<'p> {
-    /// How to refer to the providing package in a diagnostic.
+    /// The providing package's name, for a diagnostic about a prelude that
+    /// *exists*.
+    ///
+    /// Only [`PreludeSource::Package`] has one to give. Both callers are reached
+    /// only in that case - one is guarded by `prelude != None` (and `Auto` cannot
+    /// survive to there), the other by `prelude_mod` being `Some`, which requires
+    /// a module that supplies the prelude. The fallback is therefore dead, and is
+    /// deliberately not a plausible package name: answering `"std"` here is what
+    /// made a no-prelude build report that only 'std' may declare a lang item
+    /// *while pointing at std's own source*.
     fn provider(&self) -> &'p str {
-        match self { PreludeSource::Package(n) => n, _ => "std" }
+        match self { PreludeSource::Package(n) => n, _ => "<no prelude>" }
+    }
+
+    /// Why the module in hand may not claim `item` as a lang item.
+    ///
+    /// Split by variant because the *reason* differs, and the difference is the
+    /// whole diagnostic. With a real provider the claim belongs to someone else.
+    /// With no prelude at all there is no one it could belong to - and naming a
+    /// provider anyway (this used to answer `"std"` for every variant) accuses
+    /// the reader of introducing a second stdlib when the file in hand may well
+    /// *be* std's, sending them to look for a conflict that does not exist. The
+    /// real fault in that case is upstream, in how the build was invoked.
+    fn lang_item_denial(&self, item: &str) -> String {
+        match self {
+            PreludeSource::Package(n) => format!(
+                "`@{LANG_ATTR}({item})` may only be declared by '{n}', the package this \
+                 program takes its prelude from. A lang item is one definition for the \
+                 whole program, so a second package cannot introduce its own"),
+            // `--no-prelude`. (`Auto` cannot reach here - it either resolves to a
+            // `Package` or the build stops at "no `std` library found" - but the
+            // wording holds if it ever does.)
+            PreludeSource::None | PreludeSource::Auto => format!(
+                "`@{LANG_ATTR}({item})` needs a prelude, and this build has none. A lang \
+                 item is the prelude package's to declare, so with no prelude there is no \
+                 package entitled to claim one - not even the package being compiled. If \
+                 this package supplies the prelude, build it with `--prelude <its own \
+                 name>`; otherwise remove the attribute"),
+        }
     }
 }
 
@@ -2381,11 +2417,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // miscompile; erroring says plainly that two stdlibs do not go into
             // one program.
             if !m.prelude_pkg {
-                lang_errs.push(Error::new(attr.span.clone(), format!(
-                    "`@{}({})` may only be declared by '{}', the package this \
-                     program takes its prelude from. A lang item is one definition \
-                     for the whole program, so a second package cannot introduce \
-                     its own", LANG_ATTR, item, prelude.provider())));
+                lang_errs.push(Error::new(attr.span.clone(), prelude.lang_item_denial(item)));
                 continue;
             }
 

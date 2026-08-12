@@ -46,9 +46,9 @@ proc main() i32 {
     let i: u64 = 0u64;
     while (i < slice_len::<f32>(&left)) {
         print("L channel: ");
-        printf32("%f\n", left[i]);
+        println(left[i]);
         print("R channel: ");
-        printf32("%f\n", right[i]);
+        println(right[i]);
         print("\n");
         i = i + 1u64;
     }

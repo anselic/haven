@@ -15,11 +15,11 @@ import std/string { String }
 proc stage(src: str, dst: str) bool {
     match (fs::copy(src, dst)) {
         Result::Ok(n) -> {
-            printf::<i32>("  staged (%d bytes)\n", numerical_cast::<i32>(n));
+            print("  staged ("); print(numerical_cast::<i32>(n)); println(" bytes)");
             return true;
         }
         Result::Err(e) -> {
-            printf::<str>("  copy failed: %s\n", e.message());
+            print("  copy failed: "); println(e.message());
             return false;
         }
     }
@@ -35,13 +35,13 @@ proc main() i32 {
     if (!fs::is_dir(outdir)) {
         match (fs::mkdir(outdir)) {
             Result::Ok(_)  -> { println("created dist/"); }
-            Result::Err(e) -> { printf::<str>("mkdir failed: %s\n", e.message()); return 1; }
+            Result::Err(e) -> { print("mkdir failed: "); println(e.message()); return 1; }
         }
     }
 
     // only stage if the build actually produced the artifact.
     if (!fs::exists(artifact)) {
-        printf::<str>("nothing to stage: %s missing\n", artifact);
+        print("nothing to stage: "); print(artifact); println(" missing");
         return 1;
     }
 
@@ -52,7 +52,7 @@ proc main() i32 {
     let stamp: String = String::from_str("build 1\n");
     match (fs::write("dist/VERSION", &stamp)) {
         Result::Ok(_)  -> { println("wrote dist/VERSION"); }
-        Result::Err(e) -> { printf::<str>("stamp failed: %s\n", e.message()); return 1; }
+        Result::Err(e) -> { print("stamp failed: "); println(e.message()); return 1; }
     }
 
     println("done.");

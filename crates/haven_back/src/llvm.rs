@@ -2,10 +2,53 @@
 use haven_common::ast::*;
 use haven_mid::mil::*;
 use crate::abi::{self, Abi, Reg, UnionTable};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use haven_common::defs::DefId;
 use crate::layout::{self, TypeTable, TypeInfo, EnumRepr};
+
+/// A symbol as LLVM will accept it after a `%`/`@` sigil, quoted if it has to be.
+///
+/// LLVM's bare identifier is `[-a-zA-Z$._][-a-zA-Z$._0-9]*`; anything else needs
+/// the quoted form. A **leading digit** is the case that actually bites: `%2_gain`
+/// does not parse as a badly-named type, it parses as the *unnamed value* `%2`
+/// followed by garbage, so the whole module is rejected by the IR parser with no
+/// mention of the name that caused it.
+///
+/// Symbols are mangled from the package name, which comes from `--package-name`
+/// or, failing that, the entry file's stem - so they can begin with whatever a
+/// file may be called. `examples/4_gain_plug.hv` was enough to produce IR clang
+/// would not read.
+fn ir_symbol(name: &str) -> Cow<'_, str> {
+    fn bare(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '$' | '.' | '_')
+    }
+    let mut chars = name.chars();
+    let ok = match chars.next() {
+        Some(c) => !c.is_ascii_digit() && bare(c) && chars.all(bare),
+        // an empty symbol is not something we expect to emit, but `%` alone is a
+        // parse error where `%""` is merely odd.
+        None => false,
+    };
+    if ok {
+        return Cow::Borrowed(name);
+    }
+    // Inside quotes only `"` and `\` must be escaped, as `\xx` hex pairs. Other
+    // bytes - including multi-byte UTF-8 from a filename - pass through as-is,
+    // which is why this iterates `chars` rather than `bytes`.
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('"');
+    for ch in name.chars() {
+        match ch {
+            '"' => out.push_str("\\22"),
+            '\\' => out.push_str("\\5C"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    Cow::Owned(out)
+}
 
 fn emit_value(val: Value) -> String {
     match val {
@@ -76,7 +119,7 @@ fn emit_field_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>, symbols: &HashMap<D
         Type::Named { def, .. } if !matches!(
             types.get(def),
             Some(TypeInfo { enum_: Some(EnumRepr { has_payload: false, .. }), .. }),
-        ) => format!("%{}", symbols[def]),
+        ) => format!("%{}", ir_symbol(symbols[def])),
         Type::Array(t, n) => format!("[{} x {}]", n.expect_lit(), emit_field_type(t, types, symbols)),
         Type::Simd(t, n) => format!("<{} x {}>", n.expect_lit(), emit_field_type(t, types, symbols)),
         _ => emit_type(ty, types),
@@ -178,9 +221,11 @@ impl<'a> EmitCtx<'a> {
         )
     }
 
-    /// The symbol an aggregate is declared under: its LLVM `%Name`.
-    fn sym(&self, def: DefId) -> &'a str {
-        self.symbols[&def]
+    /// The symbol an aggregate is declared under: its LLVM `%Name`, quoted if the
+    /// mangled name is not a bare LLVM identifier. Every `%` reference to a named
+    /// type goes through here, so it stays consistent with the `= type` line.
+    fn sym(&self, def: DefId) -> Cow<'a, str> {
+        ir_symbol(self.symbols[&def])
     }
 }
 
@@ -313,7 +358,7 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             // %result = call <return_type> <callee>(<arg_type> <arg_val>, ...)
             // where <callee> is either a function symbol @name or a fn-pointer %reg
             let callee_str = match &callee {
-                Callee::Direct(name) => format!("@{name}"),
+                Callee::Direct(name) => format!("@{}", ir_symbol(name)),
                 Callee::Indirect(val) => emit_value(val.clone()),
             };
             // Expand arguments, coercing Direct-class by-value structs into their
@@ -406,7 +451,7 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             emitln!(cx, "    {dst} = getelementptr %{}, ptr {base}, i32 0, i32 {field_index}", cx.sym(struct_def)),
         // a zero-offset gep off the global symbol yields its address as a `ptr`
         GlobalPtr { dst, name } =>
-            emitln!(cx, "    {dst} = getelementptr i8, ptr @{name}, i64 0"),
+            emitln!(cx, "    {dst} = getelementptr i8, ptr @{}, i64 0", ir_symbol(name)),
 
         Sizeof { dst, ty } => {
             // classic LLVM sizeof: index one element past a null base, then
@@ -715,7 +760,7 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
     };
 
     let params_str = sig_params.join(", ");
-    emitln!(cx, "define {linkage} {ret_ty_str} @{}({params_str}){attrs_str} {{", func.name);
+    emitln!(cx, "define {linkage} {ret_ty_str} @{}({params_str}){attrs_str} {{", ir_symbol(func.name));
 
     // Entry preamble: rebuild Direct struct params into their `ptr` registers,
     // and allocate the local slot for a Direct struct return. These allocas live
@@ -768,7 +813,7 @@ fn emit_extern<'a>(cx: &mut EmitCtx<'a>, ext: ExternDecl<'a>) {
         Type::Never => "void".to_string(),
         _ => emit_type(&ext.return_type, &cx.types),
     };
-    emitln!(cx, "declare {ret_str} @{}({}){attrs_str}", ext.name, params.join(", "));
+    emitln!(cx, "declare {ret_str} @{}({}){attrs_str}", ir_symbol(ext.name), params.join(", "));
 }
 
 /// The LLVM parameter type(s) for a single source-level parameter of type `ty`.
@@ -822,7 +867,7 @@ fn emit_const_init<'a>(init: &ConstInit<'a>, types: &TypeTable<'a>, symbols: &Ha
             format!("[{body}]")
         }
         // a function's address is written as the bare symbol
-        ConstInit::FnAddr(name) => format!("@{name}"),
+        ConstInit::FnAddr(name) => format!("@{}", ir_symbol(name)),
     }
 }
 
@@ -843,7 +888,7 @@ fn emit_module<'a>(cx: &mut EmitCtx<'a>, module: Module<'a>) {
             .map(|(_, ty)| emit_field_type(ty, &module.types, &module.symbols))
             .collect::<Vec<_>>()
             .join(", ");
-        emitln!(cx, "%{} = type {{ {body} }}", module.symbols[def]);
+        emitln!(cx, "%{} = type {{ {body} }}", ir_symbol(module.symbols[def]));
     }
     if !module.structs.is_empty() {
         emitln!(cx, "");
@@ -854,7 +899,7 @@ fn emit_module<'a>(cx: &mut EmitCtx<'a>, module: Module<'a>) {
     for g in &module.globals {
         let linkage = if g.export { "dso_local dllexport constant" } else { "internal constant" };
         emitln!(cx, "@{} = {linkage} {} {}",
-            g.name, emit_field_type(&g.ty, &module.types, &module.symbols),
+            ir_symbol(g.name), emit_field_type(&g.ty, &module.types, &module.symbols),
             emit_const_init(&g.init, &module.types, &module.symbols));
     }
     if !module.globals.is_empty() {

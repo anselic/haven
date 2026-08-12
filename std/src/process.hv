@@ -26,8 +26,8 @@
 ///     args.push("build");
 ///     args.push("main.hv");
 ///     match (run("havenc", args)) {
-///         Result::Ok(code) -> { printf::<i32>("havenc exited %d\n", code); }
-///         Result::Err(e)   -> { printf::<str>("could not launch: %s\n", e.message()); }
+///         Result::Ok(code) -> { print("havenc exited "); println(code); }
+///         Result::Err(e)   -> { print("could not launch: "); println(e.message()); }
 ///     }
 
 // Both wrappers hand C a `char**` argv built from the `Vec<str>` (its buffer is

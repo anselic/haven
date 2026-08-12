@@ -240,6 +240,6 @@ proc entry_get_factory(id: str) *void {
 // a real `.clap` is built with `--shared` and needs no `main`.
 @export
 proc main() i32 {
-    printf::<u64>("%llu\n", sizeof::<Gain>());
+    println(sizeof::<Gain>());
     return 0;
 }

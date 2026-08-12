@@ -449,3 +449,32 @@ fn dep_supplied_runtime_replaces_the_embedded_runtime() {
         assert_eq!(defs, 1, "rt_puts defined {defs} times (runtime double-linked?)");
     }
 }
+
+/// A lang item under `--no-prelude` is refused for a *different* reason than one
+/// declared by a second package, and must say so.
+///
+/// Both land on the same guard — the declaring module is not the prelude
+/// package's — but the remedies are opposites: a second claimant has to drop its
+/// claim, while this build has nobody to claim it and the fault is usually in how
+/// the build was invoked. The message used to name a provider unconditionally,
+/// falling back to "std", so a stdlib built without `--prelude` was told that only
+/// 'std' may declare `@lang(delete)` *while the span pointed at std's own source*.
+/// That is a real regression path: a `haven` predating the `--prelude` flag drives
+/// a newer `havenc` and reproduces exactly this.
+#[test]
+fn a_lang_item_needs_a_prelude_to_belong_to() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.hv"),
+        "@lang(delete)\n\
+         pub trait Delete { proc delete(*self); }\n\
+         \n\
+         proc main() i32 { return 0; }\n").unwrap();
+    let app = dir.path().join("app");
+    let res = build_app(dir.path(), "main.hv", &["--no-prelude"], &app);
+
+    assert!(!res.status.success(), "a lang item with no prelude must be rejected");
+    let err = stderr_of(&res);
+    assert!(err.contains("needs a prelude, and this build has none"), "got: {err}");
+    // the old wording, which sent the reader hunting for a second stdlib
+    assert!(!err.contains("may only be declared by"), "named a provider that does not exist: {err}");
+}
