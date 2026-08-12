@@ -32,7 +32,7 @@ def build_std(source_dir, dest_dir):
         return
     std_dir = Path("std").resolve()
     result = subprocess.run([str(haven), "build"], cwd=str(std_dir),
-                            capture_output=True, text=True)
+                            encoding="utf-8", capture_output=True, text=True)
     if result.returncode != 0:
         # `haven` prints progress to stdout and forwards compiler/tool errors to
         # stderr; show both so a failure is not a bare "compilation failed".
@@ -53,6 +53,8 @@ def build_std(source_dir, dest_dir):
         print(f"Failed to install {STD_ARTIFACT}: {e}")
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(description="Manage haven binaries.")
     parser.add_argument("--debug", action="store_true", help="Copy debug builds instead of release.")
     parser.add_argument("--path", type=str, help="Specific destination directory (e.g., ~/.local/bin).")
@@ -102,19 +104,18 @@ def main():
         build_type = "debug" if args.debug else "release"
         source_dir = Path("target") / build_type
 
-        if not source_dir.exists():
-            # Build the binaries if they don't exist
-            print(f"Building {build_type} binaries...")
-            result = subprocess.run(
-                ["cargo", "build",
-                "--bin", "haven",
-                "--bin", "havenc",
-                "--bin", "havendoc"]
-                + (["--release"] if not args.debug else []),
-                capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"Failed to build binaries:\n{result.stdout}{result.stderr}")
-                sys.exit(1)
+        # Build the binaries
+        print(f"Building {build_type} binaries...")
+        result = subprocess.run(
+            ["cargo", "build",
+            "--bin", "haven",
+            "--bin", "havenc",
+            "--bin", "havendoc"]
+            + (["--release"] if not args.debug else []),
+            encoding="utf-8", capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Failed to build binaries:\n{result.stdout}{result.stderr}")
+            sys.exit(1)
 
         dest_dir = None
 
