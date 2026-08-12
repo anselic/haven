@@ -24,12 +24,53 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use libtest_mimic::{Arguments, Failed, Trial};
 
 /// Path to the freshly-built compiler binary. Cargo sets this for integration
 /// tests so we always test the current build, no matter the target dir.
 const COMPILER_BIN: &str = env!("CARGO_BIN_EXE_havenc");
+
+/// The compiler embeds no std: it discovers `std.hvmeta` on disk. The fixtures
+/// invoke `havenc foo.hv -o out` with no std flags, so the harness builds the
+/// standalone `std` package into an artifact once and points every fixture at it via
+/// `$HAVEN_STD` (set per-invocation, so it never leaks into the other test
+/// binaries that bring their own std/mini). The `TempDir` is parked in the
+/// `OnceLock` so it outlives the whole run rather than being cleaned up when the
+/// builder returns.
+static STD_META: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
+
+/// Build the standalone `std` package into a `std.hvmeta` the fixtures can discover,
+/// once per process. Uses the same `havenc` under test; the std build itself
+/// needs no discovered std (it is `--package-name std --prelude std`, so the
+/// compiler's self-dependency guard skips discovery).
+fn std_meta() -> &'static Path {
+    &STD_META.get_or_init(|| {
+        // `CARGO_MANIFEST_DIR` is `bins/havenc`; the repo root is two up.
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().and_then(|p| p.parent())
+            .expect("repo root above bins/havenc");
+        let std_dir = repo.join("std");
+        let tmp = tempfile::tempdir().expect("temp dir for std.hvmeta");
+        let meta = tmp.path().join("std.hvmeta");
+        let status = Command::new(COMPILER_BIN)
+            .arg(std_dir.join("src/lib.hv"))
+            .args(["--lib", "--package-name", "std", "--prelude", "std"])
+            .arg("--c-file").arg(std_dir.join("c/rt.c"))
+            .arg("--c-file").arg(std_dir.join("c/env.c"))
+            .arg("--c-file").arg(std_dir.join("c/fs.c"))
+            .arg("--c-file").arg(std_dir.join("c/process.c"))
+            .args(["--link-lib", "m"])
+            .arg("-o").arg(&meta)
+            .output()
+            .expect("failed to spawn havenc to build std.hvmeta");
+        assert!(status.status.success(),
+            "building std.hvmeta for the harness failed:\n{}",
+            String::from_utf8_lossy(&status.stderr));
+        (tmp, meta)
+    }).1
+}
 
 fn main() {
     let args = Arguments::from_args();
@@ -81,6 +122,8 @@ fn run_case(path: &Path, mode: Mode) -> Result<(), Failed> {
         .arg(path)
         .arg("-o")
         .arg(&out)
+        // point the flagless fixture at the on-disk std the harness built.
+        .env("HAVEN_STD", std_meta())
         .output()
         .map_err(|e| format!("failed to spawn {COMPILER_BIN}: {e}"))?;
     let stderr = strip_ansi(&String::from_utf8_lossy(&compile.stderr));

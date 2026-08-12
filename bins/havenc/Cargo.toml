@@ -7,9 +7,6 @@ edition.workspace = true
 name = "havenc"
 path = "src/main.rs"
 
-[build-dependencies]
-cc.workspace = true
-
 [dependencies]
 haven_common.workspace = true
 haven_front.workspace = true

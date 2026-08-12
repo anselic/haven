@@ -55,9 +55,6 @@ pub trait Delete {
 extern strlen(s: str) u64;
 extern rt_puts(s: str) void;
 
-// The runtime target of `abort`, defined in c/rt.c. It returns `!`: control never
-// comes back, so a call to it (or to `abort`) diverges - the compiler emits it as
-// a void call followed by `unreachable`.
 extern rt_abort(msg: str) !;
 extern rt_slice_len<T>(slice: *[T]) u64;
 extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];

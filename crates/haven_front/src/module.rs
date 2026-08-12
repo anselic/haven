@@ -92,28 +92,7 @@ use haven_common::defs::{Def, DefKind, DefId, Defs, Linkage, Member, MemberTable
 use haven_common::diag::{self, Files};
 use haven_common::intrinsics::Intrinsic;
 
-/// The whole `crt/std` tree, embedded into the binary at build time. Nested
-/// modules just work: `std/dsp/osc` -> `crt/std/dsp/osc.hv`, no per-file wiring.
-static STD_DIR: include_dir::Dir<'static> =
-    include_dir::include_dir!("$CARGO_MANIFEST_DIR/../../std");
-
-/// `PRELUDE_KEY` is which embedded module gets *loaded* to serve as the prelude,
-/// not which module *is* one - that is the `@!prelude` mark. It is a plain
-/// `std/...` key: exactly what `resolve_target` produces for an explicit
-/// `import std/prelude`, so the two share one entry in `seen` and therefore one
-/// set of definitions - one prelude, whichever way it was reached.
-use haven_common::defs::{LangItems, PRELUDE_KEY};
-
-/// Source of an embedded stdlib module, by its `std/...` import path. The key is
-/// `imp.path.join("/")` (always forward slashes), so `std/<rel>` maps to the
-/// embedded file `<rel>.hv`.
-fn std_source(key: &str) -> Option<&'static str> {
-    let rel = key.strip_prefix("std/")?;
-    // include_dir keys files by forward-slash path relative to the embedded root,
-    // on every host platform.
-    let file = format!("{rel}.hv");
-    STD_DIR.get_file(&file)?.contents_utf8()
-}
+use haven_common::defs::LangItems;
 
 /// A loaded module: parsed contents plus the bookkeeping the resolver needs to
 /// mangle and rewrite it
@@ -219,34 +198,6 @@ enum ImportTarget<'a> {
     Dir(Vec<DirMember<'a>>),
 }
 
-/// Every `.hv` file under the embedded std directory `rel`, as
-/// `(segments below `rel`, std key)`. Recurses, so a nested directory becomes a
-/// nested namespace.
-fn std_dir_members<'a>(rel: &str, arena: &'a Bump) -> Option<Vec<DirMember<'a>>> {
-    fn walk<'a>(d: &include_dir::Dir<'_>, prefix: &[&'a str], arena: &'a Bump,
-                out: &mut Vec<DirMember<'a>>) {
-        for f in d.files() {
-            let Some(stem) = f.path().file_stem().and_then(|s| s.to_str()) else { continue };
-            if f.path().extension().and_then(|e| e.to_str()) != Some("hv") { continue }
-            let mut segments = prefix.to_vec();
-            segments.push(arena.alloc_str(stem));
-            let key = format!("std/{}", f.path().with_extension("").to_string_lossy()
-                .replace('\\', "/"));
-            out.push(DirMember { segments, key });
-        }
-        for sub in d.dirs() {
-            let Some(name) = sub.path().file_name().and_then(|s| s.to_str()) else { continue };
-            let mut prefix = prefix.to_vec();
-            prefix.push(arena.alloc_str(name));
-            walk(sub, &prefix, arena, out);
-        }
-    }
-    let d = STD_DIR.get_dir(rel)?;
-    let mut out = Vec::new();
-    walk(d, &[], arena, &mut out);
-    Some(out)
-}
-
 /// Every `.hv` file under the on-disk directory `root`, as `(segments below
 /// `root`, canonical key)`. Mirrors [`std_dir_members`] for user modules.
 fn dir_members<'a>(root: &FilePath, arena: &'a Bump) -> Result<Vec<DirMember<'a>>, String> {
@@ -300,19 +251,15 @@ fn resolve_target<'a>(imp: &Import, dir: Option<&FilePath>, root: Option<&FilePa
     -> Result<ImportTarget<'a>, String>
 {
     if imp.path.first() == Some(&"std") {
-        let key = imp.path.join("/");
-        if std_source(&key).is_some() {
-            return Ok(ImportTarget::Module(key));
-        }
-        // not a file - a directory of them?
-        let rel = key.strip_prefix("std/").unwrap_or("");
-        if let Some(members) = std_dir_members(rel, arena) {
-            if members.is_empty() {
-                return Err(format!("std module directory '{}' contains no modules", key));
-            }
-            return Ok(ImportTarget::Dir(members));
-        }
-        Err(format!("unknown std module '{}'", key))
+        // The compiler embeds no std, so an `import std/...` that reaches here has
+        // no std bound: a bound `std` dep is claimed earlier, in `load_and_merge`,
+        // before this. So this is the "no std at all" case, reported plainly rather
+        // than as a mysterious missing file.
+        Err(format!(
+            "cannot resolve '{}': no `std` is available. The compiler embeds none - \
+             it discovers `std.hvmeta` on disk (via $HAVEN_STD, or beside the \
+             `havenc` binary), or you bind one with `--dep std=<path>.hvmeta`",
+            imp.path.join("/")))
     } else {
         // `self/...` measures from the package root, everything else from this
         // module's own directory.
@@ -339,18 +286,16 @@ fn resolve_target<'a>(imp: &Import, dir: Option<&FilePath>, root: Option<&FilePa
     }
 }
 
-/// Load one module's source + the dir its own relative imports resolve against.
-/// assumes `resolve_target` already succeeded for this key.
-fn load_import<'a>(imp: &Import, key: &str, dir: Option<&FilePath>, arena: &'a Bump) -> Result<(&'a str, Option<PathBuf>), String> {
-    if imp.path.first() == Some(&"std") {
-        Ok((std_source(key).expect("std source vanished after resolve_target"), None))
-    } else {
-        let _ = dir; // key is already the canonical absolute path
-        let canon = PathBuf::from(key);
-        let src = std::fs::read_to_string(&canon)
-            .map_err(|e| format!("cannot read module file '{}': {}", canon.display(), e))?;
-        Ok((arena.alloc_str(&src), canon.parent().map(|d| d.to_path_buf())))
-    }
+/// Load one on-disk module's source + the dir its own relative imports resolve
+/// against. Assumes `resolve_target` already succeeded for this key, so the key is
+/// the canonical absolute path. (`std/...` never reaches here: a bound `std` is a
+/// dep, and an unbound one errors in `resolve_target`.)
+fn load_import<'a>(_imp: &Import, key: &str, dir: Option<&FilePath>, arena: &'a Bump) -> Result<(&'a str, Option<PathBuf>), String> {
+    let _ = dir; // key is already the canonical absolute path
+    let canon = PathBuf::from(key);
+    let src = std::fs::read_to_string(&canon)
+        .map_err(|e| format!("cannot read module file '{}': {}", canon.display(), e))?;
+    Ok((arena.alloc_str(&src), canon.parent().map(|d| d.to_path_buf())))
 }
 
 /// The worklist/`seen`/`Files` key for a dependency module: the dep name followed
@@ -1896,15 +1841,15 @@ fn enqueue_dep<'a>(name: &str, meta: &HavenMeta, arena: &'a Bump,
 /// another package's file layout.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PreludeSource<'p> {
-    /// No prelude (`--no-prelude`). The embedded stdlib is still the only thing
-    /// that may claim a lang item, since a program that imports `std/prelude` by
-    /// hand still means the `Delete` it finds there.
+    /// No prelude (`--no-prelude`): a freestanding build. Nothing is injected and
+    /// no package may claim a lang item.
     None,
     /// No `--prelude` flag: *discover* it. The prelude is whichever loaded module
     /// carries the `@!prelude` mark - a bound dependency that advertises one wins
-    /// (so `--dep std=stdpkg.hvmeta` needs no second flag), two providers is an
-    /// error, and none falls back to the embedded stdlib's [`PRELUDE_KEY`]. The
-    /// default. Resolved to a concrete choice at the top of [`load_and_merge`].
+    /// (so a discovered `--dep std=...` needs no second flag), two providers is an
+    /// error, and none at all (no user prelude dep, no discovered `std`) is an
+    /// error, since the compiler embeds no fallback. The default. Resolved to a
+    /// concrete choice at the top of [`load_and_merge`].
     Auto,
     /// A dependency's, named by `--prelude <name>` (the override); the name must
     /// also be bound by a `--dep`, or be the package being compiled (a stdlib's
@@ -1972,8 +1917,14 @@ fn meta_provides_prelude(meta: &HavenMeta) -> bool {
 /// [`PreludeSource::Package`] names one of those deps as the prelude's supplier.
 /// It is loaded up front rather than on first import, since a program is not
 /// obliged to import the package its prelude comes from.
+/// `default_std` names the dependency the *compiler itself* discovered and bound
+/// as std (always `"std"`, or `None` when the user bound their own or none was
+/// found). It is a *fallback-priority* prelude provider: it supplies the prelude
+/// only when no user-bound dependency does, and is otherwise excluded from prelude
+/// discovery so it never collides with a prelude the user brought. In every other
+/// respect it is an ordinary dep in `deps`.
 pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: PreludeSource<'_>,
-                          deps: &HashMap<String, HavenMeta>, arena: &'a Bump)
+                          deps: &HashMap<String, HavenMeta>, default_std: Option<&str>, arena: &'a Bump)
     -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>, String), ()>
 {
     let mut worklist: VecDeque<Pending<'a>> = VecDeque::new();
@@ -2015,11 +1966,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
 
     // Discovery: with no `--prelude`, the prelude is found by the `@!prelude`
     // mark, not named on the command line. A bound dependency that advertises one
-    // supplies it - so `--dep std=stdpkg.hvmeta` needs no second flag, and the
-    // embedded stdlib is not seeded alongside it (which would double-load the
+    // supplies it - so `--dep std=std.hvmeta` needs no second flag, and the
+    // discovered std is not seeded alongside it (which would double-load the
     // prelude under one `std.` slug). Exactly one provider may win; two is the
     // same ambiguity `@lang` rejects, but resolvable, so it asks for `--prelude`
-    // rather than guessing. No provider falls back to the embedded stdlib. An
+    // rather than guessing. No provider falls back to the discovered std. An
     // explicit `--prelude`/`--no-prelude` skips all of this - that is the override
     // half, and it also lets a prelude-bearing package be consumed as a plain
     // library. The package being *compiled* still nominates itself the flagged way
@@ -2027,12 +1978,23 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
     // are loaded.
     let prelude = match prelude {
         PreludeSource::Auto => {
+            // The compiler's own discovered std (`default_std`) is fallback-priority:
+            // it is excluded from this scan so a user-bound prelude-bearing dep wins
+            // outright, and is consulted only when no user dep supplies one. Without
+            // this, binding your own prelude package alongside a compiler that found
+            // std on disk would report a spurious two-prelude conflict.
             let mut providers: Vec<&str> = deps.iter()
+                .filter(|(k, _)| Some(k.as_str()) != default_std)
                 .filter_map(|(k, m)| meta_provides_prelude(m).then(|| k.as_str()))
                 .collect();
             providers.sort_unstable();
             match providers.as_slice() {
-                [] => PreludeSource::Auto,            // fall back to the embedded stdlib
+                // no user dep supplies a prelude: use the discovered std if there is
+                // one, else there is no prelude to seed (Auto errors at seeding).
+                [] => match default_std.filter(|n| deps.contains_key(*n)) {
+                    Some(n) => PreludeSource::Package(n),
+                    None => PreludeSource::Auto,
+                },
                 [one] => PreludeSource::Package(one), // discovered, no flag needed
                 many => {
                     diag::report_plain("Error", &format!(
@@ -2052,15 +2014,18 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
     // path, never from its position here.)
     match prelude {
         PreludeSource::None => {}
-        // discovery found no dependency prelude: fall back to the embedded
-        // stdlib. Seeding under its real `std/...` key is what makes a later
-        // explicit `import std/prelude` hit `seen` and reuse this module.
+        // `Auto` still here means: no user dependency supplies a prelude, and no
+        // `std` was discovered to fall back to (the compiler embeds none). A build
+        // that wants no prelude says so with `--no-prelude`; reaching this is a
+        // missing std, reported as such rather than as a later cascade of
+        // unknown-name errors.
         PreludeSource::Auto => {
-            let src = std_source(PRELUDE_KEY)
-                .expect("embedded std tree has no prelude.hv");
-            worklist.push_back(Pending {
-                key: PRELUDE_KEY.into(), src, dir: None, is_entry: false, dep: None,
-            });
+            diag::report_plain("Error",
+                "no `std` library found: the compiler embeds none, and none was \
+                 discovered on disk. Set $HAVEN_STD to a `std.hvmeta`, install one \
+                 beside the `havenc` binary, bind one with `--dep std=<path>.hvmeta`, \
+                 or build freestanding with `--no-prelude`");
+            return Err(());
         }
         // the package being compiled supplies its own prelude. Nothing to seed -
         // its modules load from disk anyway - but the case has to exist, or a
@@ -2147,15 +2112,15 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             Some(dc) => (&dc.package, Some(FilePath::new(&dc.package)), dc.is_root),
         };
         // where the source came from, which the slug deliberately does not
-        // record: an embedded std module and one of the leaf's own both slug
-        // from `(package, relative path)`, and that is what keeps them
+        // record: a dependency module and one of the leaf's own both slug from
+        // `(package, relative path)`, and that is what keeps them
         // location-independent. Anything that needs to know whose source a
         // module *is* - the `.hvmeta` producer, which must ship this package's
         // own modules and no one else's - asks `Origin` instead of trying to
-        // read it back out of the key.
+        // read it back out of the key. (`Origin::Std` is now vestigial: the
+        // compiler embeds no std, so std arrives as an ordinary `Origin::Dep`.)
         let origin = match &p.dep {
             Some(_) => Origin::Dep,
-            None if p.key.starts_with("std/") => Origin::Std,
             None => Origin::Own,
         };
         // whether this module belongs to the package supplying the prelude, and
@@ -2163,14 +2128,14 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         //
         // A separate question from `Origin`, which records where source came
         // from and is fixed for the build; this depends on what the build was
-        // asked for. Under `--no-prelude` the embedded stdlib keeps the
-        // privilege even though nothing is injected: a program that imports
-        // `std/prelude` by hand still means the `Delete` it finds there.
+        // asked for. std is always a dependency now, so a build with no prelude
+        // dependency (`--no-prelude`, or the resolved-away `Auto`) has no
+        // prelude package at all.
         let prelude_pkg = match (&p.dep, prelude) {
             (Some(dc), PreludeSource::Package(n)) => dc.package == n,
             // the package being compiled is its own prelude: a stdlib's build.
             (None, PreludeSource::Package(n)) => origin == Origin::Own && package == n,
-            (None, PreludeSource::Auto | PreludeSource::None) => origin == Origin::Std,
+            (None, PreludeSource::Auto | PreludeSource::None) => false,
             (Some(_), _) => false,
         };
         let mid = match defs.add_module(slug_pkg, p.key.clone(), file, is_root, slug_root, origin) {
@@ -2359,19 +2324,18 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
     }
     // the prelude's package was enqueued, parsed, and then claimed nothing.
     // Loud, because the quiet version is a program compiled with no prelude in
-    // scope at all - and, for a nominated package, the likeliest cause is that
-    // the caller nominated a package that simply is not a prelude.
+    // scope at all - and the likeliest cause is a package (a nominated one, or a
+    // discovered `std` whose artifact is wrong) that simply is not a prelude.
+    // Only `Package` reaches here: `Auto` already errored at seeding when no std
+    // was found, and `None` is guarded out just above.
     if prelude != PreludeSource::None && prelude_mod.is_none() && prelude_errs.is_empty() {
-        diag::report_plain("Error", &match prelude {
-            PreludeSource::Package(name) => format!(
-                "package '{}' supplies no prelude: none of its modules is marked \
-                 `@!{}`. Only a package that says it is one can be nominated with \
-                 `--prelude`", name, PRELUDE_ATTR),
-            _ => format!(
-                "no module is marked `@!{}`. '{}' was loaded to serve as the prelude \
-                 but does not claim to be one; this stdlib does not match this compiler",
-                PRELUDE_ATTR, PRELUDE_KEY),
-        });
+        let PreludeSource::Package(name) = prelude else {
+            unreachable!("Auto errors at seeding and None is guarded out")
+        };
+        diag::report_plain("Error", &format!(
+            "package '{}' supplies no prelude: none of its modules is marked `@!{}`. \
+             Only a package that says it is one can be nominated with `--prelude` (or \
+             discovered as `std`)", name, PRELUDE_ATTR));
         return Err(());
     }
     if !prelude_errs.is_empty() {

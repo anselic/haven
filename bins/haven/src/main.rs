@@ -228,6 +228,26 @@ fn build_project(
         cmd.arg("--dep").arg(format!("{}={}", name, artifact.display()));
     }
 
+    // A prelude-providing package (only `std` today) nominates itself: its
+    // `@!prelude` mark is invisible until its modules load, so the manifest says
+    // so and we pass it through. `havenc` still checks the mark is really there.
+    if project.project.provides_prelude {
+        cmd.arg("--prelude").arg(&project.project.name);
+    }
+
+    // `[[c]]` native code. For a `lib` these ride into the `.hvmeta` for its
+    // consumers' leaves to compile; for a `bin`/`cdylib`/`staticlib` `havenc`
+    // compiles the sources and links the libraries into the artifact directly (so
+    // a binary can link a system library like raylib). The flags are the same
+    // either way. Caveat: a `staticlib`'s `libs` cannot be recorded in a `.a`
+    // archive, so the host links those - the same limitation dependency libs have.
+    for file in project.c_source_files() {
+        cmd.arg("--c-file").arg(file);
+    }
+    for lib in project.link_libs() {
+        cmd.arg("--link-lib").arg(lib);
+    }
+
     let label = describe(project);
     status("Compiling", format_args!("{} ({})", label, output.label()));
 

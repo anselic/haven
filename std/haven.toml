@@ -2,7 +2,8 @@
 name = "std"
 version = "0.1.0"
 kind = ["lib"]
+provides-prelude = true
 
 [[c]]
 files = ["c/env.c", "c/fs.c", "c/process.c", "c/rt.c"]
-# libs = ["m"] # produces -lm
+libs = ["m"]

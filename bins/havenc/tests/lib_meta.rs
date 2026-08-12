@@ -7,9 +7,8 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 
-const HAVENC: &str = env!("CARGO_BIN_EXE_havenc");
+mod common;
 
 /// Write `(relative path, contents)` files under `root`, creating parent dirs.
 fn scaffold(root: &Path, files: &[(&str, &str)]) {
@@ -30,7 +29,7 @@ fn build_lib(cwd: &Path, entry: &str, pkg: &str, out: &Path) -> std::process::Ou
 fn build_lib_with_deps(cwd: &Path, entry: &str, pkg: &str, deps: &[&str], out: &Path)
     -> std::process::Output
 {
-    let mut cmd = Command::new(HAVENC);
+    let mut cmd = common::havenc_cmd();
     cmd.current_dir(cwd)
         .arg(entry)
         .arg("--package-name").arg(pkg)
@@ -81,7 +80,7 @@ fn embeds_c_sources_and_link_libs() {
     ]);
     let out = dir.path().join("libp");
 
-    let res = Command::new(HAVENC)
+    let res = common::havenc_cmd()
         .current_dir(dir.path())
         .arg("src/lib.hv")
         .arg("--package-name").arg("libp")
@@ -122,7 +121,7 @@ fn rejects_c_files_sharing_a_base_name() {
     ]);
     let out = dir.path().join("libp");
 
-    let res = Command::new(HAVENC)
+    let res = common::havenc_cmd()
         .current_dir(dir.path())
         .arg("src/lib.hv")
         .arg("--package-name").arg("libp")

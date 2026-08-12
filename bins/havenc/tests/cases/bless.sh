@@ -17,6 +17,15 @@ bin="$root/target/debug/havenc"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# The compiler embeds no std; build the standalone std package into a discoverable
+# artifact and point $HAVEN_STD at it, exactly as the test harness does.
+echo "building std.hvmeta..."
+export HAVEN_STD="$tmp/std.hvmeta"
+"$bin" "$root/std/src/lib.hv" --lib --package-name std --prelude std \
+    --c-file "$root/std/c/rt.c" --c-file "$root/std/c/env.c" \
+    --c-file "$root/std/c/fs.c" --c-file "$root/std/c/process.c" \
+    --link-lib m -o "$HAVEN_STD"
+
 for f in "$here/run"/*.hv; do
     n="$(basename "$f" .hv)"
     if ! "$bin" "$f" -o "$tmp/$n" >"$tmp/$n.log" 2>&1; then

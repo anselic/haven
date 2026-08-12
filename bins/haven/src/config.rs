@@ -117,6 +117,15 @@ pub struct ProjectTable {
     /// recognized values and [`Project::validate`] for the legal combinations.
     #[serde(default)]
     pub kind: Option<Vec<Kind>>,
+
+    /// Whether this package *provides* the implicit prelude and so must nominate
+    /// itself when compiling its own sources (`havenc --prelude <self>`). The
+    /// `@!prelude` mark that says so lives in the source and is not visible to the
+    /// build tool before `havenc` loads the modules, so the manifest declares it.
+    /// Only `std` sets this today. `havenc` still enforces that a nominated
+    /// package actually carries the mark, so a manifest that lies is caught there.
+    #[serde(default, rename = "provides-prelude")]
+    pub provides_prelude: bool,
 }
 
 /// A single entry of the manifest's `kind` list.

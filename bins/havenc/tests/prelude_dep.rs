@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::process::Command;
 
-const HAVENC: &str = env!("CARGO_BIN_EXE_havenc");
+mod common;
 
 fn scaffold(root: &Path, files: &[(&str, &str)]) {
     for (rel, contents) in files {
@@ -23,7 +23,7 @@ fn scaffold(root: &Path, files: &[(&str, &str)]) {
 fn build_lib(cwd: &Path, entry: &str, pkg: &str, extra: &[&str], out: &Path)
     -> std::process::Output
 {
-    Command::new(HAVENC)
+    common::havenc_cmd()
         .current_dir(cwd)
         .args([entry, "--package-name", pkg, "--lib"])
         .args(extra)
@@ -34,7 +34,7 @@ fn build_lib(cwd: &Path, entry: &str, pkg: &str, extra: &[&str], out: &Path)
 
 /// `havenc <entry> --package-name app [flags] -o <out>` — build a program.
 fn build_app(cwd: &Path, entry: &str, flags: &[&str], out: &Path) -> std::process::Output {
-    Command::new(HAVENC)
+    common::havenc_cmd()
         .current_dir(cwd)
         .args([entry, "--package-name", "app"])
         .args(flags)
@@ -55,13 +55,20 @@ fn stderr_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// The minimal C runtime a self-preluding stub ships: just the `rt_puts` its
+/// programs call. The compiler embeds no runtime of its own, so a package that
+/// supplies the prelude carries whatever native symbols its prelude needs - here
+/// one function - exactly as the real std ships its `rt.c`.
+const RT_STUB_C: &str =
+    "#include <stdio.h>\nvoid rt_puts(const char* s) { fputs(s, stdout); }\n";
+
 /// A miniature stdlib. `lib.hv` is the prelude (a root module, not a file named
 /// `prelude` — the point being that the compiler reads the mark, not the name);
 /// `text.hv` is an ordinary sibling module, present to show that a prelude
 /// package's *own* modules see the prelude too.
 ///
-/// `rt_puts` comes from the runtime archive every Haven program links, so `mini`
-/// can print without borrowing anything from the embedded std.
+/// `mini` ships its own `rt.c` for `rt_puts`, so it is self-contained: the
+/// compiler links no runtime of its own for a build whose prelude is `mini`.
 fn mini_lib() -> Vec<(&'static str, &'static str)> {
     vec![
         ("mini/lib.hv",
@@ -79,12 +86,15 @@ fn mini_lib() -> Vec<(&'static str, &'static str)> {
         // because this module's own package supplies the prelude.
         ("mini/text.hv",
          "pub proc shout(s: str) str { say(\"(shouting)\"); return s; }\n"),
+        ("mini/rt.c", RT_STUB_C),
     ]
 }
 
-/// Build `mini` into an artifact, nominating itself as its own prelude.
+/// Build `mini` into an artifact, nominating itself as its own prelude and
+/// shipping its `rt.c` so its programs link without any compiler-supplied runtime.
 fn build_mini(dir: &Path) -> std::process::Output {
-    build_lib(dir, "mini/lib.hv", "mini", &["--prelude", "mini"], &dir.join("mini"))
+    build_lib(dir, "mini/lib.hv", "mini",
+        &["--prelude", "mini", "--c-file", "mini/rt.c"], &dir.join("mini"))
 }
 
 /// The whole point: a program's prelude comes from a dependency. `say` and
@@ -306,14 +316,18 @@ fn std_stub() -> Vec<(&'static str, &'static str)> {
           pub proc double(x: i32) i32 { return x * 2; }\n"),
         ("stdsrc/text.hv",
          "pub proc shout(s: str) str { say(\"(shouting)\"); return s; }\n"),
+        ("stdsrc/rt.c", RT_STUB_C),
     ]
 }
 
 /// Build the stub into a `std.hvmeta` artifact, nominating itself as its own
-/// prelude (the only way a stdlib compiles). Its package name is `std`, which is
-/// what lets `--dep std=std.hvmeta` bind it without a name mismatch.
+/// prelude (the only way a stdlib compiles) and shipping its `rt.c`. Its package
+/// name is `std`, which is what lets `--dep std=std.hvmeta` bind it without a name
+/// mismatch. The compiler embeds no runtime, so shipping `rt.c` is what makes the
+/// stub's programs link.
 fn build_std_stub(dir: &Path) -> std::process::Output {
-    build_lib(dir, "stdsrc/lib.hv", "std", &["--prelude", "std"], &dir.join("std"))
+    build_lib(dir, "stdsrc/lib.hv", "std",
+        &["--prelude", "std", "--c-file", "stdsrc/rt.c"], &dir.join("std"))
 }
 
 /// Binding `--dep std=...` makes that package *be* std: `import std/text` reaches
@@ -369,7 +383,7 @@ fn binding_std_moves_the_default_prelude_and_does_not_double_load() {
     // note: no `--prelude`. The default would be the embedded std's prelude;
     // binding std redirects it to the dep.
     let app = dir.path().join("app");
-    let res = Command::new(HAVENC)
+    let res = common::havenc_cmd()
         .current_dir(dir.path())
         .args(["main.hv", "--package-name", "app", "--dep", "std=std.hvmeta",
                "--emit-ir", "-o"])
@@ -390,4 +404,48 @@ fn binding_std_moves_the_default_prelude_and_does_not_double_load() {
     let run = Command::new(exe(&app)).output().unwrap();
     assert_eq!(stdout_of(&run), "(shouting)\nhi\n");
     assert_eq!(run.status.code(), Some(0));
+}
+
+/// A std-shaped dependency that ships its *own* runtime C, which the leaf
+/// compiles (Stage 3) and links. The compiler embeds no runtime of its own, so
+/// this dep's `rt_puts` is the only one: the program links, runs, and defines
+/// `rt_puts` exactly once. This is what lets std be a package that carries its
+/// whole runtime, with the compiler embedding none of it.
+#[test]
+fn dep_supplied_runtime_replaces_the_embedded_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &std_stub());
+    // std ships the one runtime symbol its programs use; the compiler supplies
+    // none, so this is where `rt_puts` comes from.
+    std::fs::write(dir.path().join("stdsrc/rt.c"),
+        "#include <stdio.h>\nvoid rt_puts(const char* s) { fputs(s, stdout); }\n").unwrap();
+    let built = build_lib(dir.path(), "stdsrc/lib.hv", "std",
+        &["--prelude", "std", "--c-file", "stdsrc/rt.c"], &dir.path().join("std"));
+    assert!(built.status.success(), "std stub shipping C must build: {}", stderr_of(&built));
+
+    std::fs::write(dir.path().join("main.hv"),
+        "proc main() i32 { say(\"from dep runtime\"); return double(0); }\n").unwrap();
+
+    let app = dir.path().join("app");
+    let res = build_app(dir.path(), "main.hv",
+        &["--dep", "std=std.hvmeta", "--prelude", "std"], &app);
+    assert!(res.status.success(),
+        "a dep shipping its runtime must link without the embedded one: {}", stderr_of(&res));
+
+    let run = Command::new(exe(&app)).output().unwrap();
+    assert_eq!(stdout_of(&run), "from dep runtime\n");
+
+    // rt_puts defined exactly once — the dep's, and there is no other. `nm`
+    // may be absent (skip then); the link success above is the primary proof.
+    if let Ok(nm) = Command::new("nm").arg(exe(&app)).output() {
+        let syms = String::from_utf8_lossy(&nm.stdout);
+        let defs = syms.lines()
+            .filter(|l| {
+                let mut cols = l.split_whitespace();
+                cols.next(); // address
+                cols.next() == Some("T") && cols.next() == Some("rt_puts")
+            })
+            .count();
+        assert_eq!(defs, 1, "rt_puts defined {defs} times (runtime double-linked?)");
+    }
 }

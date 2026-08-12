@@ -21,7 +21,6 @@ haven_meta = { path = "crates/haven_meta" }
 
 ariadne = "0.6.0"
 bumpalo = "3.20.3"
-include_dir = "0.7.4"
 chumsky = { git = "https://codeberg.org/zesterer/chumsky", rev = "dd46ce3def", features = ["pratt"] }
 clap = { version = "4.6.1", features = ["derive"] }
 toml = "0.8"

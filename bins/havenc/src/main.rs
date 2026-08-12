@@ -14,8 +14,6 @@ use haven_back::llvm;
 
 mod args;
 
-const RUNTIME_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libruntime.a"));
-
 fn main() {
     let args = args::Args::parse();
     let input = &args.input;
@@ -48,7 +46,28 @@ fn main() {
     // as a clean diagnostic before compilation rather than mid-resolution. The
     // parsed source travels into `load_and_merge`, which resolves an `import
     // name/...` against it exactly the way it resolves `std/...`.
-    let deps = load_deps(&args.dep);
+    let mut deps = load_deps(&args.dep);
+
+    // The compiler embeds no std of its own: it discovers the `std` library on
+    // disk (see `discover_std`) and binds it exactly like a `--dep std=...` would,
+    // so `import std/...` resolves to it and its `@!prelude` becomes the program's
+    // prelude. Skipped when the user already bound their own `std`, or when the
+    // package being compiled *is* std - a package cannot depend on itself, and
+    // this is how std itself is built. `default_std` marks the binding as the
+    // compiler's own fallback-priority one, so a user's prelude-bearing dep still
+    // wins prelude discovery. Discovery failing is not fatal *yet*: the embedded
+    // tree remains the fallback until it is removed.
+    let self_pkg = args.package_name.clone().unwrap_or_else(|| {
+        args.input.file_stem().map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "pkg".to_string())
+    });
+    let mut default_std: Option<&str> = None;
+    if self_pkg != "std" && !deps.contains_key("std") {
+        if let Some(std_meta) = discover_std() {
+            deps.insert("std".to_string(), std_meta);
+            default_std = Some("std");
+        }
+    }
 
     // where the prelude comes from. `--no-prelude` and `--prelude <name>` are
     // mutually exclusive at the CLI, so the three cases are disjoint.
@@ -60,7 +79,7 @@ fn main() {
         (None, false) => module::PreludeSource::Auto,
     };
 
-    let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), prelude, &deps, &arena) {
+    let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), prelude, &deps, default_std, &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };
@@ -191,10 +210,6 @@ fn main() {
             std::fs::write(&llvm_ir_output_path, llvm_ir)
                 .expect("Failed to write LLVM IR to file");
 
-            // Dump the embedded runtime archive into a temporary file
-            let mut temp_runtime = tempfile::NamedTempFile::new().expect("Failed to create temp file");
-            temp_runtime.write_all(RUNTIME_ARCHIVE).expect("Failed to write runtime archive to temp file");
-
             if args.emit_optimized_ir {
                 let optimized_ir_output_path = args.output.with_extension("opt.ll");
 
@@ -248,14 +263,25 @@ fn main() {
             // until the link command below has run and read them.
             let mut native_temps: Vec<tempfile::NamedTempFile> = Vec::new();
             let mut native_objs: Vec<std::path::PathBuf> = Vec::new();
-            let mut dep_link_libs: Vec<String> = Vec::new();
+            let mut link_libs: Vec<String> = Vec::new();
+            // Only deps whose modules were actually loaded contribute native C and
+            // link libs. A dep that is bound but never imported (and is not the
+            // prelude) pulls nothing in - so the discovered std costs a freestanding
+            // `--no-prelude` build nothing, and an unused explicit `--dep` no longer
+            // drags its C onto the link line. Dep modules key as `<depname>/<rel>`
+            // (see `dep_key`), so the leading path segment recovers the dep name.
+            let loaded_deps: std::collections::HashSet<&str> = defs.modules().iter()
+                .filter(|m| m.origin == Origin::Dep)
+                .filter_map(|m| m.key.split('/').next())
+                .collect();
             let mut dep_names: Vec<&String> = deps.keys().collect();
             dep_names.sort();
             for name in &dep_names {
+                if !loaded_deps.contains(name.as_str()) { continue; }
                 let meta = &deps[*name];
                 for lib in &meta.link_libs {
-                    if !dep_link_libs.iter().any(|l| l == lib) {
-                        dep_link_libs.push(lib.clone());
+                    if !link_libs.iter().any(|l| l == lib) {
+                        link_libs.push(lib.clone());
                     }
                 }
                 for src in &meta.native {
@@ -288,16 +314,56 @@ fn main() {
                     native_temps.push(o_temp);
                 }
             }
-            // `-l` flags for the libraries the deps declared (e.g. std's
-            // `libs = ["m"]`). Owned here so they outlive the borrowed
-            // `compiler_args` below.
-            let dep_lib_flags: Vec<String> =
-                dep_link_libs.iter().map(|l| format!("-l{}", l)).collect();
 
-            let mut compiler_args = vec![
-                llvm_ir_output_path.to_str().unwrap(),
-                temp_runtime.path().to_str().unwrap(),
-            ];
+            // The leaf's own native code, from its `[[c]]`/`--c-file`/`--link-lib`
+            // - a binary that ships C glue or links a system library (raylib, SDL,
+            // ...). A `--lib` build never reaches here: it stores its `--c-file` in
+            // the `.hvmeta` for its consumers' leaves to compile instead (see
+            // `write_lib_metadata`). Own C sources are real files on disk, so they
+            // compile straight to an object (no temp `.c` needed), at the same -O3
+            // as dependency C. The objects join `native_objs`; the lib names join
+            // `link_libs` after the deps' so a lib both a dep and the leaf ask for
+            // collapses to a single `-l`.
+            for path in &args.c_file {
+                let o_temp = tempfile::Builder::new()
+                    .suffix(".o")
+                    .tempfile()
+                    .expect("Failed to create temp object file");
+                let status = std::process::Command::new(&args.compiler)
+                    .arg("-c")
+                    .arg("-O3")
+                    .arg(path)
+                    .arg("-o")
+                    .arg(o_temp.path())
+                    .status()
+                    .expect("Failed to execute compiler for --c-file source");
+                if !status.success() {
+                    eprintln!(
+                        "Compiler exited with non-zero status compiling '{}': {}",
+                        path.display(), status);
+                    std::process::exit(1);
+                }
+                native_objs.push(o_temp.path().to_path_buf());
+                native_temps.push(o_temp);
+            }
+            for lib in &args.link_lib {
+                if !link_libs.iter().any(|l| l == lib) {
+                    link_libs.push(lib.clone());
+                }
+            }
+
+            // `-l` flags for every library the deps and the leaf declared (e.g.
+            // std's `libs = ["m"]`, or a binary's `libs = ["raylib"]`). Owned here
+            // so they outlive the borrowed `compiler_args` below.
+            let lib_flags: Vec<String> =
+                link_libs.iter().map(|l| format!("-l{}", l)).collect();
+
+            // The compiler embeds no runtime of its own. Every program's C runtime
+            // rides in a dependency (std ships `rt.c`/`env.c`/..., compiled to
+            // `native_objs` above), so the link line carries only those objects. A
+            // freestanding build with no runtime-bearing dep links none - which is
+            // what `--no-prelude` means.
+            let mut compiler_args = vec![llvm_ir_output_path.to_str().unwrap()];
             compiler_args.extend(args.compiler_flags.split_whitespace());
             // dependency C objects, ahead of the `-l` flags they may reference
             compiler_args.extend(native_objs.iter().map(|p| p.to_str().unwrap()));
@@ -307,11 +373,11 @@ fn main() {
             // declares `m`, which is where this hardcode goes to die: once the
             // runtime is std's and std ships `libs = ["m"]`, the compiler stops
             // asserting libm on its own.
-            if !cfg!(target_os = "windows") && !dep_link_libs.iter().any(|l| l == "m") {
+            if !cfg!(target_os = "windows") && !link_libs.iter().any(|l| l == "m") {
                 compiler_args.push("-lm");
             }
             // libraries the dependencies asked for, after every object
-            compiler_args.extend(dep_lib_flags.iter().map(|s| s.as_str()));
+            compiler_args.extend(lib_flags.iter().map(|s| s.as_str()));
 
             let status = if args.shared {
                 let shared_output_path = if cfg!(target_os = "windows") {
@@ -332,7 +398,7 @@ fn main() {
                     .expect("Failed to execute compiler for shared library")
             } else if args.static_lib {
                 // clang won't archive for us, so compile the IR to a single
-                // object first, then bundle it with the runtime archive into one
+                // object first, then bundle it with the dependency objects into one
                 // static library the host can link against.
                 let obj_path = args.output.with_extension("o");
                 let obj_status = std::process::Command::new(&args.compiler)
@@ -351,8 +417,7 @@ fn main() {
 
                 // On Windows the conventional static lib is a `.lib` produced by
                 // llvm-lib (MSVC-style archive); elsewhere it's a `.a` from
-                // llvm-ar. Both understand our object + the runtime archive's
-                // members.
+                // llvm-ar. Both understand our object + the dependency objects.
                 let (archiver, lib_ext) = if cfg!(target_os = "windows") {
                     ("llvm-lib", "lib")
                 } else {
@@ -362,19 +427,17 @@ fn main() {
 
                 let mut archive_cmd = std::process::Command::new(archiver);
                 if cfg!(target_os = "windows") {
-                    // llvm-lib: /OUT:foo.lib foo.o libruntime.a dep0.o ...
+                    // llvm-lib: /OUT:foo.lib foo.o dep0.o ...
                     archive_cmd
                         .arg(format!("/OUT:{}", lib_path.display()))
                         .arg(&obj_path)
-                        .arg(temp_runtime.path())
                         .args(&native_objs);
                 } else {
-                    // llvm-ar: crs foo.a foo.o libruntime.a dep0.o ...
+                    // llvm-ar: crs foo.a foo.o dep0.o ...
                     archive_cmd
                         .arg("crs")
                         .arg(&lib_path)
                         .arg(&obj_path)
-                        .arg(temp_runtime.path())
                         .args(&native_objs);
                 }
 
@@ -412,6 +475,56 @@ fn main() {
             }
         }
     }
+}
+
+/// Find the default `std` library on disk, the compiler having none embedded.
+/// Precedence:
+///   1. `$HAVEN_STD` - an explicit path (or empty, meaning "no std, don't
+///      discover"; the escape hatch for freestanding builds and the test harness).
+///      Set-but-unusable is a hard error: the operator meant to supply std.
+///   2. a path relative to the `havenc` binary: `<dir>/std.hvmeta`, then
+///      `<dir>/../lib/haven/std.hvmeta` for an installed `bin`/`lib` layout.
+/// Returns `None` when nothing is set and no sibling artifact exists, letting the
+/// caller fall back to the (soon-to-be-removed) embedded tree. A found-but-wrong
+/// artifact is a hard error rather than a silent fallback.
+fn discover_std() -> Option<haven_meta::HavenMeta> {
+    if let Some(val) = std::env::var_os("HAVEN_STD") {
+        if val.is_empty() {
+            return None; // explicit opt-out
+        }
+        return Some(load_std_from(std::path::Path::new(&val), "$HAVEN_STD"));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    for rel in ["std.hvmeta", "../lib/haven/std.hvmeta"] {
+        let cand = dir.join(rel);
+        if cand.is_file() {
+            return Some(load_std_from(&cand, "the compiler's sysroot"));
+        }
+    }
+    None
+}
+
+/// Read a `std.hvmeta` from `path` and insist it really is package `std`. `whence`
+/// names where the path came from, for the diagnostic. Exits the process on any
+/// failure - a std the operator pointed at that cannot be used is fatal, never a
+/// quiet fallback.
+fn load_std_from(path: &std::path::Path, whence: &str) -> haven_meta::HavenMeta {
+    let meta = match haven_meta::read(path) {
+        Ok(m) => m,
+        Err(e) => {
+            diag::report_plain("Error", &format!(
+                "cannot load the std library from '{}' ({}): {}", path.display(), whence, e));
+            std::process::exit(1);
+        }
+    };
+    if meta.header.package_name != "std" {
+        diag::report_plain("Error", &format!(
+            "the artifact at '{}' ({}) is package '{}', not 'std'; it cannot serve \
+             as the standard library", path.display(), whence, meta.header.package_name));
+        std::process::exit(1);
+    }
+    meta
 }
 
 /// Parse and load every `--dep name=path.hvmeta` into a `name -> artifact` map.

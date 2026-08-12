@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-const HAVENC: &str = env!("CARGO_BIN_EXE_havenc");
+mod common;
 
 /// Write `(relative path, contents)` files under `root`, creating parent dirs.
 fn scaffold(root: &Path, files: &[(&str, &str)]) {
@@ -23,7 +23,7 @@ fn scaffold(root: &Path, files: &[(&str, &str)]) {
 
 /// `havenc <entry> --package-name <pkg> --lib -o <out>` — produce a `.hvmeta`.
 fn build_lib(cwd: &Path, entry: &str, pkg: &str, out: &Path) -> std::process::Output {
-    Command::new(HAVENC)
+    common::havenc_cmd()
         .current_dir(cwd)
         .args([entry, "--package-name", pkg, "--lib", "-o"])
         .arg(out)
@@ -36,7 +36,7 @@ fn build_lib(cwd: &Path, entry: &str, pkg: &str, out: &Path) -> std::process::Ou
 fn build_app(cwd: &Path, entry: &str, pkg: &str, deps: &[&str], out: &Path)
     -> std::process::Output
 {
-    let mut cmd = Command::new(HAVENC);
+    let mut cmd = common::havenc_cmd();
     cmd.current_dir(cwd)
         .args([entry, "--package-name", pkg])
         .arg("-o").arg(out)
@@ -456,7 +456,7 @@ fn self_wins_over_a_dependency_named_self() {
 /// — produce a `.hvmeta` that ships native C and/or declares libraries to link.
 fn build_lib_native(cwd: &Path, entry: &str, pkg: &str, c_files: &[&str],
                     libs: &[&str], out: &Path) -> std::process::Output {
-    let mut cmd = Command::new(HAVENC);
+    let mut cmd = common::havenc_cmd();
     cmd.current_dir(cwd)
         .args([entry, "--package-name", pkg, "--lib", "-o"])
         .arg(out);

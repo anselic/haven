@@ -3,7 +3,50 @@ import sys
 import shutil
 import platform
 import argparse
+import subprocess
 from pathlib import Path
+
+# The compiler embeds no standard library: it discovers `std.hvmeta` on disk,
+# first looking right next to the `havenc` binary. So a working install is the
+# binaries *plus* this artifact, built from the standalone `std` package here and
+# installed alongside them.
+STD_ARTIFACT = "std.hvmeta"
+
+def build_std(source_dir, dest_dir):
+    """Build the `std` package into `std.hvmeta` with the just-built `haven` (which
+    drives its sibling `havenc` off the manifest), and place the artifact beside the
+    installed binaries so `havenc` discovers it sysroot-relative. Driving `haven`
+    rather than `havenc` directly keeps the C files and linked libs sourced from
+    `std/haven.toml` alone, with no second copy of that list to drift here."""
+    exe_ext = ".exe" if platform.system() == "Windows" else ""
+    # Resolve to absolute: we run with `cwd` set to the std package, and `haven`
+    # locates `havenc` relative to its own (absolute) path, so a relative
+    # `target/release/haven` would otherwise be looked up under `cwd`.
+    haven = (source_dir / f"haven{exe_ext}").resolve()
+    havenc = (source_dir / f"havenc{exe_ext}").resolve()
+    if not haven.exists() or not havenc.exists():
+        print(f"Warning: {haven} or its sibling {havenc.name} not found; cannot build "
+              f"{STD_ARTIFACT}. Programs will need $HAVEN_STD or --dep std.")
+        return
+    std_dir = Path("std").resolve()
+    result = subprocess.run([str(haven), "build"], cwd=str(std_dir),
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        # `haven` prints progress to stdout and forwards compiler/tool errors to
+        # stderr; show both so a failure is not a bare "compilation failed".
+        print(f"Failed to build {STD_ARTIFACT}:\n{result.stdout}{result.stderr}")
+        return
+    artifact = std_dir / ".haven" / "target" / STD_ARTIFACT
+    if not artifact.exists():
+        print(f"Failed to build {STD_ARTIFACT}: `haven build` produced no artifact "
+              f"at {artifact}.")
+        return
+    out = dest_dir / STD_ARTIFACT
+    try:
+        shutil.copy2(artifact, out)
+        print(f"Success: Built and installed {STD_ARTIFACT} to {out}")
+    except Exception as e:
+        print(f"Failed to install {STD_ARTIFACT}: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Manage haven binaries.")
@@ -37,7 +80,7 @@ def main():
         removed_any = False
         for d in dirs_to_check:
             if not d.is_dir(): continue
-            for bin_name in binaries:
+            for bin_name in binaries + [STD_ARTIFACT]:
                 target_file = d / bin_name
                 if target_file.exists():
                     try:
@@ -106,6 +149,9 @@ def main():
                     print(f"Failed to copy {bin_name}: {e}")
             else:
                 print(f"Warning: {src_file} not found in {source_dir}. Skipping.")
+
+        # the compiler carries no std of its own; build and install it alongside.
+        build_std(source_dir, dest_dir)
 
 if __name__ == "__main__":
     main()

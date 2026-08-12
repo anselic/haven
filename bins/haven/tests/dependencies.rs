@@ -5,8 +5,9 @@
 //! same target directory - so a passing test exercises manifest parsing, the
 //! dependency build, and the `--dep` handoff to the compiler end to end.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 const HAVEN: &str = env!("CARGO_BIN_EXE_haven");
 
@@ -19,9 +20,40 @@ fn scaffold(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
+static STD_META: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
+
+/// Build the standalone `std` package into a discoverable `std.hvmeta`, once. The
+/// compiler embeds no std; the `haven` tool locates its sibling `havenc`, and
+/// `$HAVEN_STD` set on the `haven` process (below) propagates to that `havenc`.
+/// The build uses the same sibling `havenc`, found next to the `haven` binary.
+fn std_meta() -> &'static Path {
+    &STD_META.get_or_init(|| {
+        let havenc = Path::new(HAVEN).with_file_name(if cfg!(windows) { "havenc.exe" } else { "havenc" });
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().and_then(|p| p.parent()).expect("repo root above bins/haven");
+        let std_dir = repo.join("std");
+        let tmp = tempfile::tempdir().expect("temp dir for std.hvmeta");
+        let meta = tmp.path().join("std.hvmeta");
+        let o = Command::new(&havenc)
+            .arg(std_dir.join("src/lib.hv"))
+            .args(["--lib", "--package-name", "std", "--prelude", "std"])
+            .arg("--c-file").arg(std_dir.join("c/rt.c"))
+            .arg("--c-file").arg(std_dir.join("c/env.c"))
+            .arg("--c-file").arg(std_dir.join("c/fs.c"))
+            .arg("--c-file").arg(std_dir.join("c/process.c"))
+            .args(["--link-lib", "m"])
+            .arg("-o").arg(&meta)
+            .output().expect("failed to spawn havenc to build std.hvmeta");
+        assert!(o.status.success(), "building std.hvmeta failed:\n{}",
+            String::from_utf8_lossy(&o.stderr));
+        (tmp, meta)
+    }).1
+}
+
 fn haven(cwd: &Path, args: &[&str]) -> std::process::Output {
     Command::new(HAVEN)
         .current_dir(cwd)
+        .env("HAVEN_STD", std_meta())
         .args(args)
         .output()
         .expect("failed to spawn haven")
@@ -176,4 +208,32 @@ fn rejects_unsupported_dependency_form() {
     let res = haven(&dir.path().join("app"), &["build"]);
     assert!(!res.status.success(), "a bare-string dependency must be rejected");
     assert!(err(&res).contains("path"), "should point at the path form; got: {}", err(&res));
+}
+
+/// A `[[c]]` table on a *binary* project: `haven` forwards its `files` as
+/// `--c-file` and `libs` as `--link-lib`, so a program can ship C glue and link a
+/// system library. Proves the manifest wiring end to end - the C symbol resolves
+/// and the program runs. (`libs = ["m"]` stands in for a real system lib like
+/// raylib; libm is guaranteed on the test host.)
+#[test]
+fn binary_with_c_table_builds_and_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("app/haven.toml",
+            "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\n\
+             [[c]]\nfiles = [\"c/glue.c\"]\nlibs = [\"m\"]\n"),
+        ("app/c/glue.c",
+            "#include <math.h>\ndouble glue_hypot(double a, double b) { return hypot(a, b); }\n"),
+        ("app/src/main.hv",
+            "extern glue_hypot(a: f64, b: f64) f64;\n\
+             proc main() i32 {\n\
+             \x20   println(numerical_cast::<i32>(glue_hypot(3.0f64, 4.0f64)));\n\
+             \x20   return 0;\n\
+             }\n"),
+    ]);
+
+    let res = haven(&dir.path().join("app"), &["run"]);
+    assert!(res.status.success(), "a bin with a [[c]] table must build and run: {}", err(&res));
+    // hypot(3, 4) == 5: the C from `files` compiled in, and `-lm` from `libs` linked.
+    assert!(out(&res).contains('5'), "unexpected program output:\n{}", out(&res));
 }

@@ -54,16 +54,6 @@ use bumpalo::Bump;
 
 use crate::ast::{FileId, GenericParam, Receiver, Span, Type};
 
-/// Which embedded module the loader *loads* to serve as the prelude.
-///
-/// Only that. Which module then *is* the prelude, and which definitions are
-/// lang items, are answered by the `@!prelude` and `@lang(...)` marks in the
-/// source - not by this key. Recognizing either by module key would make a
-/// language rule out of how the embedded tree happens to be laid out, and would
-/// have nothing to say the moment a prelude arrives from a package whose files
-/// are named however that package likes. See [`LangItems`].
-pub const PRELUDE_KEY: &str = "std/prelude";
-
 /// Every lang item name, as written in `@lang(...)`.
 ///
 /// One list, read twice: the attribute table validates a written name against
