@@ -484,6 +484,134 @@ fn typecheck_intrinsic<'a>(
     }
 }
 
+/// The inclusive range of `ty`, if it is an integer type. Every bound fits in
+/// `i128`, which is what makes a width-less literal checkable against any of
+/// them - including `u64`, whose top half is out of `i64`'s reach.
+fn int_range(ty: &Type<'_>) -> Option<(i128, i128)> {
+    Some(match ty {
+        Type::Int8   => (i8::MIN as i128, i8::MAX as i128),
+        Type::Int16  => (i16::MIN as i128, i16::MAX as i128),
+        Type::Int32  => (i32::MIN as i128, i32::MAX as i128),
+        Type::Int64  => (i64::MIN as i128, i64::MAX as i128),
+        Type::Uint8  => (0, u8::MAX as i128),
+        Type::Uint16 => (0, u16::MAX as i128),
+        Type::Uint32 => (0, u32::MAX as i128),
+        Type::Uint64 => (0, u64::MAX as i128),
+        _ => return None,
+    })
+}
+
+/// Can a width-less literal of value `v` be the type `expected` asks for?
+///
+/// An integer literal fits an integer type whose range contains it, and any
+/// float type - `let x: f64 = 1;` is allowed, since the intent is unambiguous.
+/// A *float* literal (`v` is `None`) fits only a float type: an integer target
+/// would have to discard digits the source wrote.
+fn literal_fits(v: Option<i128>, expected: &Type<'_>) -> bool {
+    match (v, expected) {
+        (_, Type::Float32 | Type::Float64) => true,
+        (Some(v), ty) => int_range(ty).is_some_and(|(lo, hi)| (lo..=hi).contains(&v)),
+        (None, _) => false,
+    }
+}
+
+/// The value of a width-less literal leaf, negation folded in: `Some(v)` for an
+/// integer literal, `None` for a float one. Any other expression - a suffixed
+/// literal included - is not context-typed and yields `None` via the outer
+/// `Option`.
+///
+/// Negation has to be folded rather than checked through, because the range test
+/// is asymmetric: `128` does not fit `i8` but `-128` does.
+fn untyped_lit(expr: &Expr<'_>) -> Option<Option<i128>> {
+    match &expr.value {
+        ExprNode::IntLit(v) => Some(Some(*v)),
+        ExprNode::FloatLit(_) => Some(None),
+        ExprNode::Unary { op: UnaryOp::Neg, operand } => match &operand.value {
+            ExprNode::IntLit(v) => Some(Some(-*v)),
+            ExprNode::FloatLit(_) => Some(None),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Is `expr` built only out of width-less literals, so that it has no type of
+/// its own for context to disagree with?
+///
+/// A literal, a negated one, or the two joined by an operator that yields the
+/// operand type: `1 << 40` is no more an `i32` than `1` is, so a `u64` slot
+/// should get it as a `u64` rather than watch it default and then overflow.
+/// Comparisons are excluded - they yield `bool` regardless of their operands.
+fn untyped_lit_shape(expr: &Expr<'_>) -> bool {
+    use haven_common::ast::BinaryOp::*;
+    match &expr.value {
+        ExprNode::Binary { op, left, right } =>
+            matches!(op, Add | Sub | Mul | Div | Mod | BitAnd | BitOr | BitXor | Shl | Shr)
+                && untyped_lit_shape(left) && untyped_lit_shape(right),
+        _ => untyped_lit(expr).is_some(),
+    }
+}
+
+/// Give every node of a width-less literal expression the type `expected`, after
+/// checking each leaf's value survives it. Assumes [`untyped_lit_shape`].
+///
+/// Every node is recorded, not just the root: MIL reads a binary operation's
+/// type from its left operand's entry, and a negation's from the literal inside
+/// it, so a half-typed tree would lower at the wrong width.
+fn type_untyped_lit<'a>(
+    cx: &mut Context<'a>,
+    expected: &Type<'a>,
+    expr: &Expr<'a>,
+) -> Result<(), Error> {
+    match &expr.value {
+        ExprNode::Binary { left, right, .. } => {
+            type_untyped_lit(cx, expected, left)?;
+            type_untyped_lit(cx, expected, right)?;
+        }
+        _ => {
+            let v = untyped_lit(expr).expect("untyped_lit_shape checked this leaf");
+            if !literal_fits(v, expected) {
+                let msg = match v {
+                    Some(v) => format!("integer literal {} does not fit in {}", v, cx.show(expected)),
+                    None => format!("Expected {}, got a float literal", cx.show(expected)),
+                };
+                return Err(Error { msg, span: expr.span.clone() });
+            }
+            // `-<literal>` is one unit: the literal inside it is typed too.
+            if let ExprNode::Unary { operand, .. } = &expr.value {
+                cx.node_types.insert(operand.id, expected.clone());
+            }
+        }
+    }
+    cx.node_types.insert(expr.id, expected.clone());
+    Ok(())
+}
+
+/// The operand type shared by both sides of a binary operator, with the other
+/// side checked against it.
+///
+/// The left operand normally decides. But a width-less literal has no type to
+/// decide with - it would default to `i32` and then reject a perfectly good
+/// `i64` on the right - so when exactly one side is such a literal, the *other*
+/// side picks. That is what makes `1 + n` work as well as `n + 1`. With literals
+/// on both sides nothing has changed: the left one defaults, and the right one
+/// follows it.
+fn binary_operand_ty<'a>(
+    cx: &mut Context<'a>,
+    left: &Expr<'a>,
+    right: &Expr<'a>,
+) -> Result<Type<'a>, Error> {
+    if untyped_lit_shape(left) && !untyped_lit_shape(right) {
+        let ty = infer(cx, right)?;
+        check_expr(cx, &ty, left)?;
+        Ok(ty)
+    } else {
+        let ty = infer(cx, left)?;
+        check_expr(cx, &ty, right)?;
+        Ok(ty)
+    }
+}
+
 pub(crate) fn check_expr<'a>(
     cx: &mut Context<'a>,
     expected: &Type<'a>,
@@ -492,6 +620,17 @@ pub(crate) fn check_expr<'a>(
     let metadata = expr;
     let value = &metadata.value;
     let span = metadata.span.clone();
+
+    // an expression written entirely in width-less literals has no type of its
+    // own: it takes the one being asked for here, provided each value survives
+    // it. `infer` only sees such a literal where there is no expectation to read,
+    // and defaults it to `i32`/`f32` there.
+    //
+    // A non-numeric expectation falls through instead, so `let b: bool = 1;`
+    // still reports the ordinary mismatch rather than a range complaint.
+    if expected.is_numeric() && untyped_lit_shape(expr) {
+        return type_untyped_lit(cx, expected, expr);
+    }
 
     let actual = match value {
         ExprNode::Bool(_)    => Type::Bool,
@@ -519,6 +658,36 @@ pub(crate) fn check_expr<'a>(
                         span,
                     });
                 }
+            }
+        },
+
+        // a populated array literal in a known array/slice position: check each
+        // element against the element type being asked for, instead of inferring
+        // the whole literal from its first element. Without this the elements are
+        // typed before anything says what they should be, so the width-less
+        // literals in `let xs: [i64; 3] = [1, 2, 3];` would default to `i32` and
+        // the array would then mismatch as a whole.
+        //
+        // A length disagreement, a const-param length, or any other expected type
+        // falls through to `infer`, which reports the mismatch as before.
+        ExprNode::Slice(inner) => {
+            let elem = match expected {
+                Type::Array(elem, ConstVal::Lit(n)) if *n == inner.len() => Some(elem),
+                Type::Slice(elem) => Some(elem),
+                _ => None,
+            };
+            match elem {
+                Some(elem) => {
+                    let elem = (**elem).clone();
+                    for e in inner {
+                        check_expr(cx, &elem, e)?;
+                    }
+                    // an array literal is an Array even where a slice is wanted;
+                    // the coercion below is what accepts it, exactly as when the
+                    // literal is inferred.
+                    Type::Array(Box::new(elem), ConstVal::Lit(inner.len()))
+                }
+                None => infer(cx, expr)?,
             }
         },
 
@@ -568,6 +737,25 @@ pub(crate) fn infer<'a>(
         ExprNode::Float32(_) => Type::Float32,
         ExprNode::Float64(_) => Type::Float64,
         ExprNode::Str(_)     => Type::Str,
+
+        // a width-less literal reaching `infer` is one with no expectation to
+        // take its type from - `let n = 0;`, or the left operand of a binary
+        // operator. It defaults to 32 bits, which is what a bare literal always
+        // meant; a value too big for that has to say which type it wants.
+        ExprNode::IntLit(v) => {
+            if !literal_fits(Some(*v), &Type::Int32) {
+                return Err(Error {
+                    msg: format!(
+                        "integer literal {} does not fit in i32; add a width suffix (`{}i64`) \
+                         or a type annotation to say which integer type it is",
+                        v, v,
+                    ),
+                    span,
+                });
+            }
+            Type::Int32
+        },
+        ExprNode::FloatLit(_) => Type::Float32,
 
         // an `Enum::Variant` reference - the only qualified path name resolution
         // leaves standing. A unit variant is a value: a field-less enum's scalar
@@ -760,14 +948,12 @@ pub(crate) fn infer<'a>(
             use haven_common::ast::BinaryOp::*;
             match op {
                 Eq | Ne => {
-                    let left_ty = infer(cx, left)?;
-                    check_expr(cx, &left_ty, right)?;
+                    binary_operand_ty(cx, left, right)?;
                     Type::Bool
                 },
                 Add | Sub | Mul | Div | Mod
                 | Lt | Gt | Le | Ge => {
-                    let left_ty = infer(cx, left)?;
-                    check_expr(cx, &left_ty, right)?;
+                    let left_ty = binary_operand_ty(cx, left, right)?;
 
                     // check if both are numeric (scalar or SIMD)
                     if !left_ty.is_numeric_or_numeric_simd() {
@@ -794,8 +980,7 @@ pub(crate) fn infer<'a>(
                 // (LLVM requires the shift amount to match the value type), result
                 // is that integer type.
                 BitAnd | BitOr | BitXor | Shl | Shr => {
-                    let left_ty = infer(cx, left)?;
-                    check_expr(cx, &left_ty, right)?;
+                    let left_ty = binary_operand_ty(cx, left, right)?;
                     if !left_ty.is_integer() {
                         let msg = format!(
                             "Expected an integer type for bitwise operator '{}', got {}",

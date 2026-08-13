@@ -12,6 +12,12 @@ use haven_common::defs::DefId;
 /// representation downstream. Indexing a fixed table keeps these `&'static str`
 /// without leaking a fresh allocation per field, which is what the parser used
 /// to do. A variant with more payload fields than this falls back to a leak.
+/// Upper bound on a literal in const-argument position - an array length, a SIMD
+/// lane count, a const generic argument. Literals lex as `i128` now that they
+/// carry no width, so a size that would not survive the `as usize` narrowing has
+/// to be rejected here rather than wrapping silently.
+const MAX_CONST_ARG: i128 = u32::MAX as i128;
+
 const TUPLE_FIELD_NAMES: [&str; 16] = [
     "0", "1", "2", "3", "4", "5", "6", "7",
     "8", "9", "10", "11", "12", "13", "14", "15",
@@ -72,7 +78,11 @@ fn lexer<'a> (
         };
     }
 
-    // defaults ints and floats to 32 bits and use suffixes to disambiguate
+    // a suffix pins a literal's width exactly; without one the literal stays
+    // width-less (`IntLit`/`FloatLit`) and the typechecker gives it the type its
+    // context asks for, defaulting to 32 bits when there is none. That is why the
+    // unsuffixed cases below do no range check - the target type is not known
+    // yet, so `5000000000` is only too big once something asks for an `i32`.
     let float = text::int::<_, extra::Err<Rich<'a, char>>>(10)
         .then(just('.').then(text::digits(10)))
         .to_slice()
@@ -85,7 +95,7 @@ fn lexer<'a> (
             match width {
                 Some(32) => Ok(Token::Float32(f as f32)),
                 Some(64) => Ok(Token::Float64(f)),
-                None => Ok(Token::Float32(f as f32)),
+                None => Ok(Token::FloatLit(f)),
                 Some(other) => Err(Rich::custom(span, format!("invalid float literal suffix 'f{other}'"))),
             }
         });
@@ -107,7 +117,10 @@ fn lexer<'a> (
                 Some(('u', 16)) => try_parse_int!(u16, n, span).map(Token::Uint16),
                 Some(('u', 32)) => try_parse_int!(u32, n, span).map(Token::Uint32),
                 Some(('u', 64)) => try_parse_int!(u64, n, span).map(Token::Uint64),
-                None => try_parse_int!(i32, n, span).map(Token::Int32),
+                // `i128` is wide enough to hold every `i64` and `u64` the literal
+                // could later be asked to be; anything past that has no possible
+                // target type, so it is a lex error either way.
+                None => try_parse_int!(i128, n, span).map(Token::IntLit),
                 Some((other, width)) => Err(Rich::custom(span, format!("invalid integer literal suffix '{other}{width}'"))),
             }
         });
@@ -385,7 +398,8 @@ fn is_numeric(t: &Token) -> bool {
     matches!(t,
         Token::Int8(_) | Token::Int16(_) | Token::Int32(_) | Token::Int64(_) |
         Token::Uint8(_) | Token::Uint16(_) | Token::Uint32(_) | Token::Uint64(_) |
-        Token::Float32(_) | Token::Float64(_))
+        Token::Float32(_) | Token::Float64(_) |
+        Token::IntLit(_) | Token::FloatLit(_))
 }
 
 fn literal_node<'src>(t: &Token<'src>) -> Option<ExprNode<'src>> {
@@ -401,6 +415,8 @@ fn literal_node<'src>(t: &Token<'src>) -> Option<ExprNode<'src>> {
         Token::Uint64(n) => ExprNode::Uint64(n),
         Token::Float32(f) => ExprNode::Float32(f),
         Token::Float64(f) => ExprNode::Float64(f),
+        Token::IntLit(n) => ExprNode::IntLit(n),
+        Token::FloatLit(f) => ExprNode::FloatLit(f),
         Token::Str(s) => ExprNode::Str(s),
         _ => return None,
     })
@@ -460,9 +476,9 @@ fn parse_expr<'tks, 'src: 'tks>()
         let turbofish = just(Token::ColonColon)
             .ignore_then(
                 choice((
-                    select! { Token::Int32(n) => n }.try_map(|n, span| {
-                        if n < 0 {
-                            Err(Rich::custom(span, "const turbofish argument must be non-negative"))
+                    select! { Token::IntLit(n) => n }.try_map(|n, span| {
+                        if !(0..=MAX_CONST_ARG).contains(&n) {
+                            Err(Rich::custom(span, format!("const turbofish argument must be between 0 and {MAX_CONST_ARG}")))
                         } else {
                             Ok(GenericArg::Const(ConstVal::Lit(n as usize)))
                         }
@@ -554,6 +570,8 @@ fn parse_expr<'tks, 'src: 'tks>()
                 Token::Uint64(u)  => ExprNode::Uint64(*u),
                 Token::Float32(f) => ExprNode::Float32(*f),
                 Token::Float64(f) => ExprNode::Float64(*f),
+                Token::IntLit(n)  => ExprNode::IntLit(*n),
+                Token::FloatLit(f)=> ExprNode::FloatLit(*f),
                 Token::Str(s)     => ExprNode::Str(*s),
             },
 
@@ -758,7 +776,7 @@ fn parse_expr<'tks, 'src: 'tks>()
 /// `1..=64`) can run and report the offending value; an identifier is a const
 /// generic parameter reference, validated later in typecheck.
 enum SizeArg<'a> {
-    Lit(i32),
+    Lit(i128),
     Param(&'a str),
 }
 
@@ -768,7 +786,7 @@ enum SizeArg<'a> {
 /// else parses as a [`GenArg::Ty`]; the dispatch in `parse_type` reinterprets
 /// them per the head name (`simd` wants `<type, size>`; a struct wants types).
 enum GenArg<'a> {
-    Size(i32),
+    Size(i128),
     Ty(Type<'a>),
 }
 
@@ -812,13 +830,13 @@ fn parse_type<'tks, 'src: 'tks>()
                 .ignore_then(ty.clone())
                 .then_ignore(just(Token::Semicolon))
                 .then(select! {
-                    Token::Int32(x) => SizeArg::Lit(x),
+                    Token::IntLit(x) => SizeArg::Lit(x),
                     Token::Var(n) => SizeArg::Param(n),
                 })
                 .then_ignore(just(Token::RBracket))
                 .try_map(|(inner, size), span| match size {
-                    SizeArg::Lit(x) if x > 0 => Ok(Type::Array(Box::new(inner), ConstVal::Lit(x as usize))),
-                    SizeArg::Lit(x) => Err(Rich::custom(span, format!("invalid array size parameter: {x} (must be greater than 0)"))),
+                    SizeArg::Lit(x) if x > 0 && x <= MAX_CONST_ARG => Ok(Type::Array(Box::new(inner), ConstVal::Lit(x as usize))),
+                    SizeArg::Lit(x) => Err(Rich::custom(span, format!("invalid array size parameter: {x} (must be between 1 and {MAX_CONST_ARG})"))),
                     SizeArg::Param(n) => Ok(Type::Array(Box::new(inner), ConstVal::Param(n))),
                 }),
             // [T]
@@ -837,7 +855,7 @@ fn parse_type<'tks, 'src: 'tks>()
             path_of!(var)
             .then(
                 choice((
-                    select! { Token::Int32(x) => GenArg::Size(x) },
+                    select! { Token::IntLit(x) => GenArg::Size(x) },
                     ty.clone().map(GenArg::Ty),
                 ))
                 .separated_by(just(Token::Comma))
@@ -898,8 +916,8 @@ fn parse_type<'tks, 'src: 'tks>()
                 for a in args {
                     gargs.push(match a {
                         GenArg::Ty(t) => GenericArg::Type(t),
-                        GenArg::Size(x) if x >= 0 => GenericArg::Const(ConstVal::Lit(x as usize)),
-                        GenArg::Size(x) => return Err(Rich::custom(span, format!("const argument '{x}' in generic type '{path}<...>' must be non-negative"))),
+                        GenArg::Size(x) if (0..=MAX_CONST_ARG).contains(&x) => GenericArg::Const(ConstVal::Lit(x as usize)),
+                        GenArg::Size(x) => return Err(Rich::custom(span, format!("const argument '{x}' in generic type '{path}<...>' must be between 0 and {MAX_CONST_ARG}"))),
                     });
                 }
                 Ok(Type::Path { path, args: gargs })
@@ -1099,16 +1117,22 @@ fn parse_stmt<'tks, 'src: 'tks>()
         // `_`. A binding field is a name (`Bind`) or `_` (ignore the field).
         let int_pat = just(Token::BinaryOp(BinaryOp::Sub)).or_not()
             .then(select_ref! {
-                Token::Int8(n)   => *n as i64,
-                Token::Int16(n)  => *n as i64,
-                Token::Int32(n)  => *n as i64,
-                Token::Int64(n)  => *n,
-                Token::Uint8(n)  => *n as i64,
-                Token::Uint16(n) => *n as i64,
-                Token::Uint32(n) => *n as i64,
-                Token::Uint64(n) => *n as i64,
+                Token::Int8(n)   => *n as i128,
+                Token::Int16(n)  => *n as i128,
+                Token::Int32(n)  => *n as i128,
+                Token::Int64(n)  => *n as i128,
+                Token::Uint8(n)  => *n as i128,
+                Token::Uint16(n) => *n as i128,
+                Token::Uint32(n) => *n as i128,
+                Token::Uint64(n) => *n as i128,
+                Token::IntLit(n) => *n,
             })
-            .map(|(neg, n)| PatternNode::Int(if neg.is_some() { -n } else { n }));
+            .try_map(|(neg, n), span| {
+                let n = if neg.is_some() { -n } else { n };
+                i64::try_from(n)
+                    .map(PatternNode::Int)
+                    .map_err(|_| Rich::custom(span, format!("integer pattern {n} is out of range")))
+            });
         // each payload sub-pattern is Metadata-wrapped so a `Bind` carries a
         // unique node id (its binding identity, like a `Declare`'s local).
         let field_pat = var.map_with(|s, e| {
@@ -1220,7 +1244,7 @@ fn attribute_tail<'tks, 'src: 'tks>()
                 .ignore_then(select_ref! {
                     Token::Var(s) => s.to_string(),
                     Token::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-                    Token::Int32(i) => i.to_string(),
+                    Token::IntLit(i) => i.to_string(),
                     // Token::Str(s) => s.to_string()
                 })
                 .then_ignore(just(Token::RParen))
@@ -1598,16 +1622,21 @@ fn parse_toplevel<'tks, 'src: 'tks>()
     let enum_discriminant = just(Token::Assign)
         .ignore_then(just(Token::BinaryOp(BinaryOp::Sub)).or_not())
         .then(select_ref! {
-            Token::Int8(n)   => *n as i64,
-            Token::Int16(n)  => *n as i64,
-            Token::Int32(n)  => *n as i64,
-            Token::Int64(n)  => *n,
-            Token::Uint8(n)  => *n as i64,
-            Token::Uint16(n) => *n as i64,
-            Token::Uint32(n) => *n as i64,
-            Token::Uint64(n) => *n as i64,
+            Token::Int8(n)   => *n as i128,
+            Token::Int16(n)  => *n as i128,
+            Token::Int32(n)  => *n as i128,
+            Token::Int64(n)  => *n as i128,
+            Token::Uint8(n)  => *n as i128,
+            Token::Uint16(n) => *n as i128,
+            Token::Uint32(n) => *n as i128,
+            Token::Uint64(n) => *n as i128,
+            Token::IntLit(n) => *n,
         })
-        .map(|(neg, n)| if neg.is_some() { -n } else { n });
+        .try_map(|(neg, n), span| {
+            let n = if neg.is_some() { -n } else { n };
+            i64::try_from(n)
+                .map_err(|_| Rich::custom(span, format!("enum discriminant {n} is out of range")))
+        });
     let enum_variant = var.map(|s| *s)
         .then(choice((enum_payload, enum_struct_payload)).or_not().map(|p| p.unwrap_or_default()))
         .then(enum_discriminant.or_not())

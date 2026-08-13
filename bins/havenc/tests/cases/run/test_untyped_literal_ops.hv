@@ -1,0 +1,34 @@
+// A width-less literal as a binary operand: the *typed* side decides, whichever
+// side it is, and an expression built only from literals takes its type whole
+// from the context rather than defaulting and then overflowing.
+
+@export
+proc main() i32 {
+    let n: i64 = 3;
+
+    // a literal on the right, and on the left
+    let r: i64 = n + 1;
+    let l: i64 = 1 + n;
+    let sh: i64 = n << 2;
+    let cmp: bool = n > 2;
+    let nested: i64 = (1 + 2) * n;
+
+    // nothing but literals: the whole expression is typed by the annotation
+    let mask: u64 = 1 << 40;
+    let sum: i64 = 5000000000 + 1;
+    let mixed: i64 = (2 * 3) + 4000000000;
+    let fl: f64 = 1.5 * 2;
+    let negd: i8 = -128 + 0;
+
+    println(r);
+    println(l);
+    println(sh);
+    println(cmp);
+    println(nested);
+    println(mask);
+    println(sum);
+    println(mixed);
+    println(fl);
+    println(numerical_cast::<i32>(negd));
+    return 0;
+}

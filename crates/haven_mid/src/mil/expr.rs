@@ -3,7 +3,7 @@ use crate::intrinsics::Intrinsic;
 use crate::typecheck::RecvAdjust;
 use super::ir::*;
 use haven_common::defs::DefId;
-use super::ctx::{LowerCtx, coerce, aggregate_def, enum_const, ta_type, ta_const};
+use super::ctx::{LowerCtx, coerce, aggregate_def, enum_const, lit_const, ta_type, ta_const};
 
 fn lower_intrinsic<'a>(
     cx: &mut LowerCtx<'a>,
@@ -249,6 +249,11 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
         ExprNode::Uint64(n)  => Value::Const(Const::Uint64(*n)),
         ExprNode::Float32(n) => Value::Const(Const::Float32(*n)),
         ExprNode::Float64(n) => Value::Const(Const::Float64(*n)),
+
+        // a literal written without a width suffix carries no type in the node -
+        // the checker put the one it was given in `node_types`.
+        ExprNode::IntLit(_) | ExprNode::FloatLit(_) =>
+            Value::Const(lit_const(&cx.node_types[&expr.id], &expr.value)),
 
         // a string literal is a raw `*const u8`: the bare address of a
         // read-only, NUL-terminated global blob. No length is carried; `len()`

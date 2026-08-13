@@ -1,0 +1,6 @@
+//@ error: integer literal -1 does not fit in u32
+@export
+proc main() i32 {
+    let x: u32 = -1;
+    return 0;
+}

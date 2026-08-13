@@ -1,0 +1,63 @@
+// A literal written without a width suffix takes the type its context asks for,
+// at every position that supplies one, and still defaults to i32/f32 where there
+// is nothing to read.
+
+const LIMIT: i64 = 5000000000;
+const TINY: i8 = -128;
+const RATIO: f64 = 2;
+
+proc takes_i64(v: i64) i64 {
+    return v;
+}
+
+proc takes_f64(v: f64) f64 {
+    return v;
+}
+
+struct Sizes {
+    small: u8,
+    wide: i64,
+    ratio: f64,
+}
+
+@export
+proc main() i32 {
+    // annotated locals of every width
+    let a: i64 = 0;
+    let big: i64 = 5000000000;   // would not even lex as i32 before
+    let small: u8 = 255;
+    let neg: i8 = -128;          // negation is folded before the range check
+    let wide: u64 = 18446744073709551615;
+
+    // an integer literal is accepted where a float is expected
+    let x: f64 = 1;
+    let f: f64 = 1.5;            // and a float literal keeps its digits at f64
+
+    // no annotation to read: the historical i32/f32 defaults still apply
+    let plain: i32 = 7;
+    let plainf: f32 = 1.5;
+
+    // array elements and struct fields take the element/field type
+    let arr: [i64; 3] = [1, 2, 3];
+    let sz: Sizes = Sizes { small: 200, wide: 9000000000, ratio: 3 };
+
+    println(a);
+    println(big);
+    println(small);
+    println(numerical_cast::<i32>(neg));
+    println(wide);
+    println(x);
+    println(f);
+    println(plain);
+    println(plainf);
+    println(arr[2]);
+    println(sz.small);
+    println(sz.wide);
+    println(sz.ratio);
+    println(LIMIT);
+    println(numerical_cast::<i32>(TINY));
+    println(RATIO);
+    println(takes_i64(4000000000));
+    println(takes_f64(2));
+    return 0;
+}

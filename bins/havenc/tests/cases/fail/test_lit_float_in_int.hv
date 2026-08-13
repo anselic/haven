@@ -1,0 +1,6 @@
+//@ error: Expected i32, got a float literal
+@export
+proc main() i32 {
+    let x: i32 = 1.5;
+    return 0;
+}

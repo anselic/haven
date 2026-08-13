@@ -1,0 +1,6 @@
+//@ error: integer literal 256 does not fit in u8
+@export
+proc main() i32 {
+    let x: u8 = 256;
+    return 0;
+}

@@ -3,7 +3,7 @@ use haven_common::ast::*;
 use crate::typecheck::EnumDef;
 use super::ir::*;
 use haven_common::defs::DefId;
-use super::ctx::{LowerCtx, LoopTargets, int_const, pattern_variant_const, aggregate_def, coerce, enum_const};
+use super::ctx::{LowerCtx, LoopTargets, int_const, lit_const, pattern_variant_const, aggregate_def, coerce, enum_const};
 use super::expr::{lower_expr, lower_lvalue, copy_struct};
 
 fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
@@ -402,6 +402,10 @@ fn lower_const_init<'a>(
         ExprNode::Uint64(n)  => ConstInit::Scalar(Const::Uint64(*n)),
         ExprNode::Float32(f) => ConstInit::Scalar(Const::Float32(*f)),
         ExprNode::Float64(f) => ConstInit::Scalar(Const::Float64(*f)),
+        // width-less literals take the global's declared type, which `check_expr`
+        // recorded for this node when it checked the initializer against it.
+        ExprNode::IntLit(_) | ExprNode::FloatLit(_) =>
+            ConstInit::Scalar(lit_const(&cx.node_types[&expr.id], &expr.value)),
         // a string literal: intern the blob and take its address (`@.str.N`), a
         // link-time-constant `ptr` - the same value `ExprNode::Str` lowers to in
         // expression position.
@@ -417,6 +421,13 @@ fn lower_const_init<'a>(
             ExprNode::Uint64(n)  => ConstInit::Scalar(Const::Uint64(n.wrapping_neg())),
             ExprNode::Float32(f) => ConstInit::Scalar(Const::Float32(-*f)),
             ExprNode::Float64(f) => ConstInit::Scalar(Const::Float64(-*f)),
+            // `-<literal>` is one context-typed unit, so the negation is folded
+            // into the value before it is narrowed to the global's type - `-128`
+            // fits an `i8` even though `128` alone does not.
+            ExprNode::IntLit(v) =>
+                ConstInit::Scalar(lit_const(&cx.node_types[&operand.id], &ExprNode::IntLit(-*v))),
+            ExprNode::FloatLit(f) =>
+                ConstInit::Scalar(lit_const(&cx.node_types[&operand.id], &ExprNode::FloatLit(-*f))),
             other => unreachable!("non-constant global initializer reached lowering: -{}", other),
         },
         // struct literal: pair each field's declared type with its constant.

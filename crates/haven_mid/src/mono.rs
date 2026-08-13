@@ -949,6 +949,11 @@ impl<'p, 'a> Mono<'p, 'a> {
             ExprNode::Uint64(v) => ExprNode::Uint64(*v),
             ExprNode::Float32(v) => ExprNode::Float32(*v),
             ExprNode::Float64(v) => ExprNode::Float64(*v),
+            // a width-less literal keeps no type of its own here: the fresh node
+            // is re-typed from context by the post-mono typecheck pass, exactly
+            // as the original was.
+            ExprNode::IntLit(v) => ExprNode::IntLit(*v),
+            ExprNode::FloatLit(v) => ExprNode::FloatLit(*v),
             ExprNode::Str(s) => ExprNode::Str(s),
             // a bound const param used as a value becomes a typed literal; any
             // other name is copied through.

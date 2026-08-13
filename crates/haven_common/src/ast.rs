@@ -108,6 +108,19 @@ pub enum Token<'a> {
     Int8(i8), Int16(i16), Int32(i32), Int64(i64),
     Uint8(u8), Uint16(u16), Uint32(u32), Uint64(u64),
     Float32(f32), Float64(f64),
+    /// An integer literal written without a width suffix (`0`, `255`). It has no
+    /// type yet: the checker gives it the type its context asks for, and only
+    /// falls back to `i32` where there is no expectation to read. Held as `i128`
+    /// so every `i64` and `u64` value fits before a target type is known - the
+    /// range check against that target happens in the typechecker, not here.
+    IntLit(i128),
+    /// A float literal written without a width suffix (`1.5`). Like [`IntLit`],
+    /// it takes its type from context and defaults to `f32`. Held as `f64` so an
+    /// `f64` target keeps the digits the source actually wrote; narrowing to
+    /// `f32` happens once the target is known.
+    ///
+    /// [`IntLit`]: Token::IntLit
+    FloatLit(f64),
     Str(&'a str),
     /// An interpolated string literal `f"...{expr}..."`. Holds the raw inner
     /// text (between the quotes, `f` stripped); the parser splits it into
@@ -146,6 +159,8 @@ impl Display for Token<'_> {
             Token::Uint64(n)    => write!(f, "{}u64", n),
             Token::Float32(n)   => write!(f, "{}f32", n),
             Token::Float64(n)   => write!(f, "{}f64", n),
+            Token::IntLit(n)    => write!(f, "{}", n),
+            Token::FloatLit(n)  => write!(f, "{}", n),
             Token::Str(s)       => write!(f, "\"{:?}\"", s),
             Token::FStr(s)      => write!(f, "f\"{}\"", s),
             Token::Var(s)       => write!(f, "{}", s),
@@ -575,6 +590,24 @@ pub enum ExprNode<'a> {
     Int8(i8), Int16(i16), Int32(i32), Int64(i64),
     Uint8(u8), Uint16(u16), Uint32(u32), Uint64(u64),
     Float32(f32), Float64(f64),
+    /// An integer literal written without a width suffix, e.g. `0` in
+    /// `let n: i64 = 0;`. Unlike the variants above it names no width of its
+    /// own: `check_expr` gives it whatever numeric type the context expects
+    /// (after verifying the value fits), and `infer` falls back to `i32` where
+    /// there is no expectation - which is what a bare `0` meant before this
+    /// existed. A *suffixed* literal keeps its exact type, so `0i32` in an
+    /// `i64` position is still an error.
+    ///
+    /// The chosen type lands in `node_types` under this node's id, and that -
+    /// not the variant - is what MIL lowering reads to emit the constant.
+    IntLit(i128),
+    /// A float literal written without a width suffix, e.g. `1.5`. Takes its
+    /// type from context exactly like [`IntLit`], defaulting to `f32`; an
+    /// integer literal is also accepted where a float is expected, so
+    /// `let x: f64 = 1;` works.
+    ///
+    /// [`IntLit`]: ExprNode::IntLit
+    FloatLit(f64),
     /// String literal `"..."`. Holds the raw source text between the quotes.
     /// escape sequences are resolved later, during MIL lowering, e.g.
     /// `\n` ([\, n]) becomes a single byte 0x0A
@@ -658,6 +691,8 @@ impl<'a> Display for ExprNode<'a> {
             ExprNode::Uint64(val) => write!(f, "{}u64", val),
             ExprNode::Float32(val) => write!(f, "{}f32", val),
             ExprNode::Float64(val) => write!(f, "{}f64", val),
+            ExprNode::IntLit(val) => write!(f, "{}", val),
+            ExprNode::FloatLit(val) => write!(f, "{}", val),
             ExprNode::Str(s) => write!(f, "{:?}", s),
             ExprNode::Var(name) => write!(f, "{}", name),
             ExprNode::Path(path) => write!(f, "{}", path),

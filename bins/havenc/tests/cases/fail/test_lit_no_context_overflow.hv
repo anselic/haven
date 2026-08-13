@@ -1,0 +1,8 @@
+// with no expected type to read, a literal defaults to i32 - and has to say
+// which type it wants if it does not fit there.
+//@ error: does not fit in i32
+@export
+proc main() i32 {
+    println(5000000000);
+    return 0;
+}

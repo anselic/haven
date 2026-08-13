@@ -20,6 +20,36 @@ pub(crate) fn int_const(repr: &Type, val: i64) -> Const {
     }
 }
 
+/// The constant a width-less literal (`ExprNode::IntLit`/`FloatLit`) lowers to,
+/// at the type the checker settled on for it - which is why `ty` comes from
+/// `node_types` rather than from the node, the way it does for a suffixed
+/// literal. The narrowing casts here cannot lose anything: `check_expr` already
+/// verified the value fits the target's range.
+pub(crate) fn lit_const(ty: &Type<'_>, node: &ExprNode<'_>) -> Const {
+    match node {
+        ExprNode::IntLit(v) => match ty {
+            Type::Int8    => Const::Int8(*v as i8),
+            Type::Int16   => Const::Int16(*v as i16),
+            Type::Int32   => Const::Int32(*v as i32),
+            Type::Int64   => Const::Int64(*v as i64),
+            Type::Uint8   => Const::Uint8(*v as u8),
+            Type::Uint16  => Const::Uint16(*v as u16),
+            Type::Uint32  => Const::Uint32(*v as u32),
+            Type::Uint64  => Const::Uint64(*v as u64),
+            // `let x: f64 = 1;` - an integer literal in a float's place.
+            Type::Float32 => Const::Float32(*v as f32),
+            Type::Float64 => Const::Float64(*v as f64),
+            other => unreachable!("integer literal typed as {:?}", other),
+        },
+        ExprNode::FloatLit(f) => match ty {
+            Type::Float32 => Const::Float32(*f as f32),
+            Type::Float64 => Const::Float64(*f),
+            other => unreachable!("float literal typed as {:?}", other),
+        },
+        other => unreachable!("lit_const on a non-literal node: {}", other),
+    }
+}
+
 /// If `r` is an `Enum::Variant` reference, the discriminant as a typed const.
 pub(crate) fn enum_const<'a>(enums: &HashMap<DefId, EnumDef<'a>>, r: &NameRef<'a>) -> Option<Const> {
     let def = enums.get(&r.def)?;
