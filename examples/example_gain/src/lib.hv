@@ -3,9 +3,6 @@
 // same plugin against the raw CLAP bindings by hand — this version writes only
 // the state, the trait impl, and one exported const; std/plug builds every piece
 // of ABI glue generically from the `Gain` type.
-//
-//     havenc examples/4_gain_plug.hv -o Gain --shared
-//     # then rename Gain.dll -> Gain.clap and load it in a CLAP host
 
 import std/clap/version { ClapVersion }
 import std/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
@@ -15,14 +12,14 @@ import std/plug {
     plug_entry_init, plug_entry_deinit, plug_entry_get_factory,
 }
 
-// The plugin's state — just data. No ABI types, no vtables.
+// The plugin's state
 struct Gain {
     gain: f64,
     sample_rate: f64,
 }
 
 extend Gain: Plugin {
-    // --- metadata + static descriptors (associated, no self) ---
+    // --- metadata + static descriptors ---
     proc id() str { return "com.haven.gain"; }
     proc name() str { return "Haven Gain"; }
     proc vendor() str { return "Haven"; }
@@ -33,12 +30,12 @@ extend Gain: Plugin {
     proc param(index: u32) FloatParam {
         return FloatParam::new(0u32, "Gain", 0.0f64, 2.0f64, 1.0f64);
     }
-    // construct fresh state (`Self` in a method body resolves to `Gain`).
+    // construct fresh state
     proc new() Self {
         return Self { gain: 1.0f64, sample_rate: 44100.0f64 };
     }
 
-    // --- live state (self) ---
+    // --- live state ---
     proc activate(*self, sample_rate: f64) {
         self.sample_rate = sample_rate;
     }
@@ -67,8 +64,6 @@ extend Gain: Plugin {
     }
 }
 
-// The one symbol a `.clap` exports. Its three callbacks are framework generics
-// instantiated at `Gain`; everything downstream is monomorphized from them.
 @export const clap_entry: ClapPluginEntry = ClapPluginEntry {
     clap_version: ClapVersion { major: 1u32, minor: 2u32, revision: 2u32 },
     init: plug_entry_init::<Gain>,

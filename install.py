@@ -14,12 +14,9 @@ from pathlib import Path
 # installed alongside them.
 STD_ARTIFACT = "std.hvmeta"
 
+# Build the standard library artifact from the `std` package and copy it to the
+# destination directory.
 def build_std(source_dir, dest_dir):
-    """Build the `std` package into `std.hvmeta` with the just-built `haven` (which
-    drives its sibling `havenc` off the manifest), and place the artifact beside the
-    installed binaries so `havenc` discovers it sysroot-relative. Driving `haven`
-    rather than `havenc` directly keeps the C files and linked libs sourced from
-    `std/haven.toml` alone, with no second copy of that list to drift here."""
     exe_ext = ".exe" if platform.system() == "Windows" else ""
     # Resolve to absolute: we run with `cwd` set to the std package, and `haven`
     # locates `havenc` relative to its own (absolute) path, so a relative
@@ -34,9 +31,7 @@ def build_std(source_dir, dest_dir):
     result = subprocess.run([str(haven), "build"], cwd=str(std_dir),
                             encoding="utf-8", capture_output=True, text=True)
     if result.returncode != 0:
-        # `haven` prints progress to stdout and forwards compiler/tool errors to
-        # stderr; show both so a failure is not a bare "compilation failed".
-        print(f"Failed to build {STD_ARTIFACT}:\n{result.stdout}{result.stderr}")
+        print(f"Failed to build {STD_ARTIFACT}:\n{result.stderr}")
         return
     else:
         print(result.stdout, end="")
@@ -112,9 +107,9 @@ def main():
             "--bin", "havenc",
             "--bin", "havendoc"]
             + (["--release"] if not args.debug else []),
-            encoding="utf-8", capture_output=True, text=True)
+            encoding="utf-8", text=True)
         if result.returncode != 0:
-            print(f"Failed to build binaries:\n{result.stdout}{result.stderr}")
+            print(f"Failed to build binaries:\n{result.stderr}")
             sys.exit(1)
 
         dest_dir = None

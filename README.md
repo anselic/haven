@@ -15,6 +15,7 @@ This repository includes:
 ## Dependencies
 - (Developer dependencies)
   - rust/cargo
+  - python (for installation script)
 - LLVM IR compiler
   - clang
   - opt + llc (untested)
@@ -63,10 +64,6 @@ std/                # haven standard library package
 ├── src/            # its modules (lib.hv is the entry point / prelude)
 └── c/              # C runtime
 ```
-
-The compiler embeds no standard library. `std` is built into a `std.hvmeta`
-artifact (see `install.py`) that `havenc` discovers on disk - beside its own
-binary, or via `$HAVEN_STD`.
 
 ## License
 This project is dual-licensed under the MIT and Apache 2.0 licenses. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE) for details.

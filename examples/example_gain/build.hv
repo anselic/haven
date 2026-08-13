@@ -146,7 +146,5 @@ proc main() i32 {
     }
     if (!ok) { return 1; }
 
-    print("   Bundled "); println(bundle.as_str());
-    print("           load it with CLAP_PATH="); println(target.as_str());
     return 0;
 }

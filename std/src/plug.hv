@@ -25,7 +25,7 @@ import clap/version { ClapVersion }
 import clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
 import clap/events {
     ClapEventHeader, ClapEventParamValue, ClapInputEvents, ClapOutputEvents,
-    CLAP_EVENT_PARAM_VALUE,
+    CLAP_EVENT_PARAM_VALUE, CLAP_CORE_EVENT_SPACE_ID,
 }
 import clap/plugin {
     ClapPlugin, ClapHost, ClapPluginDescriptor,
@@ -37,6 +37,7 @@ import clap/ext {
     ClapParamInfo, ClapPluginParams, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE,
 }
 import alloc { alloc, dealloc }
+import dsp/denormal { denormals_disable, denormals_restore }
 
 extern strcmp(a: str, b: str) i32;
 extern strncpy(dst: *u8, src: str, n: u64) *u8;
@@ -112,12 +113,18 @@ proc plug_reset<P: Plugin>(p: *ClapPlugin) void { }
 proc plug_on_main<P: Plugin>(p: *ClapPlugin) void { }
 
 // apply any incoming parameter-value events (the host's automation) to the state.
+//
+// An event's `space_id` has to be checked before its `kind` means anything: the
+// type ids are only unique *within* an event space, so a `kind` of 5 in some
+// other space is not a param-value event and reinterpreting it as one would set
+// a parameter from whatever bytes that event happens to hold. Only the core
+// space defines CLAP_EVENT_PARAM_VALUE, so anything else is skipped.
 proc plug_apply_events<P: Plugin>(state: *P, ev: *ClapInputEvents) void {
     let n: u32 = ev.size(ev);
     let i: u32 = 0u32;
     while (i < n) {
         let h: *ClapEventHeader = ev.get(ev, i);
-        if (h.kind == CLAP_EVENT_PARAM_VALUE) {
+        if (h.space_id == CLAP_CORE_EVENT_SPACE_ID && h.kind == CLAP_EVENT_PARAM_VALUE) {
             let pv: *ClapEventParamValue = ptr_cast::<*ClapEventParamValue>(h);
             state.param_set(pv.param_id, pv.value);
         }
@@ -125,10 +132,17 @@ proc plug_apply_events<P: Plugin>(state: *P, ev: *ClapInputEvents) void {
     }
 }
 
+// The author's `process` runs with denormals flushed to zero: a decaying tail is
+// all denormals, and on most hardware that is the block that misses the
+// deadline. The host's mode is restored on the way out - the audio thread is the
+// host's, and the setting is per-thread.
 proc plug_process<P: Plugin>(p: *ClapPlugin, ctx: *ClapProcess) ClapProcessStatus {
     let b: *PlugBox<P> = plug_box::<P>(p);
     plug_apply_events::<P>(&b.state, ctx.in_events);
-    return b.state.process(ctx);
+    let saved: u64 = denormals_disable();
+    let status: ClapProcessStatus = b.state.process(ctx);
+    denormals_restore(saved);
+    return status;
 }
 
 // --- audio-ports extension (one stereo-style port in and out) ---
@@ -237,7 +251,13 @@ proc plug_factory_get_desc<P: Plugin>(f: *ClapPluginFactory, index: u32) *ClapPl
     return plug_descriptor::<P>();
 }
 
+// `id` is whatever the host asked for, not necessarily one we advertise, so it
+// is checked against the descriptor before anything is allocated. A factory that
+// hands back an instance for an unknown id is how a host silently loads the
+// wrong plugin - the contract is a null pointer, and an id that merely *starts*
+// with ours ("com.haven.gain" + trailing garbage) is an unknown id.
 proc plug_factory_create<P: Plugin>(f: *ClapPluginFactory, host: *ClapHost, id: str) *ClapPlugin {
+    if (strcmp(id, P::id()) != 0i32) { return null::<*ClapPlugin>(); }
     let b: *PlugBox<P> = alloc::<PlugBox<P>>(1u64).expect("plugin instance");
     ptr_write::<P>(&b.state, P::new());
     ptr_write::<ClapPlugin>(&b.clap_plugin, ClapPlugin {
