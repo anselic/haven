@@ -261,6 +261,14 @@ fn build_project(
     // Resolve the actual artifact path from the output kind, mirroring `havenc`'s
     // extension choices, so callers (chiefly `run`) know what to launch.
     let artifact = artifact_path(&out_base, output);
+
+    // The artifact exists; hand it to the project's own post-build script, if it
+    // declared one. Runs for dependencies too, since a library's packaging step
+    // is as much its own business as a leaf's.
+    if let Some(script) = project.build_script() {
+        run_build_script(project, &script, &artifact, output, fmt)?;
+    }
+
     status(Status::Finished, &label);
     Ok(artifact)
 }
@@ -291,6 +299,127 @@ fn artifact_path(base: &Path, output: Output) -> PathBuf {
             }
         }
         Output::Lib => base.with_extension("hvmeta"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// post-build script
+// ---------------------------------------------------------------------------
+
+/// Compile (when stale) and run the project's `build` script, once the build's
+/// artifact is on disk.
+///
+/// The contract is deliberately generic. `haven` knows only "run this program
+/// after the artifact exists" and describes what it just did through the
+/// environment; everything domain-specific - staging a `.clap` or `.vst3`
+/// bundle, stamping a version, code-signing, copying into a plugin directory -
+/// is the script's business. That is the whole point: the build tool does not
+/// learn about plugin formats, and a format it has never heard of costs it
+/// nothing.
+///
+/// The script is an ordinary Haven program compiled against `std` **alone**. The
+/// project's own `[dependencies]` are deliberately not visible to it: it runs
+/// beside the build rather than inside it, and a packaging step wants `std/fs`,
+/// `std/env` and `std/process`, not the library the project happens to link.
+/// (Cargo draws the same line with `[build-dependencies]`.)
+///
+/// A nonzero exit fails the build. The script's stdout and stderr are inherited,
+/// so what it prints reaches the terminal interleaved with `haven`'s own lines -
+/// a packaging step is doing work the user asked for and should be able to say
+/// so, unlike Cargo's `build.rs`, whose output is swallowed by default.
+fn run_build_script(
+    project: &Project,
+    script: &Path,
+    artifact: &Path,
+    output: Output,
+    fmt: MessageFormat,
+) -> Result<(), String> {
+    let shown = relative_to(&project.root, script).display().to_string();
+    if !script.is_file() {
+        return Err(format!(
+            "build script `{}` does not exist (declared as `build` in {})",
+            shown, config::MANIFEST));
+    }
+
+    let build_dir = project.build_dir();
+    std::fs::create_dir_all(&build_dir)
+        .map_err(|e| format!("cannot create `{}`: {}", build_dir.display(), e))?;
+
+    let stem = script.file_stem().and_then(|s| s.to_str()).unwrap_or("build");
+    let out_base = build_dir.join(stem);
+    let exe = artifact_path(&out_base, Output::Executable);
+
+    if is_stale(script, &exe) {
+        status(Status::Compiling, format_args!("{} (build script)", shown));
+        let havenc = tool_path("havenc");
+        let exit = Command::new(&havenc)
+            .arg(script)
+            .arg("--output")
+            .arg(&out_base)
+            .arg("--message-format")
+            .arg(fmt.as_str())
+            .status()
+            .map_err(|e| format!("failed to run `{}`: {}", havenc.display(), e))?;
+        if !exit.success() {
+            return Err(format!("build script `{}` failed to compile", shown));
+        }
+    }
+
+    // The build's details, passed as environment variables rather than argv: a
+    // positional contract rots the moment a field is added, and an environment
+    // can be reproduced by hand, so a script can be run standalone under a
+    // debugger without a build to drive it.
+    let exit = Command::new(&exe)
+        .current_dir(&project.root)
+        .env("HAVEN_PROJECT_ROOT", &project.root)
+        .env("HAVEN_PKG_NAME", &project.project.name)
+        .env("HAVEN_PKG_VERSION", project.version_display())
+        .env("HAVEN_TARGET_DIR", project.target_dir())
+        .env("HAVEN_ARTIFACT", artifact)
+        .env("HAVEN_OUTPUT_KIND", output.manifest_kind())
+        .env("HAVEN_TARGET_OS", target_os())
+        .status()
+        .map_err(|e| format!("failed to run build script `{}`: {}", exe.display(), e))?;
+    if !exit.success() {
+        return Err(match exit.code() {
+            Some(code) => format!("build script `{}` exited with status {}", shown, code),
+            None => format!("build script `{}` terminated by signal", shown),
+        });
+    }
+    Ok(())
+}
+
+/// Whether `exe` needs rebuilding from `src`, by modification time.
+///
+/// Only the script's *entry* file is consulted: `haven` cannot see which modules
+/// it imports without asking `havenc` to tell it, and nothing in the build tracks
+/// dependencies at that granularity yet. A script split across several files can
+/// therefore go stale - touch the entry, or delete `.haven/build/`, to force a
+/// recompile. An unreadable time on either side answers "stale", so a missing
+/// executable (the first build) or a filesystem without mtimes recompiles rather
+/// than silently running something old.
+fn is_stale(src: &Path, exe: &Path) -> bool {
+    let time = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    match (time(src), time(exe)) {
+        (Some(src_t), Some(exe_t)) => src_t > exe_t,
+        _ => true,
+    }
+}
+
+/// The operating system a build script should package for, in the spelling Rust
+/// uses for `target_os`. Reads the *host* today because `haven` has no
+/// cross-compilation story; it is passed explicitly all the same, so a script
+/// branches on the build's target rather than on where it happens to be running,
+/// and keeps working unchanged when one arrives.
+fn target_os() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        std::env::consts::OS
     }
 }
 

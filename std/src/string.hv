@@ -6,6 +6,11 @@
 /// `s.push_byte`/`s.push_str`, compare with `s.eq`, and hand a borrowable C
 /// string to `print`/`println` via `s.as_str`.
 ///
+/// `str` - borrowed text, what a literal is - gets an `eq` of its own here, so
+/// comparing against a literal never needs a `String` built to hold it:
+///
+///     if (name.as_str().eq("macos")) { /* ... */ }
+///
 /// A `String` owns its heap allocation and frees it for you: it holds a `Vec<u8>`
 /// field, and `Vec` implements `Delete`, so a String is destroyed - buffer freed
 /// - when it goes out of scope, with no manual free to call. A fresh `String::new`
@@ -30,8 +35,24 @@
 import vec { Vec }
 
 extern strlen(s: str) u64;
+extern strcmp(a: str, b: str) i32;
 extern rt_str_as_bytes(s: str) *u8;
 extern rt_bytes_as_str(p: *u8) str;
+
+// `str` is borrowed text, and comparing two of them needs no `String` on either
+// side - which is why there is no `String::eq_str`: `s.as_str().eq("...")` is
+// already the comparison, with nothing allocated to ask the question.
+extend str {
+    /// Whether this `str` and `other` hold the same text.
+    ///
+    /// Compares the bytes, not the pointers, so two views of separately-built
+    /// text still compare equal. Both are NUL-terminated, so comparison stops at
+    /// the first NUL: a `String` containing an embedded NUL compares as though it
+    /// ended there, the same truncation `as_str` already describes.
+    pub proc eq(*self, other: str) bool {
+        return strcmp(*self, other) == 0i32;
+    }
+}
 
 pub struct String {
     buf: Vec<u8>,  /// the raw bytes, without a trailing NUL

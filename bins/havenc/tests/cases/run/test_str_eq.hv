@@ -1,0 +1,32 @@
+// std/string: `str::eq` compares borrowed text byte for byte, so a `String` can
+// be checked against a literal without building a second String to hold it -
+// `s.as_str().eq("...")` allocates nothing to ask the question.
+
+import std/string { String }
+
+// bool isn't numeric, so funnel truthiness through an i32 for printing.
+proc yn(b: bool) i32 { if (b) { return 1; } return 0; }
+
+@export
+proc main() i32 {
+    // two literals, equal and not
+    println(yn("macos".eq("macos")));   // 1
+    println(yn("macos".eq("linux")));   // 0
+
+    // a String against a literal: the case that used to need a temporary String
+    let s: String = String::new();
+    s.push_str("mac");
+    s.push_str("os");
+    println(yn(s.as_str().eq("macos")));    // 1
+    println(yn(s.as_str().eq("macosx")));   // 0
+
+    // text built separately on both sides, so this is genuinely comparing bytes
+    // and not two pointers that happen to coincide.
+    let t: String = String::from_str("macos");
+    println(yn(s.as_str().eq(t.as_str())));  // 1
+
+    // a prefix is not the whole, and empty equals empty
+    println(yn("mac".eq("macos")));   // 0
+    println(yn("".eq("")));           // 1
+    return 0;
+}

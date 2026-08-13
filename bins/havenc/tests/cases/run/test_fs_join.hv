@@ -1,0 +1,37 @@
+// std/fs: `join` puts exactly one separator between two path pieces, whichever
+// side already carries one, and leaves separators already in the text alone.
+
+import std/fs
+import std/string { String }
+
+@export
+proc main() i32 {
+    let plain: String = fs::join("dist", "VERSION");
+    println(plain.as_str());                        // dist/VERSION
+
+    // a separator on either side is used rather than doubled
+    let trailing: String = fs::join("dist/", "VERSION");
+    println(trailing.as_str());                     // dist/VERSION
+    let leading: String = fs::join("dist", "/VERSION");
+    println(leading.as_str());                      // dist/VERSION
+
+    // an empty side contributes nothing at all, not even a separator, so an
+    // empty accumulator is a safe place to start building a path from.
+    let no_head: String = fs::join("", "VERSION");
+    println(no_head.as_str());                      // VERSION
+    let no_tail: String = fs::join("dist", "");
+    println(no_tail.as_str());                      // dist
+
+    // the result feeds the next join through `as_str`, which is how a path of
+    // more than two pieces gets built.
+    let chained: String = fs::join(plain.as_str(), "extra");
+    println(chained.as_str());                      // dist/VERSION/extra
+
+    // an existing `\` counts as a separator and is not rewritten: normalizing it
+    // would corrupt the `\\?\` prefix Windows uses for long paths.
+    let windows: String = fs::join("C:\\out", "gain.clap");
+    println(windows.as_str());                      // C:\out/gain.clap
+    let backslash: String = fs::join("C:\\out\\", "gain.clap");
+    println(backslash.as_str());                    // C:\out\gain.clap
+    return 0;
+}

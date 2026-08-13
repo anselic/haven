@@ -1,0 +1,152 @@
+// Package a freshly-linked shared library as a `.clap` plugin bundle.
+//
+// `haven` runs this after the artifact links, because `haven.toml` says
+// `build = "build.hv"`. Nothing in the build system knows what CLAP is: the
+// format lives here, in ordinary Haven, and a second format would be a second
+// script rather than a change to the tool.
+//
+// What `haven` sets for us, from the project root as the working directory:
+//
+//     HAVEN_ARTIFACT      absolute path to the library just built
+//     HAVEN_TARGET_DIR    where it was written (.haven/target)
+//     HAVEN_PROJECT_ROOT  the directory holding haven.toml
+//     HAVEN_PKG_NAME      [project].name
+//     HAVEN_PKG_VERSION   [project].version, or empty
+//     HAVEN_OUTPUT_KIND   bin | cdylib | staticlib | lib
+//     HAVEN_TARGET_OS     windows | macos | linux
+//
+// A `.clap` is the shared library renamed on Windows and Linux, and a macOS
+// bundle directory on macOS. Hosts search `~/.clap`, `%COMMONPROGRAMFILES%\CLAP`
+// and `~/Library/Audio/Plug-Ins/CLAP` respectively; all three also honour the
+// `CLAP_PATH` environment variable, which is the least invasive way to load the
+// bundle straight out of the build directory.
+//
+// Everything below is `str`-in, `String`-out: `fs::join` takes the borrowed form
+// a literal and `String::as_str` both are, so a path is assembled without an
+// owned String per step, and `str::eq` compares against a literal without
+// building one at all.
+
+import std/env
+import std/fs
+import std/result { Result }
+import std/string { String }
+
+/// A contract variable. Absent means this was not run by `haven build`, which is
+/// a bug rather than a user mistake - so it aborts rather than returning an
+/// `Option` no caller could do anything useful with.
+proc need(name: str) String {
+    return env::var(name).expect("build.hv: expected a HAVEN_* variable set by `haven build`");
+}
+
+/// Copy, reporting the failure rather than swallowing it. Returns false on error.
+proc copy_file(src: str, dst: str) bool {
+    match (fs::copy(src, dst)) {
+        Result::Ok(_) -> { return true; }
+        Result::Err(e) -> {
+            print("  cannot write "); print(dst); print(": "); println(e.message());
+            return false;
+        }
+    }
+}
+
+/// Write `text` to `path`, same convention.
+proc write_file(path: str, text: *String) bool {
+    match (fs::write(path, text)) {
+        Result::Ok(_) -> { return true; }
+        Result::Err(e) -> {
+            print("  cannot write "); print(path); print(": "); println(e.message());
+            return false;
+        }
+    }
+}
+
+/// macOS: a `.clap` is a bundle directory.
+///
+///     Gain.clap/Contents/MacOS/Gain      the dylib, extension stripped
+///     Gain.clap/Contents/Info.plist
+///     Gain.clap/Contents/PkgInfo
+///
+/// Recent macOS also wants the bundle signed before a host will load it;
+/// `codesign -s - <bundle>` ad-hoc is enough locally, and would be a
+/// `process::run` from here. Left out because it cannot be tested from Windows.
+proc bundle_macos(artifact: str, bundle: str, name: str, version: str) bool {
+    let contents: String = fs::join(bundle, "Contents");
+    let macos: String = fs::join(contents.as_str(), "MacOS");
+    match (fs::mkdir_all(macos.as_str())) {
+        Result::Ok(_) -> {}
+        Result::Err(e) -> {
+            print("  cannot create "); print(macos.as_str()); print(": ");
+            println(e.message());
+            return false;
+        }
+    }
+
+    // the executable inside a bundle carries no extension.
+    let inner: String = fs::join(macos.as_str(), name);
+    if (!copy_file(artifact, inner.as_str())) { return false; }
+
+    let plist: String = String::new();
+    plist.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    plist.push_str("<plist version=\"1.0\">\n<dict>\n");
+    plist.push_str("  <key>CFBundleExecutable</key><string>");
+    plist.push_str(name);
+    plist.push_str("</string>\n");
+    plist.push_str("  <key>CFBundleName</key><string>");
+    plist.push_str(name);
+    plist.push_str("</string>\n");
+    plist.push_str("  <key>CFBundleIdentifier</key><string>com.haven.");
+    plist.push_str(name);
+    plist.push_str("</string>\n");
+    plist.push_str("  <key>CFBundlePackageType</key><string>BNDL</string>\n");
+    plist.push_str("  <key>CFBundleSignature</key><string>????</string>\n");
+    plist.push_str("  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\n");
+    plist.push_str("  <key>CFBundleShortVersionString</key><string>");
+    plist.push_str(version);
+    plist.push_str("</string>\n");
+    plist.push_str("  <key>CFBundleVersion</key><string>");
+    plist.push_str(version);
+    plist.push_str("</string>\n");
+    plist.push_str("</dict>\n</plist>\n");
+
+    let plist_path: String = fs::join(contents.as_str(), "Info.plist");
+    if (!write_file(plist_path.as_str(), &plist)) { return false; }
+
+    // eight bytes the Finder still expects.
+    let pkginfo: String = String::from_str("BNDL????");
+    let pkginfo_path: String = fs::join(contents.as_str(), "PkgInfo");
+    return write_file(pkginfo_path.as_str(), &pkginfo);
+}
+
+proc main() i32 {
+    let kind: String = need("HAVEN_OUTPUT_KIND");
+    if (!kind.as_str().eq("cdylib")) {
+        print("  a .clap needs a shared library, but this build produced a ");
+        print(kind.as_str());
+        println(" - set `kind = [\"cdylib\"]` in haven.toml");
+        return 1;
+    }
+
+    let os: String = need("HAVEN_TARGET_OS");
+    let artifact: String = need("HAVEN_ARTIFACT");
+    let target: String = need("HAVEN_TARGET_DIR");
+    let name: String = need("HAVEN_PKG_NAME");
+    let version: String = need("HAVEN_PKG_VERSION");
+
+    // <target>/<name>.clap
+    let leaf: String = String::from_str(name.as_str());
+    leaf.push_str(".clap");
+    let bundle: String = fs::join(target.as_str(), leaf.as_str());
+
+    let ok: bool = false;
+    if (os.as_str().eq("macos")) {
+        ok = bundle_macos(artifact.as_str(), bundle.as_str(), name.as_str(), version.as_str());
+    } else {
+        // windows and linux: a `.clap` *is* the shared library, under another name.
+        ok = copy_file(artifact.as_str(), bundle.as_str());
+    }
+    if (!ok) { return 1; }
+
+    print("   Bundled "); println(bundle.as_str());
+    print("           load it with CLAP_PATH="); println(target.as_str());
+    return 0;
+}

@@ -2,9 +2,10 @@
 //!
 //! A project is any directory tree with a `haven.toml` at its root. The manifest
 //! is deliberately small: a `[project]` table with a name, an optional `entry`,
-//! and a `kind` list declaring what the project builds to (`bin`, `lib`,
-//! `cdylib`, `staticlib`), plus an optional `[dependencies]` table naming the
-//! Haven libraries this project consumes.
+//! a `kind` list declaring what the project builds to (`bin`, `lib`, `cdylib`,
+//! `staticlib`) and an optional `build` script to run afterwards, plus an
+//! optional `[dependencies]` table naming the Haven libraries this project
+//! consumes.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -118,6 +119,12 @@ pub struct ProjectTable {
     #[serde(default)]
     pub kind: Option<Vec<Kind>>,
 
+    /// A post-build script: a Haven source file, relative to the project root,
+    /// compiled and run once the build's artifact exists. See
+    /// [`Project::build_script`] and `haven`'s `run_build_script`.
+    #[serde(default)]
+    pub build: Option<String>,
+
     /// Whether this package *provides* the implicit prelude and so must nominate
     /// itself when compiling its own sources (`havenc --prelude <self>`). The
     /// `@!prelude` mark that says so lives in the source and is not visible to the
@@ -167,6 +174,21 @@ impl Output {
             Output::Shared => "shared library",
             Output::Static => "static library",
             Output::Lib => "library",
+        }
+    }
+
+    /// The manifest `kind` spelling this output came from, as handed to a build
+    /// script in `HAVEN_OUTPUT_KIND`. Deliberately the manifest's vocabulary
+    /// rather than [`label`](Self::label)'s prose: a script branching on the
+    /// output kind should match against the same word the author wrote in
+    /// `haven.toml`, not against a phrase that exists to read well in a
+    /// progress line and is therefore free to change.
+    pub fn manifest_kind(self) -> &'static str {
+        match self {
+            Output::Executable => "bin",
+            Output::Shared => "cdylib",
+            Output::Static => "staticlib",
+            Output::Lib => "lib",
         }
     }
 }
@@ -367,9 +389,22 @@ impl Project {
             .collect()
     }
 
+    /// Absolute path to the post-build script, when the manifest declares one.
+    /// Resolved against the project root like `entry`.
+    pub fn build_script(&self) -> Option<PathBuf> {
+        self.project.build.as_ref().map(|rel| self.root.join(rel))
+    }
+
     /// The build-output directory, `.haven/target/` under the project root.
     pub fn target_dir(&self) -> PathBuf {
         self.root.join(".haven").join("target")
+    }
+
+    /// Where a compiled build script lives, `.haven/build/` under the project
+    /// root. Kept out of `target/` so the script's own executable is never
+    /// mistaken for the project's artifact.
+    pub fn build_dir(&self) -> PathBuf {
+        self.root.join(".haven").join("build")
     }
 
     /// The documentation-output directory, `.haven/doc/` under the project root.

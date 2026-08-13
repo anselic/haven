@@ -1,11 +1,13 @@
 @!prelude
 
 // The prelude proper: what every module in every program using this package
-// sees without an import. Deliberately tiny.
+// sees without an import.
 pub import clone { Clone }
 pub import fmt { Display }
 pub import string { String }
 pub import vec { Vec }
+pub import result { Result, Unit }
+pub import option { Option }
 
 import fmt { display_print, display_println }
 
