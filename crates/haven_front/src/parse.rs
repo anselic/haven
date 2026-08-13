@@ -960,10 +960,10 @@ fn parse_stmt<'tks, 'src: 'tks>()
             ))
             .or(stmt.clone());
 
+        // `let x: T = e;` or, with the type left to the initializer, `let x = e;`
         let declare = just(Token::Let)
             .ignore_then(var)
-            .then_ignore(just(Token::Colon))
-            .then(parse_type())
+            .then(just(Token::Colon).ignore_then(parse_type()).or_not())
             .then_ignore(just(Token::Assign))
             .then(parse_expr())
             .then_ignore(just(Token::Semicolon))

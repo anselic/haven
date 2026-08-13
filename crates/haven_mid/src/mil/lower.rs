@@ -24,7 +24,10 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             }
         }
 
-        StmtNode::Declare { ty, value, .. } => {
+        StmtNode::Declare { value, .. } => {
+            // the type is on the node whether or not the source wrote it: mono
+            // fills in the one the checker inferred for a bare `let`.
+            let ty = stmt.declared_ty();
             // this local's binding identity is the Declare stmt's node id, matching
             // what name resolution recorded for every use of it.
             let binding = Binding::Local(stmt.id);
@@ -332,8 +335,8 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
 /// This is for emitting all Alloca instructions upfront in the entry block
 fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<DefId, EnumDef<'a>>, out: &mut Vec<(usize, &'a str, Type<'a>)>) {
     match &stmt.value {
-        StmtNode::Declare { name, ty, value } => {
-            let ty = ty.clone();
+        StmtNode::Declare { name, value, .. } => {
+            let ty = stmt.declared_ty().clone();
             // A `let x: !` local has no storage: its only valid initializer is a
             // diverging expression, which terminates the block before the binding
             // is reached (the Declare arm bails on `is_terminated`). Never alloca a

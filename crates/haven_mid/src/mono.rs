@@ -974,9 +974,18 @@ impl<'p, 'a> Mono<'p, 'a> {
             StmtNode::Expr(e) => StmtNode::Expr(self.rebuild_expr(e, b)),
             StmtNode::Block(stmts) =>
                 StmtNode::Block(stmts.iter().map(|s| self.rebuild_stmt(s, b)).collect()),
+            // a bare `let x = e;` gets the annotation it did not write, taken
+            // from what the checker recorded for the binding. This is the seam:
+            // the option is `None` only before this point, so every pass after
+            // mono reads the type off the node (`Stmt::declared_ty`) without
+            // caring whether the source spelled it out.
+            //
+            // The lookup is keyed by the *original* statement's id, which is why
+            // it happens here rather than after the rebuild - `Metadata::new`
+            // below mints a fresh one.
             StmtNode::Declare { name, ty, value } => StmtNode::Declare {
                 name,
-                ty: self.subst_ty(ty, b),
+                ty: Some(self.subst_ty(ty.as_ref().unwrap_or_else(|| &self.node_types[&stmt.id]), b)),
                 value: self.rebuild_expr(value, b),
             },
             StmtNode::Assign { left, value } => StmtNode::Assign {

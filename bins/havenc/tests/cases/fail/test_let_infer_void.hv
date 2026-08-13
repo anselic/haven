@@ -1,0 +1,9 @@
+// a local needs storage and a value; a call to a void procedure has neither.
+//@ error: 'nothing' cannot be declared with type void
+proc do_nothing() void { }
+
+@export
+proc main() i32 {
+    let nothing = do_nothing();
+    return 0;
+}

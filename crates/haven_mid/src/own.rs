@@ -459,7 +459,7 @@ impl<'a, 'c> Checker<'a, 'c> {
         let hole = self.expr(ExprNode::Var(SPILL_TEMP), ty.clone(), span);
         let temp = std::mem::replace(e, hole);
         let decl = Metadata::new(
-            StmtNode::Declare { name: SPILL_TEMP, ty: ty.clone(), value: temp }, span);
+            StmtNode::Declare { name: SPILL_TEMP, ty: Some(ty.clone()), value: temp }, span);
         self.cx.resolved.insert(e.id, Binding::Local(decl.id));
         decls.push(decl);
     }
@@ -623,7 +623,7 @@ impl<'a, 'c> Checker<'a, 'c> {
     fn declare_stmt(&mut self, name: &'a str, ty: Type<'a>, value: Expr<'a>, span: Span)
         -> (Stmt<'a>, Binding<'a>)
     {
-        let stmt = Metadata::new(StmtNode::Declare { name, ty, value }, span);
+        let stmt = Metadata::new(StmtNode::Declare { name, ty: Some(ty), value }, span);
         let binding = Binding::Local(stmt.id);
         (stmt, binding)
     }
@@ -832,10 +832,13 @@ impl<'a, 'c> Checker<'a, 'c> {
 
             StmtNode::Declare { name, ty, value } => {
                 self.consume(&value);
-                out.push(Metadata { span, id, value: StmtNode::Declare { name, ty: ty.clone(), value } });
+                // mono filled in the type of a bare `let`, so it is present here
+                // whether or not the source wrote it.
+                let declared = ty.clone().expect("monomorphization fills in every `let` type");
+                out.push(Metadata { span, id, value: StmtNode::Declare { name, ty, value } });
                 // the binding identity is the `Declare`'s node id, matching what
                 // name resolution recorded for every use of it.
-                self.declare(Binding::Local(id), name, ty);
+                self.declare(Binding::Local(id), name, declared);
                 false
             }
 
@@ -969,7 +972,7 @@ impl<'a, 'c> Checker<'a, 'c> {
                     // a temporary that outlives them.
                     let ty = self.ret_ty.clone();
                     let decl = Metadata::new(StmtNode::Declare {
-                        name: RET_TEMP, ty: ty.clone(), value: e,
+                        name: RET_TEMP, ty: Some(ty.clone()), value: e,
                     }, span);
                     let var = self.expr(ExprNode::Var(RET_TEMP), ty, span);
                     self.cx.resolved.insert(var.id, Binding::Local(decl.id));

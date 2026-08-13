@@ -1493,13 +1493,40 @@ pub(crate) fn check_stmt<'a>(
         },
 
         StmtNode::Declare { name, ty, value } => {
-            if let Err(msg) = check_const_scope(&cx.const_generics, ty) {
-                return Err(Error { msg: format!("in declaration of '{}': {}", name, msg), span: stmt.span.clone() });
+            let ty = match ty {
+                // `let x: T = e;` - the annotation is the expectation `e` is
+                // checked against, exactly as before.
+                Some(ty) => {
+                    if let Err(msg) = check_const_scope(&cx.const_generics, ty) {
+                        return Err(Error { msg: format!("in declaration of '{}': {}", name, msg), span: stmt.span.clone() });
+                    }
+                    let ty = ty.clone();
+                    check_expr(cx, &ty, value)?;
+                    ty
+                }
+                // `let x = e;` - the initializer decides. There is nothing to
+                // check it against, so a width-less literal in it defaults
+                // (`let n = 0;` is an `i32`), and an expression that cannot be
+                // typed on its own asks for the annotation back.
+                None => infer(cx, value).map_err(|e| Error {
+                    msg: format!("cannot infer the type of '{}': {}", name, e.msg),
+                    span: e.span,
+                })?,
+            };
+            // a local has to have storage and a value; neither is true of `void`,
+            // which is what a call to a procedure that returns nothing yields.
+            if ty == Type::Void {
+                return Err(Error {
+                    msg: format!("'{}' cannot be declared with type void", name),
+                    span: stmt.span.clone(),
+                });
             }
-            let ty = ty.clone();
-            check_expr(cx, &ty, value)?;
             // the local's binding identity is this Declare stmt's node id, which
             // is globally unique - so shadowed same-named locals stay distinct.
+            // The type is recorded under that same id: for a bare `let` it is the
+            // only record of what the binding turned out to be, and it is where
+            // monomorphization reads the annotation it writes back into the AST.
+            cx.node_types.insert(stmt.id, ty.clone());
             cx.insert(name, Some(Binding::Local(stmt.id)), ty);
         },
 

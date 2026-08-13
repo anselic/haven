@@ -1,0 +1,32 @@
+// An unannotated `let` inside a *generic* function: its recovered type is the
+// template's `T`, not a concrete type, so monomorphization has to substitute the
+// instance's binding into it - the same treatment a written annotation gets.
+//
+// This is the path where the checker's record and the AST have to agree: mono
+// reads the type it recorded for the binding, substitutes, and writes it back,
+// so the second (post-mono) typecheck sees a fully concrete declaration.
+//@ exit: 0
+
+struct Pair<T> { a: T, b: T }
+
+proc second_of<T>(p: Pair<T>) T {
+    let picked = p.b;
+    return picked;
+}
+
+proc identity<T>(x: T) T {
+    let echoed = x;
+    return echoed;
+}
+
+@export
+proc main() i32 {
+    let pi = Pair::<i32> { a: 3, b: 4 };
+    let pf = Pair::<f64> { a: 1.5, b: 2.25 };
+
+    println(second_of::<i32>(pi));
+    println(second_of::<f64>(pf));
+    println(identity::<i64>(9000000000i64));
+    println(identity::<str>("through a generic"));
+    return 0;
+}

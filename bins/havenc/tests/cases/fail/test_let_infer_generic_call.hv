@@ -1,0 +1,12 @@
+// a generic call whose type argument appears only in the return type cannot be
+// inferred from its arguments, and an unannotated `let` gives it nothing to go
+// on either - so the turbofish is still required.
+//@ error: cannot infer the type of 'v'
+//@ error: specify it explicitly
+import std/vec { Vec }
+
+@export
+proc main() i32 {
+    let v = Vec::new();
+    return 0;
+}

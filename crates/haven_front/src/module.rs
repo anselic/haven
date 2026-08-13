@@ -701,7 +701,7 @@ fn self_subst_stmt<'a>(s: &mut Stmt<'a>, target: &Type<'a>, head: Option<&Path<'
         StmtNode::Expr(e) => self_subst_expr(e, target, head),
         StmtNode::Block(stmts) => for st in stmts { self_subst_stmt(st, target, head); },
         StmtNode::Declare { ty, value, .. } => {
-            self_subst_type(ty, target);
+            if let Some(ty) = ty { self_subst_type(ty, target); }
             self_subst_expr(value, target, head);
         }
         StmtNode::Assign { left, value } => {
@@ -1516,7 +1516,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.locals.truncate(mark); // drop names bound inside the block
             }
             StmtNode::Declare { ty, value, name } => {
-                self.ty(ty, gparams);
+                if let Some(ty) = ty { self.ty(ty, gparams); }
                 self.expr(value, gparams); // walk the initializer BEFORE binding,
                 self.locals.push(name);    // so `let f = f;` sees the outer/top f
             }

@@ -820,7 +820,14 @@ pub enum StmtNode<'a> {
 
     Declare {
         name: &'a str,
-        ty: Type<'a>,
+        /// The written annotation, or `None` for a bare `let x = e;` whose type
+        /// is the initializer's.
+        ///
+        /// Only the front end and the typechecker ever see a `None`:
+        /// monomorphization fills in the type the checker recorded for the
+        /// binding, so every pass after it can rely on `Some`. Use
+        /// [`Stmt::declared_ty`] there rather than matching the option again.
+        ty: Option<Type<'a>>,
         value: Expr<'a>,
     },
     Assign {
@@ -907,7 +914,10 @@ impl<'a> Display for StmtNode<'a> {
                 let stmts_str = stmts.iter().map(|stmt| format!("    {}\n", stmt.value)).collect::<String>();
                 write!(f, "{{\n{}}}", stmts_str)
             },
-            StmtNode::Declare { name, ty, value } => write!(f, "let {}: {} = {}", name, ty, value.value),
+            StmtNode::Declare { name, ty, value } => match ty {
+                Some(ty) => write!(f, "let {}: {} = {}", name, ty, value.value),
+                None => write!(f, "let {} = {}", name, value.value),
+            },
             StmtNode::Assign { left, value } => write!(f, "{} = {}", left.value, value.value),
             StmtNode::If { condition, then_branch, else_branch } => {
                 let else_str = if let Some(else_branch) = else_branch {
@@ -933,6 +943,22 @@ impl<'a> Display for StmtNode<'a> {
 }
 
 pub type Stmt<'a> = Metadata<StmtNode<'a>>;
+
+impl<'a> Stmt<'a> {
+    /// The declared type of a `Declare`, for the passes that run after
+    /// monomorphization - where a bare `let x = e;` has had the checker's type
+    /// written into it and the annotation is therefore never absent.
+    ///
+    /// Panics if it is, the same way [`Type::unresolved`] does for a type path
+    /// that outlived name resolution: both mean a stage ran out of order, not
+    /// that the user wrote something wrong.
+    pub fn declared_ty(&self) -> &Type<'a> {
+        let StmtNode::Declare { name, ty, .. } = &self.value
+        else { panic!("declared_ty on a non-declaration statement") };
+        ty.as_ref().unwrap_or_else(||
+            panic!("`let {name}` reached codegen with no type; monomorphization should have filled it in"))
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AttributeNode<'a> {

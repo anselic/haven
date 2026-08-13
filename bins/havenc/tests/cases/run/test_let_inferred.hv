@@ -1,0 +1,79 @@
+// `let x = e;` with no annotation: the initializer's type is the binding's.
+//
+// The type the checker recovers is the *only* record of what the local is, so
+// this covers the things that read it downstream - storage and copy behaviour
+// for aggregates (MIL), drop glue for owners (the ownership pass), and the
+// binding identity that keeps two shadowed `x`es apart.
+//@ exit: 0
+
+import std/fmt { display_println }
+import std/string { String }
+import std/vec { Vec }
+
+struct Point { x: f64, y: f64 }
+
+struct Res { id: i32 }
+
+extend Res: Delete {
+    proc delete(*self) { print("drop res "); println(self.id); }
+}
+
+proc make_point() Point {
+    return Point { x: 1.5, y: 2.5 };
+}
+
+proc twice(n: i64) i64 {
+    return n * 2;
+}
+
+@export
+proc main() i32 {
+    // scalars and str: width-less literals still default to i32/f32
+    let n = 0;
+    let wide = 5000000000i64;
+    let f = 1.5;
+    let flag = true;
+    let s = "hello";
+
+    // call results, including one returning a struct by value
+    let doubled = twice(21i64);
+    let p = make_point();
+
+    // a pointer to a local, read back through it
+    let pp = &p;
+    let px = pp.x;
+
+    // an array literal, and an element of it
+    let arr = [1, 2, 3];
+    let second = arr[1];
+
+    // shadowing: two bindings of the same name with different types
+    let shadow = 1;
+    let shadow = "now a string";
+
+    // owners: the inferred type has to carry drop glue, and the destructor
+    // must run at end of scope exactly as it would with an annotation
+    let v = Vec::<i32>::new();
+    v.push(7);
+    let owned = String::from_str("owned");
+    let res = Res { id: 42 };
+
+    // an annotated `let` is unchanged, and still types a bare literal
+    let explicit: u8 = 200;
+
+    println(n);
+    println(wide);
+    println(f);
+    println(flag);
+    println(s);
+    println(doubled);
+    println(p.x);
+    println(px);
+    println(second);
+    println(shadow);
+    println(v.get_cloned(0));
+    display_println::<String>(&owned);
+    println(res.id);
+    println(explicit);
+    return 0;
+}
