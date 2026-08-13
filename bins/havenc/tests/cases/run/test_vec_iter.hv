@@ -1,0 +1,47 @@
+// `for` over `Vec::iter()`. The iterator yields `*T`, so the loop binds a
+// pointer per element and reads it with `*p`. Bound to a `let` first because a
+// `for` iterand must be a place, not a call.
+
+import std/vec { Vec, VecIter }
+import std/iter { Iterator }
+import std/option { Option }
+import std/string { String }
+
+@export
+proc main() i32 {
+    let v: Vec<i32> = Vec::<i32>::new();
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    v.push(4);
+
+    let sum: i32 = 0;
+    let it: VecIter<i32> = v.iter();
+    for p in it {
+        sum = sum + *p;
+    }
+    println(sum);  // 1+2+3+4 = 10
+
+    // An empty Vec yields nothing.
+    let e: Vec<i32> = Vec::<i32>::new();
+    let n: i32 = 0;
+    let eit: VecIter<i32> = e.iter();
+    for q in eit {
+        n = n + 1;
+    }
+    println(n);  // 0
+
+    // Owning `T`: yielding `*String` borrows each element, so nothing is moved
+    // out of the Vec and its `Delete` still frees every element exactly once.
+    let ws: Vec<String> = Vec::<String>::new();
+    ws.push(String::from_str("ab"));
+    ws.push(String::from_str("cde"));
+    let total: u64 = 0u64;
+    let wit: VecIter<String> = ws.iter();
+    for s in wit {
+        total = total + s.len();
+    }
+    println(total);  // 2+3 = 5
+
+    return 0;
+}

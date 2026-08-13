@@ -3,7 +3,8 @@
 /// `Vec<T>` is a dynamic array: push elements and it grows its backing buffer
 /// for you, in amortized O(1) per push. Create one with `Vec::<T>::new` (or
 /// `Vec::<T>::with_capacity` to pre-size), append with `v.push`, read with
-/// `v.get`/`v.get_ptr`, and walk it with `v.for_each`/`v.map`.
+/// `v.get`/`v.get_ptr`, and walk it with `v.for_each`/`v.map` or a `for` loop
+/// over `v.iter()`.
 ///
 /// A `Vec` owns its heap allocation and frees it for you: it implements `Delete`,
 /// so the buffer is released when the Vec goes out of scope, and each element is
@@ -25,6 +26,7 @@
 
 import alloc { alloc, realloc, dealloc }
 import option { Option }
+import iter { Iterator }
 
 pub struct Vec<T> {
     data: *T,  /// heap buffer, or null when cap == 0
@@ -157,6 +159,40 @@ pub struct Vec<T> {
             i = i + 1u64;
         }
         return result;
+    }
+
+    /// A by-pointer iterator over the elements, front to back, for driving a
+    /// `for` loop. Like `for_each`, each element is yielded as a `*T` rather than
+    /// by value, so an owning `T` is borrowed in place and never moved out of the
+    /// Vec. A `for` iterand must be a place, so bind the iterator to a `let`
+    /// first: `let it = v.iter(); for p in it { ... *p ... }`. The iterator holds
+    /// a pointer back to this Vec and re-reads its length every step, so it must
+    /// not outlive the Vec, and pushing during iteration (which may reallocate the
+    /// buffer) still reads live elements but visits any newly pushed ones too.
+    pub proc iter(*self) VecIter<T> {
+        return VecIter::<T> { vec: self, pos: 0u64 };
+    }
+}
+
+/// The iterator returned by `Vec::iter`: a pointer back to the source Vec and a
+/// cursor. It reaches each element through `Vec::get_ptr` and re-reads the Vec's
+/// length every step, so it always reflects the Vec's current state rather than a
+/// snapshot taken when `iter` was called. It borrows the Vec and must not outlive
+/// it.
+pub struct VecIter<T> {
+    vec: *Vec<T>,  /// the Vec being walked
+    pos: u64,      /// index of the next element to yield
+}
+
+extend VecIter<T>: Iterator {
+    type Item = *T;
+    proc next(*self) Option<*T> {
+        if (self.pos >= self.vec.len()) {
+            return Option::None::<*T>();
+        }
+        let p: *T = self.vec.get_ptr(self.pos).unwrap();
+        self.pos = self.pos + 1u64;
+        return Option::Some::<*T>(p);
     }
 }
 
