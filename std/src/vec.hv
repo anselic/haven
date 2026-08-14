@@ -164,9 +164,8 @@ pub struct Vec<T> {
     /// A by-pointer iterator over the elements, front to back, for driving a
     /// `for` loop. Like `for_each`, each element is yielded as a `*T` rather than
     /// by value, so an owning `T` is borrowed in place and never moved out of the
-    /// Vec. A `for` iterand must be a place, so bind the iterator to a `let`
-    /// first: `let it = v.iter(); for p in it { ... *p ... }`. The iterator holds
-    /// a pointer back to this Vec and re-reads its length every step, so it must
+    /// Vec. Drive it directly: `for (p in v.iter()) { ... *p ... }`. The iterator
+    /// holds a pointer back to this Vec and re-reads its length every step, so it must
     /// not outlive the Vec, and pushing during iteration (which may reallocate the
     /// buffer) still reads live elements but visits any newly pushed ones too.
     pub proc iter(*self) VecIter<T> {

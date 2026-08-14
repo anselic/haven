@@ -934,12 +934,6 @@ fn parse_type<'tks, 'src: 'tks>()
     })
 }
 
-/// One postfix step of a `for`-iterand place expression: `.field` or `[index]`.
-enum PlacePostfix<'a> {
-    Field(&'a str),
-    Index(Expr<'a>),
-}
-
 fn parse_stmt<'tks, 'src: 'tks>()
 -> impl Parser<
     'tks,
@@ -1015,70 +1009,45 @@ fn parse_stmt<'tks, 'src: 'tks>()
                 body: Box::new(body),
             });
 
-        // The `for` iterand is a *place* expression: a variable followed by any
-        // chain of `.field` / `[index]`. Restricting the grammar here (rather than
-        // parsing a full expression) does double duty: it structurally forbids the
-        // `Name { ... }` struct-literal reading of `for x in it { ... }` — the same
-        // ambiguity `if`/`while`/`match` avoid with parentheses — and it enforces
-        // that the iterand is a stable place, since the desugar re-evaluates it as
-        // the `.next()` receiver every iteration.
-        let place = var
-            .map_with(|s, e| Metadata::new(ExprNode::Var(*s), e.span()))
-            .then(
-                choice((
-                    just(Token::Dot).ignore_then(var.map(|s| *s)).map(PlacePostfix::Field),
-                    parse_expr()
-                        .delimited_by(just(Token::LBracket), just(Token::RBracket))
-                        .map(PlacePostfix::Index),
-                )).repeated().collect::<Vec<_>>()
-            )
-            .map_with(|(base, ops), e| {
-                let span = e.span();
-                ops.into_iter().fold(base, |base, op| match op {
-                    PlacePostfix::Field(field) => Metadata::new(
-                        ExprNode::Access { base: Box::new(base), field }, span),
-                    PlacePostfix::Index(index) => Metadata::new(
-                        ExprNode::Index { slice: Box::new(base), index: Box::new(index) }, span),
-                })
-            });
-
-        // A trailing `(...)` means the iterand is a call (`mk()`, `v.iter()`) — a
-        // fresh iterator each time the loop re-evaluates it. Catch it here for a
-        // targeted message instead of a bare "unexpected `(`" from the body parser.
-        let iterand = place
-            .then(
-                parse_expr()
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Token::LParen), just(Token::RParen))
-                    .or_not(),
-            )
-            .try_map(|(place, call), span| match call {
-                None => Ok(place),
-                Some(_) => Err(Rich::custom(span, "the `for` iterator cannot be a call \
-                    like `v.iter()`; bind it to a `let` first, then `for x in it`")),
-            });
-
-        // `for x in <place> <body>`, desugared here into the `Iterator` protocol:
+        // `for (x in <expr>) <body>`. The iterand is a full expression, evaluated
+        // *once* into a hidden `$for_iter` local before the loop; the loop then
+        // advances that one iterator. Parenthesizing `x in <expr>` mirrors
+        // `if`/`while`/`match` and dodges the `Name { ... }` struct-literal reading
+        // of the iterand, so it needs no grammatical restriction — a call like
+        // `xs.iter()` is fine, since it is evaluated exactly once.
         //
-        //     while (true) {
-        //         match (<place>.next()) {
-        //             Option::Some(x) -> <body>
-        //             Option::None    -> break;
+        // Desugars into the `Iterator` protocol:
+        //
+        //     {
+        //         let $for_iter = <expr>;
+        //         while (true) {
+        //             match ($for_iter.next()) {
+        //                 Option::Some(x) -> <body>
+        //                 Option::None    -> break;
+        //             }
         //         }
         //     }
         //
         // `Option` is left unqualified: it resolves to whichever `Option` is in
         // scope (std's, or a module's own), matching the enum the iterator's `next`
-        // actually returns.
+        // actually returns. `$for_iter` can't collide with a user name (`$` is not
+        // a legal identifier char) and the local is keyed by the `let`'s node id,
+        // so nested `for`s reusing the name still shadow cleanly.
         let for_ = just(Token::For)
-            .ignore_then(var.map(|s| *s))
-            .then_ignore(select_ref! { Token::Var(s) if *s == "in" => () })
-            .then(iterand)
+            .ignore_then(
+                var.map(|s| *s)
+                    .then_ignore(select_ref! { Token::Var(s) if *s == "in" => () })
+                    .then(parse_expr())
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+            )
             .then(single_stmt_or_block.clone())
             .map_with(|((loop_var, iter), body), e| {
+                const FOR_ITER: &str = "$for_iter";
                 let span = e.span();
+                // Point the synthetic `let` at the iterand itself, so a type error
+                // on the iterand underlines just it, not the whole loop.
+                let iter_span = iter.span;
+
                 let opt_pat = |variant, fields| Metadata::new(
                     PatternNode::Variant {
                         path: NameRef::new(Path { segments: vec!["Option", variant] }),
@@ -1095,10 +1064,13 @@ fn parse_stmt<'tks, 'src: 'tks>()
                         NameRef::new(Path { segments: vec!["Option", "None"] })), span),
                     Box::new(Metadata::new(StmtNode::Break, span)),
                 );
-                // `<iter>.next()`
+                // `$for_iter.next()`
                 let next_call = Metadata::new(ExprNode::Call {
                     func: Box::new(Metadata::new(
-                        ExprNode::Access { base: Box::new(iter), field: "next" }, span)),
+                        ExprNode::Access {
+                            base: Box::new(Metadata::new(ExprNode::Var(FOR_ITER), iter_span)),
+                            field: "next",
+                        }, span)),
                     type_args: Vec::new(),
                     args: Vec::new(),
                 }, span);
@@ -1106,10 +1078,17 @@ fn parse_stmt<'tks, 'src: 'tks>()
                     scrutinee: next_call,
                     arms: vec![some_arm, none_arm],
                 }, span);
-                StmtNode::While {
+                let while_ = Metadata::new(StmtNode::While {
                     condition: Metadata::new(ExprNode::Bool(true), span),
                     body: Box::new(match_stmt),
-                }
+                }, span);
+                // `let $for_iter = <expr>;` — evaluate the iterand exactly once.
+                let declare = Metadata::new(StmtNode::Declare {
+                    name: FOR_ITER,
+                    ty: None,
+                    value: iter,
+                }, iter_span);
+                StmtNode::Block(vec![declare, while_])
             });
 
         // a match pattern: `Enum::Variant`, a data-variant destructure

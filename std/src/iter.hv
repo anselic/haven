@@ -5,11 +5,12 @@
 /// `Item` is the element type, declared as an associated type so each iterator
 /// fixes its own without a type parameter on the trait.
 ///
-///     for x in it { ... }
+///     for (x in it) { ... }
 ///
 /// desugars to a loop that calls `it.next()` and binds each `Some` payload to
-/// `x`, stopping at the first `None`. The iterand must be a place (a variable,
-/// field, index, or deref); bind a fresh-iterator expression to a `let` first.
+/// `x`, stopping at the first `None`. The iterand is any expression; it is
+/// evaluated once into a hidden local before the loop, so `for (x in xs.iter())`
+/// builds a single iterator rather than a fresh one each step.
 
 import option { Option }
 
