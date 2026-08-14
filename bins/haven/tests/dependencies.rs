@@ -64,28 +64,32 @@ fn runs_with_dependency() {
     assert!(out(&res).contains("34"), "unexpected program output:\n{}", out(&res));
 }
 
-/// v1 resolves direct dependencies only. A dependency that declares its own
-/// dependencies is rejected with a message that says so, rather than silently
-/// building a library whose imports cannot resolve at the leaf.
+/// A dependency may declare dependencies of its own: `haven build` walks the
+/// whole closure, builds each package once bottom-up, and binds every transitive
+/// artifact at the leaf so the intermediate library's imports resolve there too.
 #[test]
-fn rejects_transitive_dependency() {
+fn resolves_transitive_dependency() {
     let dir = tempfile::tempdir().unwrap();
     workspace(dir.path());
     scaffold(dir.path(), &[
         ("deep/haven.toml",
             "[project]\nname = \"deep\"\nversion = \"0.1.0\"\nkind = [\"lib\"]\n"),
-        ("deep/src/lib.hv", "pub proc d() i32 { return 1; }\n"),
+        ("deep/src/lib.hv", "pub proc bonus() i32 { return 100; }\n"),
     ]);
-    // make the library itself depend on `deep`.
+    // `example_lib` now depends on `deep` and uses its symbol, so `deep` must be
+    // bound when `example_lib` compiles *and* when `app` (the leaf) re-resolves
+    // it - the transitive case a `.hvmeta`'s empty dependency list can't carry.
     std::fs::write(dir.path().join("example_lib/haven.toml"),
         "[project]\nname = \"example_lib\"\nversion = \"0.1.0\"\nkind = [\"lib\"]\n\n\
          [dependencies]\ndeep = { path = \"../deep\" }\n").unwrap();
+    std::fs::write(dir.path().join("example_lib/src/lib.hv"),
+        "import deep { bonus }\n\
+         pub proc sumsq(a: i32, b: i32) i32 { return a * a + b * b + bonus(); }\n").unwrap();
 
-    let res = haven(&dir.path().join("app"), &["build"]);
-    assert!(!res.status.success(), "a transitive dependency must be rejected");
-    let e = err(&res);
-    assert!(e.contains("transitive"), "should name the limitation; got: {e}");
-    assert!(e.contains("deep"), "should name the offending dependency; got: {e}");
+    let res = haven(&dir.path().join("app"), &["run"]);
+    assert!(res.status.success(), "transitive build/run failed: {}", err(&res));
+    // 5*5 + 3*3 + 100 == 134: proves `deep` resolved at the leaf `app`.
+    assert!(out(&res).contains("134"), "unexpected program output:\n{}", out(&res));
 }
 
 /// The key must be the library's own package name: it is what anchors the

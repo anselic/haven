@@ -11,6 +11,7 @@
 //!   run          build an executable and run it
 //!   doc          generate docs into `.haven/doc/`
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -168,7 +169,8 @@ fn cmd_build(fmt: MessageFormat) -> Result<PathBuf, String> {
     build_project(&project, fmt, /*force_executable=*/ false)
 }
 
-/// The shared compile path used by both `build` and `run`. When
+/// The shared compile path used by both `build` and `run`: build `project`'s
+/// full dependency closure, then compile `project` against it. When
 /// `force_executable` is set (as `run` requires), the manifest's `kind` is
 /// overridden to build an executable so there is a binary to launch.
 fn build_project(
@@ -177,19 +179,82 @@ fn build_project(
     force_executable: bool,
 ) -> Result<PathBuf, String> {
     project.validate()?;
+    // Build the whole dependency graph (each package once), then compile this
+    // project against the flattened closure. The root is seeded onto the build
+    // stack so a cycle back to it is caught here, not one frame down.
+    let mut cache: HashMap<PathBuf, (PathBuf, Vec<(String, PathBuf)>)> = HashMap::new();
+    let mut on_stack: Vec<PathBuf> = vec![canonical_root(project)];
+    let deps = dep_closure(project, fmt, &mut cache, &mut on_stack)?;
+    compile_project(project, &deps, force_executable, fmt)
+}
 
-    // Direct dependencies are built first, each in its own `.haven/target/`, and
-    // their `.hvmeta` artifacts passed down as `--dep name=path`. Recursion
-    // terminates at depth one: `dependencies()` rejects a dependency that has
-    // dependencies of its own, so a dependency's own build finds none.
-    let deps = project.dependencies()?;
-    let mut dep_args: Vec<(String, PathBuf)> = Vec::with_capacity(deps.len());
-    for dep in &deps {
-        let artifact = build_project(&dep.project, fmt, /*force_executable=*/ false)
+/// The canonicalized package root: the identity a package is memoized and
+/// cycle-checked by, so two spellings of one directory count as a single node.
+fn canonical_root(project: &Project) -> PathBuf {
+    std::fs::canonicalize(&project.root).unwrap_or_else(|_| project.root.clone())
+}
+
+/// Build every package reachable from `project` through `[dependencies]` and
+/// return the flat `(name, artifact)` set to bind as `--dep` when `project`
+/// compiles. The set is *transitive*: an intermediate library's own
+/// dependencies have to be bound at the leaf too, because a `.hvmeta` records no
+/// dependency list, so the leaf re-resolves the intermediate's `import`s itself.
+fn dep_closure(
+    project: &Project,
+    fmt: MessageFormat,
+    cache: &mut HashMap<PathBuf, (PathBuf, Vec<(String, PathBuf)>)>,
+    on_stack: &mut Vec<PathBuf>,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    // BTreeMap dedups a diamond by package name and keeps the command line
+    // deterministic; a direct dependency wins over the same name reached only
+    // transitively.
+    let mut flat: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for dep in project.dependencies()? {
+        let (artifact, sub) = build_dependency(&dep.project, fmt, cache, on_stack)
             .map_err(|e| format!("dependency `{}`: {}", dep.name, e))?;
-        dep_args.push((dep.name.clone(), artifact));
+        for (name, path) in sub {
+            flat.entry(name).or_insert(path);
+        }
+        flat.insert(dep.name.clone(), artifact);
     }
+    Ok(flat.into_iter().collect())
+}
 
+/// Build one library dependency to its `.hvmeta`, memoized so a package shared
+/// by several dependents is built once. Returns the artifact and the package's
+/// own transitive closure (for a dependent to merge). A package already on the
+/// build stack is a dependency cycle.
+fn build_dependency(
+    project: &Project,
+    fmt: MessageFormat,
+    cache: &mut HashMap<PathBuf, (PathBuf, Vec<(String, PathBuf)>)>,
+    on_stack: &mut Vec<PathBuf>,
+) -> Result<(PathBuf, Vec<(String, PathBuf)>), String> {
+    let key = canonical_root(project);
+    if let Some(hit) = cache.get(&key) {
+        return Ok(hit.clone());
+    }
+    if on_stack.contains(&key) {
+        return Err(format!("dependency cycle through `{}`", project.project.name));
+    }
+    on_stack.push(key.clone());
+    project.validate()?;
+    let deps = dep_closure(project, fmt, cache, on_stack)?;
+    let artifact = compile_project(project, &deps, /*force_executable=*/ false, fmt)?;
+    on_stack.pop();
+    cache.insert(key, (artifact.clone(), deps.clone()));
+    Ok((artifact, deps))
+}
+
+/// Compile one project's entry file with `havenc`, binding `deps` as `--dep`
+/// and running its post-build script if it declared one. Dependency resolution
+/// and building is the caller's job; this is the single compiler invocation.
+fn compile_project(
+    project: &Project,
+    deps: &[(String, PathBuf)],
+    force_executable: bool,
+    fmt: MessageFormat,
+) -> Result<PathBuf, String> {
     let entry = project.entry_path();
     if !entry.is_file() {
         return Err(format!("entry file `{}` does not exist", entry.display()));
@@ -224,7 +289,7 @@ fn build_project(
         Output::Executable => {}
     }
 
-    for (name, artifact) in &dep_args {
+    for (name, artifact) in deps {
         cmd.arg("--dep").arg(format!("{}={}", name, artifact.display()));
     }
 

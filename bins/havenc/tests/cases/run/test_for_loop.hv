@@ -24,7 +24,7 @@ proc main() i32 {
     // variable iterand
     let it: RangeIter = RangeIter { cur: 0, end: 5 };
     let sum: i32 = 0;
-    for x in it {
+    for (x in it) {
         sum = sum + x;
     }
     println(sum);   // 0+1+2+3+4 = 10
@@ -32,7 +32,7 @@ proc main() i32 {
     // field-access iterand
     let h: Holder = Holder { it: RangeIter { cur: 0, end: 4 } };
     let s2: i32 = 0;
-    for y in h.it {
+    for (y in h.it) {
         s2 = s2 + y;
     }
     println(s2);    // 0+1+2+3 = 6

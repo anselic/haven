@@ -10,6 +10,7 @@
 // This root exists only so the built `.hvmeta` carries every module: loading
 // starts here, and a module the root cannot reach is absent from the artifact.
 // It binds each as a module-private qualifier and exports nothing of its own.
+import denormal
 import filters
 import osc
 import utils

@@ -1,5 +1,6 @@
 // Walking into a namespace that exists but asking for a name it doesn't export.
 //@ error: is not exported by module 'clap::version'
+//@ dep: dsp=stdlib/dsp
 //@ dep: plug=stdlib/plug
 
 import plug/clap

@@ -16,8 +16,7 @@ proc main() i32 {
     v.push(4);
 
     let sum: i32 = 0;
-    let it: VecIter<i32> = v.iter();
-    for p in it {
+    for (p in v.iter()) {
         sum = sum + *p;
     }
     println(sum);  // 1+2+3+4 = 10
@@ -25,8 +24,7 @@ proc main() i32 {
     // An empty Vec yields nothing.
     let e: Vec<i32> = Vec::<i32>::new();
     let n: i32 = 0;
-    let eit: VecIter<i32> = e.iter();
-    for q in eit {
+    for (q in e.iter()) {
         n = n + 1;
     }
     println(n);  // 0
@@ -37,8 +35,7 @@ proc main() i32 {
     ws.push(String::from_str("ab"));
     ws.push(String::from_str("cde"));
     let total: u64 = 0u64;
-    let wit: VecIter<String> = ws.iter();
-    for s in wit {
+    for (s in ws.iter()) {
         total = total + s.len();
     }
     println(total);  // 2+3 = 5

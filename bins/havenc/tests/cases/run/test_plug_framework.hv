@@ -3,6 +3,7 @@
 // params extension, and run `process` over a real buffer — proving the whole
 // monomorphized bridge chain (entry -> factory -> descriptor -> vtable ->
 // params -> process) works at runtime, not just that `clap_entry` links.
+//@ dep: dsp=stdlib/dsp
 //@ dep: plug=stdlib/plug
 
 import plug/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }

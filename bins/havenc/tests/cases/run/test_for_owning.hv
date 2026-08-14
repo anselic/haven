@@ -21,7 +21,7 @@ extend Words: Iterator {
 proc main() i32 {
     let w: Words = Words { made: 0, count: 3 };
     let total: i32 = 0;
-    for s in w {
+    for (s in w) {
         total = total + numerical_cast::<i32>(s.len());
     }
     println(total);  // 3 words * 4 bytes = 12

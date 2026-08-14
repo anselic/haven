@@ -1,6 +1,7 @@
 // The plug/clap CLAP ABI bindings: pin the ABI-critical struct sizes (they must
 // match the C headers byte-for-byte) and drive one indirect call through a
 // plugin vtable to prove the fn-pointer fields resolve and lower at runtime.
+//@ dep: dsp=stdlib/dsp
 //@ dep: plug=stdlib/plug
 
 import plug/clap/version { ClapVersion, clap_version_is_compatible }

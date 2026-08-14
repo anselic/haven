@@ -4,6 +4,7 @@
 // user-module one. Binds the `plug` package, whose `clap/` subtree is a real
 // directory of modules in the emitted `.hvmeta`.
 //@ exit: 0
+//@ dep: dsp=stdlib/dsp
 //@ dep: plug=stdlib/plug
 
 import plug/clap

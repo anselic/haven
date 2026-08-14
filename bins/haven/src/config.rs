@@ -240,12 +240,13 @@ impl Project {
     /// library's own build. `havenc` enforces the same rule; catching it here
     /// just makes the message point at the manifest.
     ///
-    /// v1 resolves **direct dependencies only**. A dependency that declares
-    /// dependencies of its own is rejected rather than walked: the artifact
-    /// records no dependency list, so the graph is knowable only from manifests,
-    /// and resolving it properly needs the version/diamond arbitration no
-    /// resolver exists for yet. The check doubles as cycle protection - a
-    /// dependency cycle necessarily has a dependency with dependencies.
+    /// This returns the **direct** dependencies only; a dependency that declares
+    /// its own is walked by the build tool (`build_project` in `main.rs`), which
+    /// builds the whole closure and binds every transitive artifact at the leaf.
+    /// The graph is knowable only from manifests (a `.hvmeta` records no
+    /// dependency list), so the walk resolves path deps directly with no version
+    /// arbitration, and a diamond is deduped by package name. Cycle detection
+    /// lives in the walk, not here.
     pub fn dependencies(&self) -> Result<Vec<ResolvedDep>, String> {
         let mut out = Vec::new();
         for (name, spec) in &self.dependencies {
@@ -286,15 +287,6 @@ impl Project {
                      which builds {} rather than a `.hvmeta`. Only `kind = [\"lib\"]` \
                      packages can be depended on",
                     name, dep.kinds(), dep.output_kind().label()));
-            }
-            if !dep.dependencies.is_empty() {
-                let mut names: Vec<&str> = dep.dependencies.keys().map(String::as_str).collect();
-                names.sort_unstable();
-                return Err(format!(
-                    "dependency `{}` has dependencies of its own ({}), and transitive \
-                     dependencies are not supported yet. Depend on {} directly from \
-                     this manifest as well",
-                    name, names.join(", "), names.join(" and ")));
             }
             out.push(ResolvedDep { name: name.clone(), project: dep });
         }

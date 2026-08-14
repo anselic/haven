@@ -85,7 +85,7 @@ static DEP_TMPS: OnceLock<Mutex<Vec<tempfile::TempDir>>> = OnceLock::new();
 /// packages' own modules do `import std/...`, so the build runs with `$HAVEN_STD`
 /// pointed at the harness's std artifact - the same discovery a real consumer
 /// build gets from the installed std.
-fn dep_meta(pkgdir: &str, name: &str) -> PathBuf {
+fn dep_meta(pkgdir: &str, name: &str, prior: &[(String, PathBuf)]) -> PathBuf {
     let cache = DEP_METAS.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(p) = cache.lock().unwrap().get(pkgdir) {
         return p.clone();
@@ -97,13 +97,33 @@ fn dep_meta(pkgdir: &str, name: &str) -> PathBuf {
     let dir = repo.join(pkgdir);
     let tmp = tempfile::tempdir().expect("temp dir for dep hvmeta");
     let meta = tmp.path().join(format!("{name}.hvmeta"));
-    let out = Command::new(COMPILER_BIN)
-        .arg(dir.join("src/lib.hv"))
+    let mut cmd = Command::new(COMPILER_BIN);
+    cmd.arg(dir.join("src/lib.hv"))
         .args(["--lib", "--package-name", name])
         .arg("-o").arg(&meta)
-        .env("HAVEN_STD", std_meta())
-        .output()
-        .expect("failed to spawn havenc to build a dependency hvmeta");
+        .env("HAVEN_STD", std_meta());
+    // A package built here may itself depend on an earlier `//@ dep:` entry (e.g.
+    // `plug` on `dsp`), so bind everything declared before it. The cache key is
+    // `pkgdir`, which assumes a package is always built with the same prior set -
+    // true for these fixtures.
+    for (n, p) in prior {
+        cmd.arg("--dep").arg(format!("{n}={}", p.display()));
+    }
+    // A package's `[[c]]` native sources ride into its `.hvmeta` for a consumer's
+    // leaf to link (dsp ships `c/denormal.c`, backing `rt_denormals_*`). The
+    // harness doesn't parse `haven.toml`, so it globs `<pkg>/c/*.c` - enough for
+    // the stdlib packages, whose C all lives there.
+    if let Ok(entries) = std::fs::read_dir(dir.join("c")) {
+        let mut cfiles: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "c"))
+            .collect();
+        cfiles.sort();
+        for c in cfiles {
+            cmd.arg("--c-file").arg(c);
+        }
+    }
+    let out = cmd.output().expect("failed to spawn havenc to build a dependency hvmeta");
     assert!(out.status.success(),
         "building {name}.hvmeta ({pkgdir}) for the harness failed:\n{}",
         String::from_utf8_lossy(&out.stderr));
@@ -165,9 +185,16 @@ fn run_case(path: &Path, mode: Mode) -> Result<(), Failed> {
         // point the flagless fixture at the on-disk std the harness built.
         .env("HAVEN_STD", std_meta());
     // `//@ dep: name=stdlib/foo` fixtures bind a standalone stdlib package (dsp,
-    // plug) the same way a consumer does - built once, passed as `--dep`.
+    // plug) the same way a consumer does. Build each in declaration order,
+    // threading the already-built ones in so a package that depends on an earlier
+    // one (plug -> dsp) resolves; then bind the whole set on the fixture's compile
+    // - the transitive closure a leaf needs, since a `.hvmeta` lists no deps.
+    let mut built: Vec<(String, PathBuf)> = Vec::new();
     for (name, pkgdir) in &directives.deps {
-        let meta = dep_meta(pkgdir, name);
+        let meta = dep_meta(pkgdir, name, &built);
+        built.push((name.clone(), meta));
+    }
+    for (name, meta) in &built {
         cmd.arg("--dep").arg(format!("{name}={}", meta.display()));
     }
     let compile = cmd

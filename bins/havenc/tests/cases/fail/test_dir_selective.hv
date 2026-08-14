@@ -2,6 +2,7 @@
 // a namespace. A selective import of one is rejected with the spelling that
 // would work.
 //@ error: is a directory of modules, not a module
+//@ dep: dsp=stdlib/dsp
 //@ dep: plug=stdlib/plug
 
 import plug/clap { version }

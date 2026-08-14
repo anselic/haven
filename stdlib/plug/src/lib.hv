@@ -37,7 +37,7 @@ import clap/ext {
     ClapParamInfo, ClapPluginParams, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE,
 }
 import std/alloc { alloc, dealloc }
-import std/denormal { denormals_disable, denormals_restore }
+import dsp/denormal { denormals_disable, denormals_restore }
 
 extern strcmp(a: str, b: str) i32;
 extern strncpy(dst: *u8, src: str, n: u64) *u8;

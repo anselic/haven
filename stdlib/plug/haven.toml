@@ -2,3 +2,6 @@
 name = "plug"
 version = "0.1.0"
 kind = ["lib"]
+
+[dependencies]
+dsp = { path = "../dsp" }
