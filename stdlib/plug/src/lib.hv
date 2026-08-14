@@ -1,4 +1,4 @@
-// std/plug — a nih-plug-style plugin framework in pure haven.
+// plug — a nih-plug-style plugin framework in pure haven.
 //
 // The author writes a plain state struct, `extend`s it with the `Plugin` trait
 // (metadata + lifecycle + params + `process`), and exports one symbol:
@@ -19,7 +19,7 @@
 //
 //     havenc my_plugin.hv -o MyPlugin --shared    # then rename MyPlugin.dll -> .clap
 //
-// See examples/4_gain_plug.hv for a complete worked plugin.
+// See examples/example_gain for a complete worked plugin.
 
 import clap/version { ClapVersion }
 import clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
@@ -36,8 +36,8 @@ import clap/ext {
     CLAP_AUDIO_PORT_IS_MAIN, CLAP_PORT_STEREO,
     ClapParamInfo, ClapPluginParams, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE,
 }
-import alloc { alloc, dealloc }
-import dsp/denormal { denormals_disable, denormals_restore }
+import std/alloc { alloc, dealloc }
+import std/denormal { denormals_disable, denormals_restore }
 
 extern strcmp(a: str, b: str) i32;
 extern strncpy(dst: *u8, src: str, n: u64) *u8;

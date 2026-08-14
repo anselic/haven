@@ -2,9 +2,10 @@
 // under its last path segment (`math::`, `osc::`). exercises the three qualified
 // spellings the import-semantics flip enables: a qualified call, a qualified
 // struct *type* in a binding, and qualified struct construction.
+//@ dep: dsp=stdlib/dsp
 
 import std/math
-import std/dsp/osc
+import dsp/osc
 
 @export
 proc main() i32 {

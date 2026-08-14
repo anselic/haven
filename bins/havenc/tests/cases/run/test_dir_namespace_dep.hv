@@ -1,0 +1,17 @@
+// The directory-namespace rule over a directory *inside a dependency artifact*
+// (`plug/clap`), which the compiler walks by a separate implementation from a
+// leaf's on-disk modules - so it gets its own fixture rather than riding on the
+// user-module one. Binds the `plug` package, whose `clap/` subtree is a real
+// directory of modules in the emitted `.hvmeta`.
+//@ exit: 0
+//@ dep: plug=stdlib/plug
+
+import plug/clap
+
+@export
+proc main() i32 {
+    // walk the `clap/` namespace to a member function of `version`.
+    let v: clap::version::ClapVersion = clap::version::clap_version_current();
+    if (v.major == 1u32) { return 0; }
+    return 1;
+}

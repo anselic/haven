@@ -1,13 +1,7 @@
-// A complete CLAP plugin written against the std/plug framework: a stereo gain
-// with one automatable parameter. Compare examples/3_clap.hv, which wires the
-// same plugin against the raw CLAP bindings by hand — this version writes only
-// the state, the trait impl, and one exported const; std/plug builds every piece
-// of ABI glue generically from the `Gain` type.
-
-import std/clap/version { ClapVersion }
-import std/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
-import std/clap/plugin { ClapPluginEntry }
-import std/plug {
+import plug/clap/version { ClapVersion }
+import plug/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
+import plug/clap/plugin { ClapPluginEntry }
+import plug {
     Plugin, FloatParam,
     plug_entry_init, plug_entry_deinit, plug_entry_get_factory,
 }
@@ -44,22 +38,24 @@ extend Gain: Plugin {
 
     // --- audio: out[ch][i] = in[ch][i] * gain ---
     proc process(*self, ctx: *ClapProcess) ClapProcessStatus {
-        let g: f64 = self.gain;
-        let frames: u32 = ctx.frames_count;
-        let outs: *ClapAudioBuffer = ctx.audio_outputs;
-        let ins: *ClapAudioBuffer = ctx.audio_inputs;
-        let channels: u32 = outs.channel_count;
-        let ch: u32 = 0u32;
+        let g = self.gain;
+        let frames = ctx.frames_count;
+        let outs = ctx.audio_outputs;
+        let ins = ctx.audio_inputs;
+        let channels = outs.channel_count;
+        let ch = 0u32;
+
         while (ch < channels) {
-            let src: *f32 = ins.data32[ch];
-            let dst: *f32 = outs.data32[ch];
-            let i: u32 = 0u32;
+            let src = ins.data32[ch];
+            let dst = outs.data32[ch];
+            let i = 0u32;
             while (i < frames) {
                 dst[i] = numerical_cast::<f32>(numerical_cast::<f64>(src[i]) * g);
                 i = i + 1u32;
             }
             ch = ch + 1u32;
         }
+
         return ClapProcessStatus::Continue;
     }
 }

@@ -1,17 +1,18 @@
-// Drive the std/plug framework in-process like a tiny CLAP host: pull the
+// Drive the plug framework in-process like a tiny CLAP host: pull the
 // factory from the entry callback, create a plugin, query its descriptor and
 // params extension, and run `process` over a real buffer — proving the whole
 // monomorphized bridge chain (entry -> factory -> descriptor -> vtable ->
 // params -> process) works at runtime, not just that `clap_entry` links.
+//@ dep: plug=stdlib/plug
 
-import std/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
-import std/clap/events { ClapInputEvents, ClapOutputEvents, ClapEventHeader, ClapEventTransport }
-import std/clap/plugin {
+import plug/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
+import plug/clap/events { ClapInputEvents, ClapOutputEvents, ClapEventHeader, ClapEventTransport }
+import plug/clap/plugin {
     ClapPlugin, ClapPluginFactory, ClapPluginDescriptor, ClapHost,
     CLAP_PLUGIN_FACTORY_ID,
 }
-import std/clap/ext { ClapPluginParams, ClapParamInfo, CLAP_EXT_PARAMS }
-import std/plug { Plugin, FloatParam, plug_entry_get_factory }
+import plug/clap/ext { ClapPluginParams, ClapParamInfo, CLAP_EXT_PARAMS }
+import plug { Plugin, FloatParam, plug_entry_get_factory }
 
 // A plugin that doubles its input (gain defaults to 2.0).
 struct Doubler { gain: f64 }

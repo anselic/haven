@@ -2,10 +2,11 @@
 // more segments after the module qualifier has been walked as far as it goes is
 // an error rather than a silently dropped tail.
 //@ error: has too many `::` segments after the module qualifier
+//@ dep: plug=stdlib/plug
 
-import std/dsp
+import plug/clap
 
 @export
 proc main() i32 {
-    return dsp::osc::Osc::make::extra();
+    return clap::version::ClapVersion::make::extra();
 }

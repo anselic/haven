@@ -33,7 +33,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Generate docs
-        run: cargo run --bin havendoc -- std/src/*
+        run: cargo run --bin havendoc -- stdlib/std/src/* stdlib/dsp/src/* stdlib/plug/src/*
 
       - name: Install mdBook
         run: |

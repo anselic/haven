@@ -24,7 +24,7 @@ pub fn std_meta() -> &'static Path {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent().and_then(|p| p.parent())
             .expect("repo root above bins/havenc");
-        let std_dir = repo.join("std");
+        let std_dir = repo.join("stdlib/std");
         let tmp = tempfile::tempdir().expect("temp dir for std.hvmeta");
         let meta = tmp.path().join("std.hvmeta");
         let out = Command::new(HAVENC)

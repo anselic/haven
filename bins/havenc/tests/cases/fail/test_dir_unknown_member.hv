@@ -1,9 +1,10 @@
 // Walking into a namespace that exists but asking for a name it doesn't export.
-//@ error: is not exported by module 'dsp::osc'
+//@ error: is not exported by module 'clap::version'
+//@ dep: plug=stdlib/plug
 
-import std/dsp
+import plug/clap
 
 @export
 proc main() i32 {
-    return dsp::osc::no_such_thing();
+    return clap::version::no_such_thing();
 }

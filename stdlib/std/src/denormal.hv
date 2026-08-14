@@ -1,4 +1,4 @@
-/// std/dsp/denormal: process a block with denormals flushed to zero.
+/// std/denormal: process a block with denormals flushed to zero.
 ///
 /// A denormal (subnormal) float is the hardware's slow path. Audio that decays
 /// towards silence - a filter ringing out, a reverb tail, a delay feedback loop
@@ -9,7 +9,7 @@
 ///
 /// The setting is per-thread and belongs to whoever owns the thread, so it is
 /// saved and restored rather than set once. A plugin runs on the host's audio
-/// thread and must hand it back unchanged; `std/plug` already wraps every
+/// thread and must hand it back unchanged; the `plug` framework already wraps every
 /// `process` call this way, so a plugin written against that framework needs
 /// nothing from this module. Reach for it when you own an audio callback
 /// directly:

@@ -9,8 +9,10 @@
 //     -lwinmm -lgdi32 -lopengl32 -lshell32 -luser32 -lkernel32"
 // > ./showcase.exe
 
-import std/dsp/filters
-import std/dsp/osc
+// `dsp` is a standalone stdlib package, not the prelude: bind its artifact when
+// compiling, e.g. `--dep dsp=<path>/dsp.hvmeta`.
+import dsp/filters
+import dsp/osc
 import std/alloc { alloc, dealloc }
 import std/option { Option }
 import std/simd { simd_copy_ptr }

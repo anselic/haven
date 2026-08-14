@@ -1,15 +1,14 @@
-/// std/dsp/osc: naive oscillators.
+/// dsp/osc: naive oscillators.
 ///
 /// A `Phasor` ramp generator and an `Osc` that turns that ramp into the classic
 /// waveform shapes (sine, saw, square, triangle). The shapers are naive, i.e.
 /// not bandlimited, so they alias at high frequencies. Frequencies and sample
 /// rate are in hertz; all sample outputs are single precision.
 
-// `self/` anchors at the package root, so this is *this* package's `math.hv` (a
-// sibling of `lib.hv`, one level up) rather than the embedded stdlib's. A plain
-// `import math` would look for `dsp/math.hv`: an ordinary import only reaches
-// downward, from the importing module's own directory.
-import self/math { sinf, fabsf, fmodf, tau_f32 }
+// `math` is the standard library's, another package - so it is imported by its
+// full `std/...` path. A bare `import math` would look for a `math.hv` in this
+// (`dsp`) package instead, which does not exist.
+import std/math { sinf, fabsf, fmodf, tau_f32 }
 
 // --- Phasor ---------------------------------------------------------------
 

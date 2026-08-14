@@ -2,8 +2,9 @@
 // a namespace. A selective import of one is rejected with the spelling that
 // would work.
 //@ error: is a directory of modules, not a module
+//@ dep: plug=stdlib/plug
 
-import std/dsp { osc }
+import plug/clap { version }
 
 @export
 proc main() i32 { return 0; }

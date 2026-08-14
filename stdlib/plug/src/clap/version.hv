@@ -3,7 +3,7 @@
 // Transcribed from the CLAP 1.2.x C headers. Every struct that crosses the ABI
 // is `@repr(C)`; string IDs and flag values are `pub const` globals.
 //
-// See std/clap/plugin.hv for the entry point a `.clap` must export.
+// See plug/clap/plugin.hv for the entry point a `.clap` must export.
 
 // typedef struct clap_version { uint32_t major, minor, revision; }
 @repr(C)

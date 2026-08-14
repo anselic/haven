@@ -1,11 +1,10 @@
-/// std/dsp/utils: small audio unit conversions.
+/// dsp/utils: small audio unit conversions.
 ///
 /// Helpers for moving between the units DSP code mixes constantly: linear
 /// amplitude vs decibels, and MIDI note numbers vs frequency in hertz. All
 /// single precision.
 
-// `self/` anchors at the package root - see `dsp/osc.hv`.
-import self/math { powf, log10f, log2f }
+import std/math { powf, log10f, log2f }
 
 // TODO: the compiler should be able to infer these are `@alloc(false)`.
 

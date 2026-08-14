@@ -17,17 +17,15 @@ import fmt { display_print, display_println }
 // and no consumer can import it. These bind a module-private qualifier and
 // export nothing, so nothing here reaches a consumer's scope.
 import alloc
+import denormal
 import env
 import fs
 import iter
 import math
 import option
-import plug
 import process
 import result
 import simd
-import clap
-import dsp
 
 /// A destructor. Implement it to give a type ownership of a resource:
 ///

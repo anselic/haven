@@ -22,9 +22,10 @@
 //! `.out` goldens after an intentional output change, run
 //! `tests/cases/bless.sh`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use libtest_mimic::{Arguments, Failed, Trial};
 
@@ -51,7 +52,7 @@ fn std_meta() -> &'static Path {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent().and_then(|p| p.parent())
             .expect("repo root above bins/havenc");
-        let std_dir = repo.join("std");
+        let std_dir = repo.join("stdlib/std");
         let tmp = tempfile::tempdir().expect("temp dir for std.hvmeta");
         let meta = tmp.path().join("std.hvmeta");
         let status = Command::new(COMPILER_BIN)
@@ -70,6 +71,45 @@ fn std_meta() -> &'static Path {
             String::from_utf8_lossy(&status.stderr));
         (tmp, meta)
     }).1
+}
+
+/// Built dependency artifacts, keyed by package dir relative to the repo root. A
+/// `//@ dep: name=stdlib/foo` fixture binds `foo.hvmeta`; several fixtures share
+/// one, so each is built once. The `TempDir`s are parked so the artifacts outlive
+/// the run.
+static DEP_METAS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+static DEP_TMPS: OnceLock<Mutex<Vec<tempfile::TempDir>>> = OnceLock::new();
+
+/// Build the stdlib package at `<repo>/<pkgdir>` (e.g. `stdlib/plug`) into a
+/// `<name>.hvmeta` a fixture can bind with `--dep`, once per `pkgdir`. These
+/// packages' own modules do `import std/...`, so the build runs with `$HAVEN_STD`
+/// pointed at the harness's std artifact - the same discovery a real consumer
+/// build gets from the installed std.
+fn dep_meta(pkgdir: &str, name: &str) -> PathBuf {
+    let cache = DEP_METAS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(p) = cache.lock().unwrap().get(pkgdir) {
+        return p.clone();
+    }
+    // `CARGO_MANIFEST_DIR` is `bins/havenc`; the repo root is two up.
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().and_then(|p| p.parent())
+        .expect("repo root above bins/havenc");
+    let dir = repo.join(pkgdir);
+    let tmp = tempfile::tempdir().expect("temp dir for dep hvmeta");
+    let meta = tmp.path().join(format!("{name}.hvmeta"));
+    let out = Command::new(COMPILER_BIN)
+        .arg(dir.join("src/lib.hv"))
+        .args(["--lib", "--package-name", name])
+        .arg("-o").arg(&meta)
+        .env("HAVEN_STD", std_meta())
+        .output()
+        .expect("failed to spawn havenc to build a dependency hvmeta");
+    assert!(out.status.success(),
+        "building {name}.hvmeta ({pkgdir}) for the harness failed:\n{}",
+        String::from_utf8_lossy(&out.stderr));
+    DEP_TMPS.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap().push(tmp);
+    cache.lock().unwrap().insert(pkgdir.to_string(), meta.clone());
+    meta
 }
 
 fn main() {
@@ -118,12 +158,19 @@ fn run_case(path: &Path, mode: Mode) -> Result<(), Failed> {
     let tmp = tempfile::tempdir()?;
     let out = tmp.path().join("out");
 
-    let compile = Command::new(COMPILER_BIN)
-        .arg(path)
+    let mut cmd = Command::new(COMPILER_BIN);
+    cmd.arg(path)
         .arg("-o")
         .arg(&out)
         // point the flagless fixture at the on-disk std the harness built.
-        .env("HAVEN_STD", std_meta())
+        .env("HAVEN_STD", std_meta());
+    // `//@ dep: name=stdlib/foo` fixtures bind a standalone stdlib package (dsp,
+    // plug) the same way a consumer does - built once, passed as `--dep`.
+    for (name, pkgdir) in &directives.deps {
+        let meta = dep_meta(pkgdir, name);
+        cmd.arg("--dep").arg(format!("{name}={}", meta.display()));
+    }
+    let compile = cmd
         .output()
         .map_err(|e| format!("failed to spawn {COMPILER_BIN}: {e}"))?;
     let stderr = strip_ansi(&String::from_utf8_lossy(&compile.stderr));
@@ -193,6 +240,8 @@ fn run_case(path: &Path, mode: Mode) -> Result<(), Failed> {
 struct Directives {
     exit: ExitCheck,
     errors: Vec<String>,
+    /// `(package name, package dir relative to repo root)` from `//@ dep:` lines.
+    deps: Vec<(String, String)>,
 }
 
 enum ExitCheck {
@@ -204,6 +253,7 @@ impl Directives {
     fn parse(src: &str) -> Self {
         let mut exit = ExitCheck::Code(0);
         let mut errors = Vec::new();
+        let mut deps = Vec::new();
         for line in src.lines() {
             let Some(rest) = line.trim_start().strip_prefix("//@") else {
                 continue;
@@ -218,11 +268,15 @@ impl Directives {
                 };
             } else if let Some(v) = rest.strip_prefix("error:") {
                 errors.push(v.trim().to_string());
+            } else if let Some(v) = rest.strip_prefix("dep:") {
+                let (name, dir) = v.trim().split_once('=').unwrap_or_else(||
+                    panic!("`//@ dep:` wants `name=pkgdir`, got: {v:?}"));
+                deps.push((name.trim().to_string(), dir.trim().to_string()));
             } else {
                 panic!("unknown directive: {line:?}");
             }
         }
-        Directives { exit, errors }
+        Directives { exit, errors, deps }
     }
 }
 

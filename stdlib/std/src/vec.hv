@@ -45,6 +45,18 @@ pub struct Vec<T> {
         return v;
     }
 
+    /// Create a Vec from a slice, copying the elements into a new buffer.
+    pub proc from_slice(src: [T]) Vec<T> {
+        let n: u64 = slice_len::<T>(&src);
+        let v: Vec<T> = Vec::<T>::with_capacity(n);
+        let i: u64 = 0u64;
+        while (i < n) {
+            v.push(src[i]);
+            i = i + 1u64;
+        }
+        return v;
+    }
+
     /// Adopt an existing heap buffer as a Vec, taking ownership of it. `data`
     /// must have been produced by the same allocator std/alloc uses (`rt_alloc`/
     /// libc `malloc`, which is what backs runtime buffers like `fs::read`'s),

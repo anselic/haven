@@ -1,4 +1,4 @@
-/// std/dsp/filters: audio filters.
+/// dsp/filters: audio filters.
 ///
 /// Three drop-in filter types, from cheapest to most capable: a one-pole
 /// lowpass, a general-purpose biquad with the standard RBJ EQ responses
@@ -10,8 +10,7 @@
 /// sample. State lives in the filter struct, so keep it between samples.
 /// All single precision.
 
-// `self/` anchors at the package root - see `dsp/osc.hv`.
-import self/math { expf, cosf, sinf, tanf, sqrtf, powf, pi_f32, tau_f32 }
+import std/math { expf, cosf, sinf, tanf, sqrtf, powf, pi_f32, tau_f32 }
 
 // --- OnePole --------------------------------------------------------------
 

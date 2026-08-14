@@ -1,15 +1,16 @@
-// The std/clap CLAP ABI bindings: pin the ABI-critical struct sizes (they must
+// The plug/clap CLAP ABI bindings: pin the ABI-critical struct sizes (they must
 // match the C headers byte-for-byte) and drive one indirect call through a
 // plugin vtable to prove the fn-pointer fields resolve and lower at runtime.
+//@ dep: plug=stdlib/plug
 
-import std/clap/version { ClapVersion, clap_version_is_compatible }
-import std/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
-import std/clap/plugin { ClapPlugin, ClapPluginEntry, ClapPluginDescriptor }
-import std/clap/events {
+import plug/clap/version { ClapVersion, clap_version_is_compatible }
+import plug/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
+import plug/clap/plugin { ClapPlugin, ClapPluginEntry, ClapPluginDescriptor }
+import plug/clap/events {
     ClapEventHeader, ClapEventNote,
     ClapEventTransport, ClapInputEvents, ClapOutputEvents,
 }
-import std/clap/ext { ClapParamInfo }
+import plug/clap/ext { ClapParamInfo }
 
 proc stub_init(p: *ClapPlugin) bool { return true; }
 proc stub_destroy(p: *ClapPlugin) void { }
