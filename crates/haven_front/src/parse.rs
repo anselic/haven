@@ -3,9 +3,26 @@ use chumsky::{
     input::MappedInput,
     pratt::*,
     prelude::*,
+    Boxed,
 };
 use haven_common::ast::*;
 use haven_common::defs::DefId;
+
+/// What every token-level parser below reads: the lexer's `Metadata`-wrapped
+/// tokens, mapped to the `(&Token, &Span)` pairs chumsky wants. Built once, in
+/// [`parse`].
+type Tokens<'tks, 'src> = MappedInput<
+    'tks,
+    Token<'src>,
+    Span,
+    &'tks [Metadata<Token<'src>>],
+>;
+
+/// What every token-level parser below reports.
+type Extra<'tks, 'src> = extra::Err<Rich<'tks, Token<'src>, Span>>;
+
+/// A parser over [`Tokens`] producing an `O`.
+type P<'tks, 'src, O> = Boxed<'tks, 'tks, Tokens<'tks, 'src>, O, Extra<'tks, 'src>>;
 
 /// Field names for a tuple variant's payload: `Msg::Note(i32, i32)` gets fields
 /// `"0"` and `"1"`, so a tuple variant and a struct-style variant share one
@@ -30,25 +47,26 @@ fn tuple_field_name(i: usize) -> &'static str {
 
 /// A `::`-separated name: one or more identifier segments, kept apart.
 ///
-/// Written as a macro rather than a function because each use site has its own
-/// `var` parser with its own inference-bound types, and spelling out a chumsky
-/// parser's return type is far more noise than repeating four lines.
+/// This was a macro for as long as the parsers returned `impl Parser<..>`, since
+/// each use site then had its own inference-bound types and no way to name the
+/// result. [`P`] gives it a name, so the six use sites now share one parser
+/// instead of expanding six copies of this chain for rustc to typecheck.
 ///
 /// `repeated()` rewinds a partial match, so a trailing turbofish `::<...>` — not
 /// an identifier — leaves the `::` for the caller's own alternative, exactly as
 /// the previous `or_not()` form did.
-macro_rules! path_of {
-    ($var:expr) => {
-        $var.map(|s| *s)
-            .then(just(Token::ColonColon).ignore_then($var.map(|s| *s))
-                .repeated().collect::<Vec<_>>())
-            .map(|(head, rest): (&'src str, Vec<&'src str>)| {
-                let mut segments = Vec::with_capacity(rest.len() + 1);
-                segments.push(head);
-                segments.extend(rest);
-                Path { segments }
-            })
-    };
+fn path_of<'tks, 'src: 'tks>() -> P<'tks, 'src, Path<'src>> {
+    let var = select_ref! { Token::Var(ident) => ident };
+    var.map(|s| *s)
+        .then(just(Token::ColonColon).ignore_then(var.map(|s| *s))
+            .repeated().collect::<Vec<_>>())
+        .map(|(head, rest): (&'src str, Vec<&'src str>)| {
+            let mut segments = Vec::with_capacity(rest.len() + 1);
+            segments.push(head);
+            segments.extend(rest);
+            Path { segments }
+        })
+        .boxed()
 }
 
 /// The payload tail of an `Enum::Variant` match pattern: positional `(a, b)` or
@@ -459,13 +477,7 @@ fn build_interp<'src>(inner: &'src str, span: Span) -> Result<Expr<'src>, String
     }
 }
 
-fn parse_expr<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    Expr<'src>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+fn parse_expr<'tks, 'src: 'tks>() -> P<'tks, 'src, Expr<'src>> {
     recursive(|expr| {
         let var = select_ref! { Token::Var(ident) => ident };
 
@@ -557,7 +569,7 @@ fn parse_expr<'tks, 'src: 'tks>()
             };
         }
 
-        choice((
+        choice([
             select_ref! {
                 Token::Bool(b)    => ExprNode::Bool(*b),
                 Token::Int8(i)    => ExprNode::Int8(*i),
@@ -573,13 +585,14 @@ fn parse_expr<'tks, 'src: 'tks>()
                 Token::IntLit(n)  => ExprNode::IntLit(*n),
                 Token::FloatLit(f)=> ExprNode::FloatLit(*f),
                 Token::Str(s)     => ExprNode::Str(*s),
-            },
+            }.boxed(),
 
             // an interpolated string `f"...{expr}..."`, desugared to String-
             // building calls right here so nothing downstream sees an f-string.
             select_ref! { Token::FStr(raw) => *raw }
                 .try_map(|raw, span| expand_fstring(raw, span)
-                    .map_err(|m| Rich::custom(span, m))),
+                    .map_err(|m| Rich::custom(span, m)))
+                .boxed(),
 
             // Struct init, with an optional qualifier and an optional turbofish
             // for generic structs: `S { f: v }`, `geo::Point { f: v }`,
@@ -589,7 +602,7 @@ fn parse_expr<'tks, 'src: 'tks>()
             // disambiguating `<`/`>` from comparison operators as the call
             // turbofish does. The segment alternative rejects `::<` (not an ident)
             // and backtracks, so the turbofish still sees it.
-            path_of!(var)
+            path_of()
                 .then(turbofish.clone().or_not().map(|t| t.unwrap_or_default()))
                 .then(
                     // `field: value`, or the shorthand `field` (equivalent to
@@ -612,14 +625,15 @@ fn parse_expr<'tks, 'src: 'tks>()
                     name: NameRef::new(name),
                     type_args,
                     fields,
-                }),
+                })
+                .boxed(),
 
             // An associated function reached through a *generic* type, with the
             // turbofish on the type rather than the call: `Buf::<i32>::make()`,
             // `mod::Buf::<i32>::make()`, `Buf::<i32>::make::<U>()`.
             //
             // The whole call is built here, arguments included, because the
-            // turbofish sits in the middle of the name: `path_of!` stops at
+            // turbofish sits in the middle of the name: `path_of` stops at
             // `Buf` (`::<` is not a segment), so a postfix operator would have
             // to graft the trailing segment back onto whatever it was applied
             // to - including expressions that are not names at all. Requiring
@@ -629,7 +643,7 @@ fn parse_expr<'tks, 'src: 'tks>()
             // That is exactly right: `extend` desugars each method to a function
             // whose generics are the impl's followed by the method's own, so
             // `Buf::<i32>::make::<U>()` is just `Buf$make::<i32, U>()`.
-            path_of!(var)
+            path_of()
                 .then(turbofish.clone())
                 .then(just(Token::ColonColon).ignore_then(var.map(|s| *s)))
                 .then(turbofish.clone().or_not().map(|t| t.unwrap_or_default()))
@@ -643,14 +657,15 @@ fn parse_expr<'tks, 'src: 'tks>()
                         type_args,
                         args,
                     }
-                }),
+                })
+                .boxed(),
 
             // a variable, or a qualified ref `qualifier::symbol` (`math::sinf`,
             // `Point::new`, `Status::Ready`). The parser doesn't try to tell those
             // apart - it just records the segments and lets the module resolver
             // decide. A `::symbol` is only taken when followed by an ident, so a
             // turbofish `::<...>` is left for the call postfix.
-            path_of!(var).map(|p| ExprNode::Path(NameRef::new(p))),
+            path_of().map(|p| ExprNode::Path(NameRef::new(p))).boxed(),
             expr.clone()
                 .separated_by(just(Token::Comma))
                 .allow_leading()
@@ -658,7 +673,8 @@ fn parse_expr<'tks, 'src: 'tks>()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBracket), just(Token::RBracket))
                 .map(|inner| ExprNode::Slice(inner))
-        ))
+                .boxed()
+        ])
 
         .map_with(|node, e| {
             Metadata::new(
@@ -705,7 +721,7 @@ fn parse_expr<'tks, 'src: 'tks>()
             ),
 
             // A generic function taken *by value* (a function pointer):
-            // `entry_init::<Gain>` with no call following. `path_of!` rewinds the
+            // `entry_init::<Gain>` with no call following. `path_of` rewinds the
             // trailing `::<...>`, and the call postfix above fails without a `(`,
             // so this postfix (listed after it, same precedence) claims the bare
             // turbofish. Only a name can carry one, so the base is always a `Path`.
@@ -769,6 +785,7 @@ fn parse_expr<'tks, 'src: 'tks>()
             bin!(BinaryOp::Or,  120),
         ))
     })
+    .boxed()
 }
 
 /// A size in a `[T; N]` / `simd<T, N>` type position, before it's validated into
@@ -795,21 +812,13 @@ enum GenArg<'a> {
 // generic type in type position (`x: List<T>`, nested turbofish `f::<Vec<i32>>`)
 // won't parse. mangle_ty in mono.rs already collapses fn types to "fn", so once
 // this lands watch the mangler collision noted there.
-fn parse_type<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    Type<'src>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+fn parse_type<'tks, 'src: 'tks>() -> P<'tks, 'src, Type<'src>> {
     recursive(|ty| {
-        let var = select_ref! { Token::Var(ident) => ident };
-
-        choice((
+        choice([
             // `!` - the never/bottom type, as a return type of a diverging proc
             // (`proc panic() ! { abort(...) }`). The `!` token starts no other
             // type, so this alternative is unambiguous.
-            just(Token::UnaryOp(UnaryOp::Not)).to(Type::Never),
+            just(Token::UnaryOp(UnaryOp::Not)).to(Type::Never).boxed(),
             // proc(T1, T2) R
             // starts no other type, so this alternative is unambiguous
             just(Token::Proc)
@@ -824,7 +833,8 @@ fn parse_type<'tks, 'src: 'tks>()
                 .map(|(params, ret)| Type::Function {
                     params,
                     return_type: Box::new(ret.unwrap_or(Type::Void)),
-                }),
+                })
+                .boxed(),
             // [T; N]
             just(Token::LBracket)
                 .ignore_then(ty.clone())
@@ -838,12 +848,14 @@ fn parse_type<'tks, 'src: 'tks>()
                     SizeArg::Lit(x) if x > 0 && x <= MAX_CONST_ARG => Ok(Type::Array(Box::new(inner), ConstVal::Lit(x as usize))),
                     SizeArg::Lit(x) => Err(Rich::custom(span, format!("invalid array size parameter: {x} (must be between 1 and {MAX_CONST_ARG})"))),
                     SizeArg::Param(n) => Ok(Type::Array(Box::new(inner), ConstVal::Param(n))),
-                }),
+                })
+                .boxed(),
             // [T]
             just(Token::LBracket)
                 .ignore_then(ty.clone())
                 .then_ignore(just(Token::RBracket))
-                .map(|inner| Type::Slice(Box::new(inner))),
+                .map(|inner| Type::Slice(Box::new(inner)))
+                .boxed(),
             // a named type, optionally with angle-bracket arguments:
             //   scalar/struct: `i32`, `Vec2`
             //   qualified struct: `geo::Point` (from a whole-module import)
@@ -852,7 +864,7 @@ fn parse_type<'tks, 'src: 'tks>()
             // `<` is unambiguous here - type position has no comparison operators.
             // a leading `qualifier::` stays a separate segment, resolved by the
             // module resolver.
-            path_of!(var)
+            path_of()
             .then(
                 choice((
                     select! { Token::IntLit(x) => GenArg::Size(x) },
@@ -922,7 +934,8 @@ fn parse_type<'tks, 'src: 'tks>()
                 }
                 Ok(Type::Path { path, args: gargs })
             })
-        ))
+            .boxed()
+        ])
         .boxed()
         .pratt((
             // [T]
@@ -932,15 +945,10 @@ fn parse_type<'tks, 'src: 'tks>()
         ))
         .labelled("type")
     })
+    .boxed()
 }
 
-fn parse_stmt<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    Stmt<'src>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+fn parse_stmt<'tks, 'src: 'tks>() -> P<'tks, 'src, Stmt<'src>> {
     recursive(|stmt| {
         let var = select_ref! { Token::Var(ident) => ident };
 
@@ -952,7 +960,8 @@ fn parse_stmt<'tks, 'src: 'tks>()
                 StmtNode::Block(node),
                 e.span(),
             ))
-            .or(stmt.clone());
+            .or(stmt.clone())
+            .boxed();
 
         // `let x: T = e;` or, with the type left to the initializer, `let x = e;`
         let declare = just(Token::Let)
@@ -1117,7 +1126,7 @@ fn parse_stmt<'tks, 'src: 'tks>()
         let field_pat = var.map_with(|s, e| {
             let node = if *s == "_" { PatternNode::Wildcard } else { PatternNode::Bind(*s) };
             Metadata::new(node, e.span())
-        });
+        }).boxed();
         let variant_tail = field_pat.clone()
             .separated_by(just(Token::Comma))
             .allow_trailing()
@@ -1141,12 +1150,12 @@ fn parse_stmt<'tks, 'src: 'tks>()
             .delimited_by(just(Token::LBrace), just(Token::RBrace));
         // after `Enum::Variant`, a `(...)` tail destructures positionally, a `{...}`
         // tail destructures by field name, and neither is a field-less `Path`.
-        let path_pat = path_of!(var)
+        let path_pat = path_of()
             .filter(|p: &Path| p.segments.len() >= 2)
-            .then(choice((
-                variant_tail.map(PatTail::Tuple),
-                struct_variant_tail.map(PatTail::Struct),
-            )).or_not())
+            .then(choice([
+                variant_tail.map(PatTail::Tuple).boxed(),
+                struct_variant_tail.map(PatTail::Struct).boxed(),
+            ]).or_not())
             .map(|(path, tail)| {
                 let path = NameRef::new(path);
                 match tail {
@@ -1160,8 +1169,9 @@ fn parse_stmt<'tks, 'src: 'tks>()
         } else {
             Err(Rich::custom(span, "expected `_`, an enum variant `Enum::Variant`, or an integer literal in a match pattern"))
         });
-        let pattern = choice((path_pat, int_pat, wild_pat))
-            .map_with(|p, e| Metadata::new(p, e.span()));
+        let pattern = choice([path_pat.boxed(), int_pat.boxed(), wild_pat.boxed()])
+            .map_with(|p, e| Metadata::new(p, e.span()))
+            .boxed();
 
         // `match (scrutinee) { pattern => body ... }`. Parens on the scrutinee
         // mirror `if`/`while` and avoid the `Name { ... }` struct-literal ambiguity.
@@ -1188,15 +1198,22 @@ fn parse_stmt<'tks, 'src: 'tks>()
             .then_ignore(just(Token::Semicolon))
             .map(StmtNode::Return);
 
-        declare
-            .or(assign_or_expr)
-            .or(if_else)
-            .or(if_)
-            .or(while_)
-            .or(for_)
-            .or(match_)
-            .or(contbreak)
-            .or(return_)
+        // every alternative is boxed before the `choice`: each `.boxed()` erases a
+        // whole combinator chain to one `Boxed` type, which is what keeps rustc
+        // from re-proving `Parser` for an ever-growing nested type at each link.
+        // `choice` over an array (rather than a tuple) is only possible because
+        // they now share a type, and is itself far cheaper to typecheck.
+        choice([
+            declare.boxed(),
+            assign_or_expr.boxed(),
+            if_else.boxed(),
+            if_.boxed(),
+            while_.boxed(),
+            for_.boxed(),
+            match_.boxed(),
+            contbreak.boxed(),
+            return_.boxed(),
+        ])
             .map_with(|node, e| {
                 Metadata::new(
                     node,
@@ -1205,18 +1222,13 @@ fn parse_stmt<'tks, 'src: 'tks>()
             })
             .boxed()
     })
+    .boxed()
 }
 
 /// Everything in an attribute after the sigil: `name` and an optional
 /// `(value)`. Shared so that the item and module spellings cannot drift into
 /// accepting different values.
-fn attribute_tail<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    AttributeNode<'src>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+fn attribute_tail<'tks, 'src: 'tks>() -> P<'tks, 'src, AttributeNode<'src>> {
     select_ref! { Token::Var(ident) => ident }
         .then(
             just(Token::LParen)
@@ -1234,13 +1246,7 @@ fn attribute_tail<'tks, 'src: 'tks>()
 }
 
 /// An attribute on the item that follows it: `@name` or `@name(value)`.
-fn parse_attribute<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    Attribute<'src>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+fn parse_attribute<'tks, 'src: 'tks>() -> P<'tks, 'src, Attribute<'src>> {
     just(Token::At)
         .ignore_then(attribute_tail())
         .map_with(|attr, e| Metadata::new(attr, e.span()))
@@ -1255,13 +1261,7 @@ fn parse_attribute<'tks, 'src: 'tks>()
 ///
 /// It parses anywhere an item may appear. Convention is the top of the file,
 /// but position carries no meaning: the statement is about the whole module.
-fn parse_mod_attribute<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    Attribute<'src>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+fn parse_mod_attribute<'tks, 'src: 'tks>() -> P<'tks, 'src, Attribute<'src>> {
     just(Token::At)
         .ignore_then(just(Token::UnaryOp(UnaryOp::Not)))
         .ignore_then(attribute_tail())
@@ -1269,40 +1269,49 @@ fn parse_mod_attribute<'tks, 'src: 'tks>()
         .boxed()
 }
 
-/// A method inside a struct/enum body or an `extend` block:
-/// `[attrs] [pub] proc name[<generics>](receiver?, params...) [RetType] { body }`.
-/// The receiver is `self` (by value), `*self` (by pointer), or absent (an
-/// associated function). `proc` heads every method, so it cleanly delimits methods
-/// from the comma-separated fields/variants that precede them in a type body.
-fn parse_method<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    Method<'src>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+/// One `name: Type` pair. The same production spells a proc parameter, a struct
+/// field and a struct-style enum variant's payload field, so all three share it.
+fn parse_named_type<'tks, 'src: 'tks>() -> P<'tks, 'src, (&'src str, Type<'src>)> {
+    let var = select_ref! { Token::Var(ident) => ident };
+    var.map(|s| *s)
+        .then_ignore(just(Token::Colon))
+        .then(parse_type())
+        .boxed()
+}
+
+/// Trait names joined by `+` (the `Add` operator token): the bounds of a type
+/// parameter, whether written in a binder (`T: A + B`) or in a `where` clause.
+fn parse_trait_bounds<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<NameRef<'src>>> {
+    let var = select_ref! { Token::Var(ident) => ident };
+    var.map(|s| NameRef::new(Path::single(*s)))
+        .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .boxed()
+}
+
+/// An optional `<T, const N: u32, ...>` binder following a name, empty when
+/// absent. Shared by everything that can be generic - procs, externs, structs,
+/// enums, methods - so the spellings cannot drift apart.
+fn parse_generics<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<GenericParam<'src>>> {
     let var = select_ref! { Token::Var(ident) => ident };
 
-    let generic_param = choice((
+    // a single generic parameter: either `const N: u32` or a bare type param `T`
+    let generic_param = choice([
         just(Token::Const)
             .ignore_then(var.map(|s| *s))
             .then_ignore(just(Token::Colon))
             .then(parse_type())
-            .map(|(name, ty)| GenericParam::Const(name, ty)),
-        // a bare type param, optionally with trait bounds: `T`, `T: Display`,
-        // `T: A + B`. bounds are trait names joined by `+` (the `Add` op token).
+            .map(|(name, ty)| GenericParam::Const(name, ty))
+            .boxed(),
+        // a bare type param, optionally with trait bounds: `T`, `T: Display`.
         var.map(|s| *s)
-            .then(
-                just(Token::Colon)
-                    .ignore_then(
-                        var.map(|s| NameRef::new(Path::single(*s)))
-                            .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
-                            .at_least(1)
-                            .collect::<Vec<_>>())
-                    .or_not())
-            .map(|(name, bounds)| GenericParam::Type { name, bounds: bounds.unwrap_or_default() }),
-    ));
-    let generics = generic_param
+            .then(just(Token::Colon).ignore_then(parse_trait_bounds()).or_not())
+            .map(|(name, bounds)| GenericParam::Type { name, bounds: bounds.unwrap_or_default() })
+            .boxed(),
+    ]);
+
+    generic_param
         .separated_by(just(Token::Comma))
         .allow_trailing()
         .collect::<Vec<_>>()
@@ -1310,12 +1319,27 @@ fn parse_method<'tks, 'src: 'tks>()
             just(Token::BinaryOp(BinaryOp::Lt)),
             just(Token::BinaryOp(BinaryOp::Gt)))
         .or_not()
-        .map(|g| g.unwrap_or_default());
+        .map(|g| g.unwrap_or_default())
+        .boxed()
+}
 
-    let normal_param = var.map(|s| *s)
-        .then_ignore(just(Token::Colon))
-        .then(parse_type())
-        .boxed();
+/// `(name: T, ...)` - a plain parameter list with no receiver, as a top-level
+/// `proc` or `extern` declares it.
+fn parse_param_list<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<(&'src str, Type<'src>)>> {
+    parse_named_type()
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .boxed()
+}
+
+/// `(self?, name: T, ...)` - a method's parameter list, yielding the receiver
+/// kind alongside the ordinary parameters. Shared by [`parse_method`] and
+/// [`parse_trait_method`], which have to agree on receiver syntax.
+fn parse_params<'tks, 'src: 'tks>()
+-> P<'tks, 'src, (Receiver, Vec<(&'src str, Type<'src>)>)> {
+    let normal_param = parse_named_type();
 
     // `self` or `*self`. A guard keeps the token uncommitted when it isn't
     // literally `self`, so the associated-function alternative below backtracks
@@ -1324,25 +1348,37 @@ fn parse_method<'tks, 'src: 'tks>()
         .then(select_ref! { Token::Var(s) if *s == "self" => () })
         .map(|(star, _)| if star.is_some() { Receiver::Pointer } else { Receiver::Value });
 
-    let params_inner = choice((
+    choice([
         self_recv
             .then(just(Token::Comma).ignore_then(normal_param.clone()).repeated().collect::<Vec<_>>())
-            .map(|(recv, ps)| (recv, ps)),
+            .map(|(recv, ps)| (recv, ps))
+            .boxed(),
         normal_param
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
-            .map(|ps| (Receiver::Associated, ps)),
-    ))
-        .delimited_by(just(Token::LParen), just(Token::RParen));
+            .map(|ps| (Receiver::Associated, ps))
+            .boxed(),
+    ])
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .boxed()
+}
+
+/// A method inside a struct/enum body or an `extend` block:
+/// `[attrs] [pub] proc name[<generics>](receiver?, params...) [RetType] { body }`.
+/// The receiver is `self` (by value), `*self` (by pointer), or absent (an
+/// associated function). `proc` heads every method, so it cleanly delimits methods
+/// from the comma-separated fields/variants that precede them in a type body.
+fn parse_method<'tks, 'src: 'tks>() -> P<'tks, 'src, Method<'src>> {
+    let var = select_ref! { Token::Var(ident) => ident };
 
     parse_attribute()
         .repeated().collect::<Vec<_>>()
         .then(just(Token::Pub).or_not().map(|o| o.is_some()))
         .then_ignore(just(Token::Proc))
         .then(var.map(|s| *s))
-        .then(generics)
-        .then(params_inner)
+        .then(parse_generics())
+        .then(parse_params())
         .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
         .then(
             parse_stmt()
@@ -1364,39 +1400,12 @@ fn parse_method<'tks, 'src: 'tks>()
 /// but omits attributes, `pub`, generics and the body (a trait states signatures
 /// only; conformance and default methods are the typechecker's / a later stage's
 /// concern).
-fn parse_trait_method<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    TraitMethod<'src>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+fn parse_trait_method<'tks, 'src: 'tks>() -> P<'tks, 'src, TraitMethod<'src>> {
     let var = select_ref! { Token::Var(ident) => ident };
-
-    let normal_param = var.map(|s| *s)
-        .then_ignore(just(Token::Colon))
-        .then(parse_type())
-        .boxed();
-
-    let self_recv = just(Token::BinaryOp(BinaryOp::Mul)).or_not()
-        .then(select_ref! { Token::Var(s) if *s == "self" => () })
-        .map(|(star, _)| if star.is_some() { Receiver::Pointer } else { Receiver::Value });
-
-    let params_inner = choice((
-        self_recv
-            .then(just(Token::Comma).ignore_then(normal_param.clone()).repeated().collect::<Vec<_>>())
-            .map(|(recv, ps)| (recv, ps)),
-        normal_param
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .map(|ps| (Receiver::Associated, ps)),
-    ))
-        .delimited_by(just(Token::LParen), just(Token::RParen));
 
     just(Token::Proc)
         .ignore_then(var.map(|s| *s))
-        .then(params_inner)
+        .then(parse_params())
         .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
         .then_ignore(just(Token::Semicolon))
         .map(|((name, (receiver, params)), return_type)|
@@ -1420,47 +1429,13 @@ enum ExtendItem<'a> {
     Method(Method<'a>),
 }
 
-fn parse_toplevel<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    Vec<TopLevel<'src>>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
     let var = select_ref! { Token::Var(ident) => ident };
 
-    // a single generic parameter: either `const N: u32` or a bare type param `T`
-    let generic_param = choice((
-        just(Token::Const)
-            .ignore_then(var.map(|s| *s))
-            .then_ignore(just(Token::Colon))
-            .then(parse_type())
-            .map(|(name, ty)| GenericParam::Const(name, ty)),
-        // a bare type param, optionally with trait bounds: `T`, `T: Display`,
-        // `T: A + B`. bounds are trait names joined by `+` (the `Add` op token).
-        var.map(|s| *s)
-            .then(
-                just(Token::Colon)
-                    .ignore_then(
-                        var.map(|s| NameRef::new(Path::single(*s)))
-                            .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
-                            .at_least(1)
-                            .collect::<Vec<_>>())
-                    .or_not())
-            .map(|(name, bounds)| GenericParam::Type { name, bounds: bounds.unwrap_or_default() }),
-    ));
-
-    // optional `<T, const N: u32, ...>` list following a function name
-    let generics = generic_param
-        .separated_by(just(Token::Comma))
-        .allow_trailing()
-        .collect::<Vec<_>>()
-        .delimited_by(
-            just(Token::BinaryOp(BinaryOp::Lt)),
-            just(Token::BinaryOp(BinaryOp::Gt)))
-        .or_not()
-        .map(|g| g.unwrap_or_default())
-        .boxed();
+    // the `<T, const N: u32, ...>` list following an item name. Bound once and
+    // cloned per item: cloning a boxed parser is an `Rc` bump, where calling
+    // `parse_generics()` again would rebuild the whole thing.
+    let generics = parse_generics();
 
     // every top-level item shares the header `[attrs] [pub] <keyword>`: any
     // attributes, then an optional `pub` marker, then the item keyword. absent
@@ -1474,15 +1449,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .then_ignore(just(Token::Proc))
         .then(var)
         .then(generics.clone())
-        .then(
-            var.map(|s| *s)
-                .then_ignore(just(Token::Colon))
-                .then(parse_type())
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::LParen), just(Token::RParen))
-        )
+        .then(parse_param_list())
         .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
         .then(
             parse_stmt()
@@ -1508,15 +1475,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .then_ignore(just(Token::Extern))
         .then(var)
         .then(generics.clone())
-        .then(
-            var.map(|s| *s)
-                .then_ignore(just(Token::Colon))
-                .then(parse_type())
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::LParen), just(Token::RParen))
-        )
+        .then(parse_param_list())
         .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
         .then_ignore(just(Token::Semicolon))
         .map(|(((((attributes, is_pub), name), generics), params), return_type)| (TopLevelNode::Extern {
@@ -1537,9 +1496,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .then(var)
         .then(generics.clone())
         .then(
-            var.map(|s| *s)
-                .then_ignore(just(Token::Colon))
-                .then(parse_type())
+            parse_named_type()
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
@@ -1590,9 +1547,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
     // a struct-style variant payload `{ field: T, ... }`: field names are kept as
     // written (unlike the tuple form's synthesized "0", "1", ...). Reuses the same
     // synthetic-struct backing; the real names just flow into the payload struct.
-    let enum_struct_payload = var.map(|s| *s)
-        .then_ignore(just(Token::Colon))
-        .then(parse_type())
+    let enum_struct_payload = parse_named_type()
         .separated_by(just(Token::Comma))
         .allow_trailing()
         .at_least(1)
@@ -1617,9 +1572,11 @@ fn parse_toplevel<'tks, 'src: 'tks>()
                 .map_err(|_| Rich::custom(span, format!("enum discriminant {n} is out of range")))
         });
     let enum_variant = var.map(|s| *s)
-        .then(choice((enum_payload, enum_struct_payload)).or_not().map(|p| p.unwrap_or_default()))
+        .then(choice([enum_payload.boxed(), enum_struct_payload.boxed()])
+            .or_not().map(|p| p.unwrap_or_default()))
         .then(enum_discriminant.or_not())
-        .map(|((name, payload), disc)| (name, disc, payload));
+        .map(|((name, payload), disc)| (name, disc, payload))
+        .boxed();
 
     // enum body: comma-separated variants first, then zero or more methods, same
     // `proc`-delimits-methods rule as structs.
@@ -1662,18 +1619,15 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .ignore_then(
             var.map(|s| *s)
                 .then_ignore(just(Token::Colon))
-                .then(
-                    var.map(|s| NameRef::new(Path::single(*s)))
-                        .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
-                        .at_least(1)
-                        .collect::<Vec<_>>())
+                .then(parse_trait_bounds())
                 .map(|(name, bounds)| GenericParam::Type { name, bounds })
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .at_least(1)
                 .collect::<Vec<_>>())
         .or_not()
-        .map(|w| w.unwrap_or_default());
+        .map(|w| w.unwrap_or_default())
+        .boxed();
 
     // an `extend` body item: an associated-type binding `type Item = Ty;` (tried
     // first, since it is the only one that leads with `type`) or a method.
@@ -1683,10 +1637,10 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .then(parse_type())
         .then_ignore(just(Token::Semicolon))
         .map(|(n, ty)| ExtendItem::Assoc(n, ty));
-    let extend_item = choice((
-        assoc_binding,
-        parse_method().map(ExtendItem::Method),
-    ));
+    let extend_item = choice([
+        assoc_binding.boxed(),
+        parse_method().map(ExtendItem::Method).boxed(),
+    ]);
     let extend_ = select_ref! { Token::Var(s) if *s == "extend" => () }
         .ignore_then(parse_type())
         .then(just(Token::Colon).ignore_then(var.map(|s| *s)).or_not())
@@ -1721,10 +1675,10 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .ignore_then(var.map(|s| *s))
         .then_ignore(just(Token::Semicolon))
         .map(TraitItem::Assoc);
-    let trait_item = choice((
-        assoc_decl,
-        parse_trait_method().map(TraitItem::Method),
-    ));
+    let trait_item = choice([
+        assoc_decl.boxed(),
+        parse_trait_method().map(TraitItem::Method).boxed(),
+    ]);
     let trait_ = item_header.clone()
         .then_ignore(select_ref! { Token::Var(s) if *s == "trait" => () })
         .then(var.map(|s| *s))
@@ -1748,15 +1702,15 @@ fn parse_toplevel<'tks, 'src: 'tks>()
             }, Vec::new())
         });
 
-    choice((
-        function,
-        extern_,
-        struct_,
-        enum_,
-        extend_,
-        trait_,
-        global,
-    ))
+    choice([
+        function.boxed(),
+        extern_.boxed(),
+        struct_.boxed(),
+        enum_.boxed(),
+        extend_.boxed(),
+        trait_.boxed(),
+        global.boxed(),
+    ])
         .map_with(|(node, methods), e| {
             let span = e.span();
             // inherent methods on a struct/enum body become a synthesized `Extend`
@@ -1805,13 +1759,7 @@ fn parse_toplevel<'tks, 'src: 'tks>()
         .boxed()
 }
 
-fn parse_import<'tks, 'src: 'tks>()
--> impl Parser<
-    'tks,
-    MappedInput<'tks, Token<'src>, Span, &'tks [Metadata<Token<'src>>]>,
-    Import<'src>,
-    extra::Err<Rich<'tks, Token<'src>, Span>>,
-> {
+fn parse_import<'tks, 'src: 'tks>() -> P<'tks, 'src, Import<'src>> {
     let var = select_ref! { Token::Var(ident) => *ident };
 
     // `import seg/seg/...` optionally followed by `{ sym, sym, ... }`. the path
@@ -1854,15 +1802,15 @@ pub fn parse<'a>(file: FileId, len: usize, tokens: &'a [Metadata<Token<'a>>]) ->
     Option<(Vec<Attribute<'a>>, Vec<Import<'a>>, Vec<TopLevel<'a>>)>,
     Vec<chumsky::error::Rich<'a, Token<'a>, Span>>,
 ) {
-    let (out, errs) = choice((
+    let (out, errs) = choice([
             // first: `@!` is the only file-scope construct starting with two
             // fixed tokens, so trying it here costs nothing and keeps a module
             // attribute from being offered to `parse_toplevel` as a malformed
             // item header.
-            parse_mod_attribute().map(FileItem::ModAttr),
-            parse_import().map(FileItem::Import),
-            parse_toplevel().map(FileItem::Items),
-        ))
+            parse_mod_attribute().map(FileItem::ModAttr).boxed(),
+            parse_import().map(FileItem::Import).boxed(),
+            parse_toplevel().map(FileItem::Items).boxed(),
+        ])
         .repeated()
         .collect::<Vec<_>>()
         .parse(
