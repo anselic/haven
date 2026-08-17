@@ -1232,24 +1232,18 @@ pub fn monomorphize<'a>(
             ConcreteArg::Type(t) if type_depth(t) > TYPE_DEPTH_LIMIT => Some(t),
             _ => None,
         }) {
-            return Err(Error {
-                msg: format!(
-                    "monomorphization of '{}' produced a type argument nested deeper \
-                     than {} (`{}`); this usually means unbounded generic recursion \
-                     (a generic function calling itself at an ever-growing type)",
-                    base_name, TYPE_DEPTH_LIMIT, deep,
-                ),
-                span: inst.span,
-            });
+            return Err(Error::new(inst.span,
+                format!("type argument nested deeper than {}", TYPE_DEPTH_LIMIT))
+                .with_label(inst.span, format!(
+                    "monomorphizing '{}' produced `{}`", base_name, deep))
+                .with_note("this usually means unbounded generic recursion: a generic \
+                            function calling itself at an ever-growing type"));
         }
         if materialized > INSTANTIATION_LIMIT {
-            return Err(Error {
-                msg: format!(
-                    "monomorphization exceeded {} instantiations at call to '{}'",
-                    INSTANTIATION_LIMIT, base_name,
-                ),
-                span: inst.span,
-            });
+            return Err(Error::new(inst.span, format!(
+                "monomorphization exceeded {} instantiations at call to '{}'",
+                INSTANTIATION_LIMIT, base_name,
+            )));
         }
         let tl = m.template_of(inst.base);
         let TopLevelNode::Function { generics, .. } = &tl.value else { unreachable!() };
@@ -1288,24 +1282,18 @@ pub fn monomorphize<'a>(
                 ConcreteArg::Type(t) if type_depth(t) > TYPE_DEPTH_LIMIT => Some(t),
                 _ => None,
             }) {
-                return Err(Error {
-                    msg: format!(
-                        "monomorphization of struct '{}' produced a type argument nested \
-                         deeper than {} (`{}`); this usually means an unbounded generic \
-                         struct (one whose field mentions itself at an ever-growing type)",
-                        base_name, TYPE_DEPTH_LIMIT, deep,
-                    ),
-                    span: inst.span,
-                });
+                return Err(Error::new(inst.span,
+                    format!("type argument nested deeper than {}", TYPE_DEPTH_LIMIT))
+                    .with_label(inst.span, format!(
+                        "monomorphizing struct '{}' produced `{}`", base_name, deep))
+                    .with_note("this usually means an unbounded generic struct: one whose \
+                                field mentions itself at an ever-growing type"));
             }
             if materialized > INSTANTIATION_LIMIT {
-                return Err(Error {
-                    msg: format!(
-                        "monomorphization exceeded {} struct/enum instantiations at '{}'",
-                        INSTANTIATION_LIMIT, base_name,
-                    ),
-                    span: inst.span,
-                });
+                return Err(Error::new(inst.span, format!(
+                    "monomorphization exceeded {} struct/enum instantiations at '{}'",
+                    INSTANTIATION_LIMIT, base_name,
+                )));
             }
             let tl = m.struct_templates[&inst.base];
             let TopLevelNode::Struct { generics, fields, attributes, is_pub, .. } = &tl.value
@@ -1350,24 +1338,18 @@ pub fn monomorphize<'a>(
                 ConcreteArg::Type(t) if type_depth(t) > TYPE_DEPTH_LIMIT => Some(t),
                 _ => None,
             }) {
-                return Err(Error {
-                    msg: format!(
-                        "monomorphization of enum '{}' produced a type argument nested \
-                         deeper than {} (`{}`); this usually means an unbounded generic \
-                         enum (one whose payload mentions itself at an ever-growing type)",
-                        base_name, TYPE_DEPTH_LIMIT, deep,
-                    ),
-                    span: inst.span,
-                });
+                return Err(Error::new(inst.span,
+                    format!("type argument nested deeper than {}", TYPE_DEPTH_LIMIT))
+                    .with_label(inst.span, format!(
+                        "monomorphizing enum '{}' produced `{}`", base_name, deep))
+                    .with_note("this usually means an unbounded generic enum: one whose \
+                                payload mentions itself at an ever-growing type"));
             }
             if materialized > INSTANTIATION_LIMIT {
-                return Err(Error {
-                    msg: format!(
-                        "monomorphization exceeded {} struct/enum instantiations at '{}'",
-                        INSTANTIATION_LIMIT, base_name,
-                    ),
-                    span: inst.span,
-                });
+                return Err(Error::new(inst.span, format!(
+                    "monomorphization exceeded {} struct/enum instantiations at '{}'",
+                    INSTANTIATION_LIMIT, base_name,
+                )));
             }
             let tl = m.enum_templates[&inst.base];
             let TopLevelNode::Enum { generics, variants, attributes, is_pub, .. } = &tl.value

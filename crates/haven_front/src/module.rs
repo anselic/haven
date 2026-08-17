@@ -478,11 +478,14 @@ fn apply_where_bounds<'a>(
             }
             _ => {
                 if reported.insert((span.start, wname)) {
-                    errs.push(Error::new(span.clone(), format!(
-                        "`where {}: ...` names '{}', which `extend {}` does not bind. \
-                         An `extend` block's type parameters are inferred from its \
-                         target, so only a name appearing inside `{}` can be bounded here",
-                        wname, wname, target, target)));
+                    errs.push(Error::new(span.clone(),
+                        format!("unbound type parameter '{}' in `where`", wname))
+                        .with_label(span.clone(),
+                            format!("`extend {}` does not bind '{}'", target, wname))
+                        .with_note(format!(
+                            "an `extend` block's type parameters are inferred from its \
+                             target, so only a name appearing inside `{}` can be bounded here",
+                            target)));
                 }
             }
         }
@@ -905,8 +908,8 @@ fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], items: &[TopLevel<'a>]) -> 
     let mut errs = Vec::new();
     let check = |attrs: &[Attribute<'a>], target: AttrTarget, errs: &mut Vec<Error>| {
         for a in attrs {
-            if let Err(msg) = check_attribute(&a.value, target) {
-                errs.push(Error::new(a.span.clone(), msg));
+            if let Err((msg, note)) = check_attribute(&a.value, target) {
+                errs.push(Error::new(a.span.clone(), msg).with_note(note));
             }
         }
     };
@@ -1041,6 +1044,11 @@ struct Rewriter<'x, 'a> {
 impl<'x, 'a> Rewriter<'x, 'a> {
     fn error(&mut self, span: &Span, msg: String) {
         self.errs.push(Error::new(span.clone(), msg));
+    }
+
+    /// Record an error the caller has already given its labels and note.
+    fn push(&mut self, err: Error) {
+        self.errs.push(err);
     }
 
     /// Record an error against the innermost span being walked. For names that
@@ -1289,13 +1297,14 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 // in any module, resolved by the typechecker. leave it untouched.
                 return Some(one);
             }
-            self.error(span, if in_call {
+            self.push(if in_call {
                 // same wording as the typechecker's own unknown-call diagnostic:
                 // this just catches it a stage earlier, before mangling can
                 // obscure it.
-                format!("unknown function '{}', is it defined and imported into this module?", one)
+                Error::new(span.clone(), format!("unknown function '{}'", one))
+                    .with_note("is it defined and imported into this module?")
             } else {
-                format!("unknown value '{}'", one)
+                Error::new(span.clone(), format!("unknown value '{}'", one))
             });
             return Some(one);
         }
@@ -1414,9 +1423,9 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             self.check_member_visible(m, sym);
             return m.name;
         }
-        self.error(span, format!(
-            "no associated function '{}' on built-in type '{}'; declare one with \
-             `extend {} {{ proc {}(...) ... }}`", sym, ty, ty, sym));
+        self.push(Error::new(span.clone(),
+            format!("no associated function '{}' on built-in type '{}'", sym, ty))
+            .with_note(format!("declare one with `extend {} {{ proc {}(...) ... }}`", ty, sym)));
         sym
     }
 
@@ -1883,21 +1892,24 @@ impl<'p> PreludeSource<'p> {
     /// the reader of introducing a second stdlib when the file in hand may well
     /// *be* std's, sending them to look for a conflict that does not exist. The
     /// real fault in that case is upstream, in how the build was invoked.
-    fn lang_item_denial(&self, item: &str) -> String {
+    /// Returned as `(headline, note)`: the reason is several sentences long, and
+    /// only the first belongs on the underline beside the attribute.
+    fn lang_item_denial(&self, item: &str) -> (String, String) {
         match self {
-            PreludeSource::Package(n) => format!(
-                "`@{LANG_ATTR}({item})` may only be declared by '{n}', the package this \
-                 program takes its prelude from. A lang item is one definition for the \
-                 whole program, so a second package cannot introduce its own"),
+            PreludeSource::Package(n) => (
+                format!("`@{LANG_ATTR}({item})` may only be declared by '{n}'"),
+                format!("'{n}' is the package this program takes its prelude from, and a \
+                         lang item is one definition for the whole program, so a second \
+                         package cannot introduce its own")),
             // `--no-prelude`. (`Auto` cannot reach here - it either resolves to a
             // `Package` or the build stops at "no `std` library found" - but the
             // wording holds if it ever does.)
-            PreludeSource::None | PreludeSource::Auto => format!(
-                "`@{LANG_ATTR}({item})` needs a prelude, and this build has none. A lang \
-                 item is the prelude package's to declare, so with no prelude there is no \
-                 package entitled to claim one - not even the package being compiled. If \
-                 this package supplies the prelude, build it with `--prelude <its own \
-                 name>`; otherwise remove the attribute"),
+            PreludeSource::None | PreludeSource::Auto => (
+                format!("`@{LANG_ATTR}({item})` needs a prelude, and this build has none"),
+                "a lang item is the prelude package's to declare, so with no prelude \
+                 there is no package entitled to claim one - not even the package being \
+                 compiled. If this package supplies the prelude, build it with \
+                 `--prelude <its own name>`; otherwise remove the attribute".to_string()),
         }
     }
 }
@@ -2337,9 +2349,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // the package serving as the prelude: exactly one of its modules may
             // claim the role.
             if let Some(prev) = prelude_mod {
-                prelude_errs.push(Error::new(attr.span.clone(), format!(
-                    "a second `@!{}`: '{}' already claims it, and a program has one \
-                     prelude or none", PRELUDE_ATTR, files.path(modules[prev].file))));
+                prelude_errs.push(Error::new(attr.span.clone(),
+                    format!("a second `@!{}`", PRELUDE_ATTR))
+                    .with_label(attr.span.clone(),
+                        format!("'{}' already claims it", files.path(modules[prev].file)))
+                    .with_note("a program has one prelude or none"));
             } else {
                 prelude_mod = Some(i);
             }
@@ -2351,10 +2365,13 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // does nothing, and a program has one prelude. To make *this* package
             // the prelude, nominate it (`--prelude`), which is also how a stdlib is
             // built.
-            prelude_errs.push(Error::new(attr.span.clone(), format!(
-                "'{}' already supplies this program's prelude, so this `@!{}` has no \
-                 effect. Remove it, or build this package as the prelude with \
-                 `--prelude {}`", prelude.provider(), PRELUDE_ATTR, package)));
+            prelude_errs.push(Error::new(attr.span.clone(),
+                format!("this `@!{}` has no effect", PRELUDE_ATTR))
+                .with_label(attr.span.clone(), format!(
+                    "'{}' already supplies this program's prelude", prelude.provider()))
+                .with_note(format!(
+                    "remove it, or build this package as the prelude with `--prelude {}`",
+                    package)));
         }
         // a dependency's mark that isn't the chosen prelude stays inert.
     }
@@ -2417,7 +2434,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // miscompile; erroring says plainly that two stdlibs do not go into
             // one program.
             if !m.prelude_pkg {
-                lang_errs.push(Error::new(attr.span.clone(), prelude.lang_item_denial(item)));
+                let (msg, note) = prelude.lang_item_denial(item);
+                lang_errs.push(Error::new(attr.span.clone(), msg).with_note(note));
                 continue;
             }
 
@@ -2513,11 +2531,14 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
     for m in &modules {
         for imp in &m.imports {
             if imp.is_pub && imp.symbols.is_none() {
-                errs.push(Error::new(imp.span.clone(), format!(
-                    "`pub import {}` re-exports nothing: a whole-module import binds \
-                     the qualifier '{}' rather than any names. List the symbols to \
-                     re-export, e.g. `pub import {} {{ ... }}`",
-                    imp.path.join("/"), imp.path.last().unwrap(), imp.path.join("/"))));
+                errs.push(Error::new(imp.span.clone(),
+                    format!("`pub import {}` re-exports nothing", imp.path.join("/")))
+                    .with_label(imp.span.clone(), format!(
+                        "this binds the qualifier '{}' rather than any names",
+                        imp.path.last().unwrap()))
+                    .with_note(format!(
+                        "list the symbols to re-export, e.g. `pub import {} {{ ... }}`",
+                        imp.path.join("/"))));
             }
         }
     }
@@ -2550,10 +2571,12 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // imported whole - as a namespace.
             if let (ImportTarget::Dir(_), Some(_)) = (target, &imp.symbols) {
                 errs.push(Error::new(imp.span.clone(), format!(
-                    "'{}' is a directory of modules, not a module: import it whole \
-                     (`import {}`) and reach its members through the qualifier, \
-                     e.g. `{}::<module>::<name>`",
-                    imp.path.join("/"), imp.path.join("/"), imp.path.last().unwrap())));
+                    "'{}' is a directory of modules, not a module", imp.path.join("/")))
+                    .with_label(imp.span.clone(), "a directory names no symbols to import")
+                    .with_note(format!(
+                        "import it whole (`import {}`) and reach its members through the \
+                         qualifier, e.g. `{}::<module>::<name>`",
+                        imp.path.join("/"), imp.path.last().unwrap())));
                 continue;
             }
 
@@ -2614,8 +2637,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                             imported = true;
                             if from_import_calls.contains(sym) && scopes.calls.get(sym).map(|s| s.def) != Some(f.def) {
                                 errs.push(Error::new(imp.span.clone(), format!(
-                                    "'{}' is imported from more than one module; qualify it with a \
-                                     whole-module `import` instead", sym)));
+                                    "'{}' is imported from more than one module", sym))
+                                    .with_note("qualify it with a whole-module `import` instead"));
                             }
                             scopes.calls.insert(sym, *f);
                             from_import_calls.insert(sym);
@@ -2630,12 +2653,15 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                             from_import_types.insert(sym);
                         }
                         if !imported {
-                            errs.push(Error::new(imp.span.clone(), if exists {
-                                format!("symbol '{}' of module '{}' is private; add `pub` to export it",
-                                    sym, imp.path.join("/"))
+                            errs.push(if exists {
+                                Error::new(imp.span.clone(), format!(
+                                    "symbol '{}' of module '{}' is private", sym, imp.path.join("/")))
+                                    .with_note("add `pub` to export it")
                             } else {
-                                format!("module '{}' has no exported symbol '{}'", imp.path.join("/"), sym)
-                            }));
+                                Error::new(imp.span.clone(), format!(
+                                    "module '{}' has no exported symbol '{}'",
+                                    imp.path.join("/"), sym))
+                            });
                         }
                     }
                 }
@@ -2694,9 +2720,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                     GenericParam::Const(name, _) => *name == ig_name,
                 }) {
                     errs.push(Error::new(rm.span.clone(), format!(
-                        "method '{}' declares a generic parameter '{}' that its \
-                         `extend` target already binds; rename one of them",
-                        rm.name, ig_name)));
+                        "generic parameter '{}' shadows one from the `extend` target",
+                        ig_name))
+                        .with_label(rm.span.clone(),
+                            format!("method '{}' declares it again here", rm.name))
+                        .with_note("rename one of them"));
                 }
             }
             let own = std::mem::take(generics);
@@ -2727,11 +2755,13 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // one declared on a target no path can name could never be called.
             // Rejecting it here beats emitting a symbol with no way in.
             if rm.receiver == Receiver::Associated && !head.is_nameable() {
-                errs.push(Error::new(rm.span.clone(), format!(
-                    "associated function '{}' cannot be reached: a call would have \
-                     to name '{}', and only a declared type or a built-in keyword \
-                     can be written as a path. Give it a `self` parameter so it is \
-                     found through its receiver instead", rm.name, rm.target)));
+                errs.push(Error::new(rm.span.clone(),
+                    format!("associated function '{}' cannot be reached", rm.name))
+                    .with_label(rm.span.clone(), format!(
+                        "a call would have to name '{}', which is not a path", rm.target))
+                    .with_note("only a declared type or a built-in keyword can be written \
+                                as a path; give it a `self` parameter so it is found \
+                                through its receiver instead"));
             }
             let f = scopes.calls.get(rm.fn_name).map(|s| s.name).unwrap_or(rm.fn_name);
             let prev = defs.add_member(head, rm.name, Member {
@@ -2747,9 +2777,10 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // this is an error rather than a silent last-one-wins.
             if prev.is_some() {
                 errs.push(Error::new(rm.span.clone(), format!(
-                    "method '{}' is already defined for this type; a second \
-                     `extend` block cannot add or specialize it (`extend [T]` and \
-                     `extend [i32]` both claim every slice)", rm.name)));
+                    "method '{}' is already defined for this type", rm.name))
+                    .with_label(rm.span.clone(), "second definition")
+                    .with_note("a second `extend` block cannot add or specialize a method \
+                                (`extend [T]` and `extend [i32]` both claim every slice)"));
             }
         }
     }

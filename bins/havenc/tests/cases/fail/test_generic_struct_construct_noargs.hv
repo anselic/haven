@@ -1,4 +1,4 @@
-//@ error: constructing generic struct 'Option' needs type arguments
+//@ error: struct 'Option' is generic
 // A generic struct constructed without a turbofish has no way to bind its type
 // params (no context inference yet), so it is rejected asking for the args.
 

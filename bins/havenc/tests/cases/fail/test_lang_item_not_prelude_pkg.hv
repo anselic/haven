@@ -10,7 +10,7 @@
 // This also pins the grammar: attributes on a `trait` must reach lang-item
 // checking at all. Before traits carried attributes this died in the parser
 // with "found 'trait' expected 'proc', 'extern', 'struct', 'enum', or 'const'".
-//@ error: may only be declared by 'std', the package this program takes its prelude from
+//@ error: may only be declared by 'std'
 
 @lang(delete)
 pub trait Marker {

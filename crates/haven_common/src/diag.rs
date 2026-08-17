@@ -121,6 +121,36 @@ pub fn format() -> Format {
     }
 }
 
+/// Longest `msg` still worth repeating on the underline when a diagnostic
+/// carries no label of its own.
+///
+/// ariadne draws label text on one line beside the source, indented to the
+/// span's column, and never wraps it - so a long one runs past the terminal and
+/// the box's frame comes apart around it. The header line above the snippet has
+/// no such limit, and already carries the same text, so nothing is lost by
+/// leaving the underline bare.
+const LABEL_LINE_BUDGET: usize = 100;
+
+/// Columns the `NNN │ ` gutter takes before any label text. Approximate - it
+/// grows with the line number's width - which is all [`fits_inline`] needs,
+/// since it is choosing between "repeat the header here" and "don't".
+const LABEL_GUTTER: usize = 6;
+
+/// Whether `msg` fits on the underline for the span `start..end` (char offsets
+/// into `src`), without running past [`LABEL_LINE_BUDGET`].
+///
+/// Where the span sits, not just the message's length, decides this. ariadne
+/// draws the elbow from under the span and runs it rightwards past the span's
+/// far edge before the text starts, so the text begins at roughly the span's
+/// *end* column - which is why the same message fits under a short name at the
+/// left margin and overflows under a long expression nested four blocks deep.
+fn fits_inline(src: &str, start: usize, end: usize, msg: &str) -> bool {
+    let byte = src.char_indices().nth(end.max(start))
+        .map_or(src.len(), |(i, _)| i);
+    let col = src[..byte].rsplit('\n').next().map_or(0, |l| l.chars().count());
+    col + msg.chars().count() + LABEL_GUTTER <= LABEL_LINE_BUDGET
+}
+
 /// AST/chumsky spans are byte offsets, but ariadne's renderer indexes labels by
 /// char offset. Convert here so multibyte source still underlines the right span
 fn byte_to_char(src: &str, byte: usize) -> usize {
@@ -171,10 +201,37 @@ fn push_json_str(out: &mut String, s: &str) {
     out.push('"');
 }
 
+/// Append a span as a JSON object: byte offsets plus LSP-style line/character.
+fn push_json_span(out: &mut String, src: &str, sp: &Span) {
+    let end = sp.end.max(sp.start);
+    let (sl, sc) = line_col(src, sp.start);
+    let (el, ec) = line_col(src, end);
+    out.push_str(&format!(
+        "{{\"byte_start\":{},\"byte_end\":{},\
+         \"start\":{{\"line\":{},\"character\":{}}},\
+         \"end\":{{\"line\":{},\"character\":{}}}}}",
+        sp.start, end, sl, sc, el, ec,
+    ));
+}
+
 /// Emit one diagnostic as a single NDJSON line on stderr. `file` and the
 /// resolved `span` are optional so spanless errors (e.g. "no main function")
 /// still land in the same stream with `null` fields.
-fn emit_json(stage: &str, msg: &str, file: Option<&str>, span: Option<(&str, &Span)>) {
+///
+/// `labels` and `note` carry the secondary detail; both are always present as
+/// keys (`[]` / `null` when absent) so a consumer never has to branch on
+/// whether a producer bothered to fill them in. A label whose file has no
+/// source on hand is dropped rather than emitted spanless - it would say
+/// nothing an editor could act on.
+fn emit_json(
+    stage: &str,
+    msg: &str,
+    file: Option<&str>,
+    span: Option<(&str, &Span)>,
+    labels: &[(Span, String)],
+    note: Option<&str>,
+    files: &Files,
+) {
     let mut out = String::new();
     out.push_str("{\"severity\":\"error\",\"stage\":");
     push_json_str(&mut out, stage);
@@ -189,17 +246,31 @@ fn emit_json(stage: &str, msg: &str, file: Option<&str>, span: Option<(&str, &Sp
 
     out.push_str(",\"span\":");
     match span {
-        Some((src, sp)) => {
-            let end = sp.end.max(sp.start);
-            let (sl, sc) = line_col(src, sp.start);
-            let (el, ec) = line_col(src, end);
-            out.push_str(&format!(
-                "{{\"byte_start\":{},\"byte_end\":{},\
-                 \"start\":{{\"line\":{},\"character\":{}}},\
-                 \"end\":{{\"line\":{},\"character\":{}}}}}",
-                sp.start, end, sl, sc, el, ec,
-            ));
+        Some((src, sp)) => push_json_span(&mut out, src, sp),
+        None => out.push_str("null"),
+    }
+
+    out.push_str(",\"labels\":[");
+    let mut first = true;
+    for (sp, text) in labels {
+        let Some(src) = files.src(sp.file) else { continue };
+        if !first {
+            out.push(',');
         }
+        first = false;
+        out.push_str("{\"file\":");
+        push_json_str(&mut out, files.path(sp.file));
+        out.push_str(",\"message\":");
+        push_json_str(&mut out, text);
+        out.push_str(",\"span\":");
+        push_json_span(&mut out, src, sp);
+        out.push('}');
+    }
+    out.push(']');
+
+    out.push_str(",\"note\":");
+    match note {
+        Some(n) => push_json_str(&mut out, n),
         None => out.push_str("null"),
     }
     out.push('}');
@@ -211,28 +282,106 @@ fn emit_json(stage: &str, msg: &str, file: Option<&str>, span: Option<(&str, &Sp
 /// `span.file` selects which source in `files` to quote. Honors the format set by
 /// [`set_format`]: pretty ariadne output, or one NDJSON line, both on stderr.
 pub fn report(stage: &str, msg: &str, span: &Span, files: &Files) {
+    report_full(stage, msg, span, &[], None, files);
+}
+
+/// The full diagnostic: headline, primary span, extra labelled spans, note.
+///
+/// The label set is what keeps a diagnostic inside its box. ariadne draws the
+/// underline text on one line beside the snippet, so a long `msg` used as the
+/// label wraps and the frame around the snippet comes apart. With `labels`
+/// filled in, `msg` stays the short header and each span carries only the
+/// phrase about that span; `note` takes anything longer, printed under the
+/// snippet where it can wrap freely.
+///
+/// With no labels this falls back to the old shape - one underline repeating
+/// `msg` - so every call site that has not been split up still renders as before.
+fn report_full(
+    stage: &str,
+    msg: &str,
+    span: &Span,
+    labels: &[(Span, String)],
+    note: Option<&str>,
+    files: &Files,
+) {
     let path = files.path(span.file);
     let Some(src) = files.src(span.file) else {
         // no source on hand (shouldn't happen) but we don't want to swallow the
         // message
         match format() {
-            Format::Json => emit_json(stage, msg, Some(path), None),
-            Format::Human => eprintln!("{} in {}: {}", stage, path, msg),
+            Format::Json => emit_json(stage, msg, Some(path), None, labels, note, files),
+            Format::Human => {
+                eprintln!("{} in {}: {}", stage, path, msg);
+                for (_, text) in labels {
+                    eprintln!("  {}", text);
+                }
+                if let Some(n) = note {
+                    eprintln!("  note: {}", n);
+                }
+            }
         }
         return;
     };
 
     if let Format::Json = format() {
-        emit_json(stage, msg, Some(path), Some((src, span)));
+        emit_json(stage, msg, Some(path), Some((src, span)), labels, note, files);
         return;
     }
 
-    let span = to_span(src, path, span);
-    Report::build(ReportKind::Custom(stage, Color::Red), span.clone())
+    let primary = to_span(src, path, span);
+    let mut report = Report::build(ReportKind::Custom(stage, Color::Red), primary.clone())
         .with_config(Config::default().with_color(color_enabled()))
-        .with_message(msg)
-        .with_label(Label::new(span).with_color(Color::Red).with_message(msg))
-        .finish()
+        .with_message(msg);
+
+    if labels.is_empty() {
+        // No label of its own, so `msg` doubles as the underline text - which is
+        // fine while it is short. Past that it wraps and takes the box's frame
+        // apart, and it is redundant anyway: the header directly above already
+        // says the same thing, on a line drawn outside the box where length
+        // costs nothing. So a long one underlines without repeating itself.
+        let inline = fits_inline(src, primary.1.start, primary.1.end, msg);
+        let label = Label::new(primary).with_color(Color::Red);
+        report = report.with_label(if inline { label.with_message(msg) } else { label });
+    } else {
+        // The label on the error's own span is the primary one: red, and drawn
+        // with priority. Anything pointing elsewhere is context, so it gets a
+        // colour that reads as secondary. A label into a file we hold no source
+        // for is dropped - ariadne fails the whole render on a cache miss, which
+        // would lose the diagnostic entirely.
+        //
+        // Sorted by position, and `order` assigned from that, because ariadne
+        // opens a *new* source group whenever a label's line goes backwards from
+        // the previous one's. Declaring the use before the move - the natural way
+        // to write "used here / moved here" - therefore split one snippet into
+        // two boxes quoting the same file. In source order they stay in one.
+        let mut sorted: Vec<(String, Range<usize>, bool, &str)> = labels.iter()
+            .filter_map(|(sp, text)| {
+                let lsrc = files.src(sp.file)?;
+                let same = sp.file == span.file && sp.start == span.start && sp.end == span.end;
+                let (path, range) = to_span(lsrc, files.path(sp.file), sp);
+                Some((path, range, same, text.as_str()))
+            })
+            .collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.start.cmp(&b.1.start)));
+
+        for (i, (path, range, same, text)) in sorted.into_iter().enumerate() {
+            report = report.with_label(
+                Label::new((path, range))
+                    .with_color(if same { Color::Red } else { Color::Yellow })
+                    .with_order(i as i32)
+                    .with_priority(if same { 1 } else { 0 })
+                    .with_message(text));
+        }
+        // An explicit label is kept whatever its width: unlike the fallback above
+        // it is not a copy of the header, so dropping it would lose the only place
+        // that detail is written.
+    }
+
+    if let Some(n) = note {
+        report = report.with_note(n);
+    }
+
+    report.finish()
         // ariadne indexes each Source by char offset - matches `to_span` above
         .eprint(files.ariadne_cache())
         .ok();
@@ -240,7 +389,7 @@ pub fn report(stage: &str, msg: &str, span: &Span, files: &Files) {
 
 /// Convenience for the common `ast::Error` case.
 pub fn report_error(stage: &str, err: &Error, files: &Files) {
-    report(stage, &err.msg, &err.span, files);
+    report_full(stage, &err.msg, &err.span, &err.labels, err.note.as_deref(), files);
 }
 
 /// Report an error with no source location (a driver-level failure like a
@@ -249,15 +398,46 @@ pub fn report_error(stage: &str, err: &Error, files: &Files) {
 /// consumer never has to parse free-form text to notice the build failed.
 pub fn report_plain(stage: &str, msg: &str) {
     match format() {
-        Format::Json => emit_json(stage, msg, None, None),
+        Format::Json => emit_json(stage, msg, None, None, &[], None, &Files::new()),
         Format::Human => eprintln!("{}: {}", stage, msg),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::decide_color;
+    use super::{decide_color, fits_inline, LABEL_LINE_BUDGET};
     use std::ffi::OsString;
+
+    #[test]
+    fn a_short_message_stays_on_the_underline() {
+        let src = "let x = 1;\n";
+        assert!(fits_inline(src, 4, 5, "not a number"));
+    }
+
+    #[test]
+    fn a_long_message_leaves_the_underline_bare() {
+        let src = "let x = 1;\n";
+        assert!(!fits_inline(src, 4, 5, &"x".repeat(LABEL_LINE_BUDGET)));
+    }
+
+    #[test]
+    fn the_span_column_counts_against_the_budget() {
+        // the same message under the same-width span, once at the left margin and
+        // once indented far in: only the indented one runs out of room.
+        let msg = &"x".repeat(LABEL_LINE_BUDGET / 2);
+        let flush = "ab\n";
+        let deep = format!("{}ab\n", " ".repeat(LABEL_LINE_BUDGET / 2));
+        assert!(fits_inline(flush, 0, 2, msg));
+        assert!(!fits_inline(&deep, LABEL_LINE_BUDGET / 2, LABEL_LINE_BUDGET / 2 + 2, msg));
+    }
+
+    #[test]
+    fn the_column_is_measured_from_the_spans_own_line() {
+        // ariadne indents the label to the span, so what matters is the column on
+        // the line the span ends on - not the offset into the whole file.
+        let src = "a very long first line that says nothing at all about the span\nlet x = 1;\n";
+        assert!(fits_inline(src, 67, 68, "not a number"));
+    }
 
     #[test]
     fn no_color_beats_a_terminal() {

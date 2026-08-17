@@ -1,6 +1,6 @@
 // a *suffixed* literal keeps its exact type: only unsuffixed ones take the
 // type their context asks for.
-//@ error: Expected i64, got i32
+//@ error: expected `i64`, got `i32`
 @export
 proc main() i32 {
     let x: i64 = 0i32;

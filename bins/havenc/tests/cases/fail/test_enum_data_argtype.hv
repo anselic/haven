@@ -1,4 +1,4 @@
-//@ error: Expected u8, got i32
+//@ error: expected `u8`, got `i32`
 // a constructor argument whose type doesn't match the payload field is rejected.
 enum Msg { Stop, Note(u8, f32) }
 

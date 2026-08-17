@@ -210,8 +210,11 @@ struct Checker<'a, 'c> {
 }
 
 impl<'a, 'c> Checker<'a, 'c> {
-    fn error(&mut self, span: Span, msg: String) {
-        self.errors.push(Error::new(span, msg));
+    /// Record one diagnostic, built by the caller so it can carry its own labels
+    /// and note - every ownership error has a second place worth pointing at, or
+    /// a rule worth restating, and neither belongs on the header line.
+    fn push(&mut self, err: Error) {
+        self.errors.push(err);
     }
 
     fn ty_of(&self, e: &Expr<'a>) -> Option<Type<'a>> {
@@ -269,13 +272,19 @@ impl<'a, 'c> Checker<'a, 'c> {
     fn read(&mut self, b: Binding<'a>, span: Span) {
         let Some(state) = self.moved.get(&b).cloned() else { return };
         let name = self.binding_name(b);
-        let msg = match state {
-            State::Moved(_) => format!(
-                "use of '{}' after its value was moved out of it", name),
-            State::Maybe(_) => format!(
-                "use of '{}', whose value is moved away on some paths reaching here", name),
+        // the move site is the other half of the story, so it gets its own
+        // underline rather than being described in prose at the use site.
+        let err = match state {
+            State::Moved(at) => Error::new(span, format!(
+                "use of '{}' after its value was moved out of it", name))
+                .with_label(span, "used here")
+                .with_label(at, "value moved out here"),
+            State::Maybe(at) => Error::new(span, format!(
+                "use of '{}', whose value is moved away on some paths", name))
+                .with_label(span, "used here")
+                .with_label(at, "moved here, but not on every path reaching the use"),
         };
-        self.error(span, msg);
+        self.push(err);
         // report the first offending use only. the value really is gone, but
         // repeating the message at every later use buries the one that matters.
         self.moved.remove(&b);
@@ -320,10 +329,10 @@ impl<'a, 'c> Checker<'a, 'c> {
                         RecvAdjust::AsIs => self.consume(base),
                     }
                     if self.model.delete_fns.contains(mc.target) {
-                        self.error(e.span, format!(
-                            "'{}' is a destructor and is called for you when the value is \
-                             destroyed; calling it here would release the resource twice",
-                            DELETE_METHOD));
+                        self.push(Error::new(e.span, format!(
+                            "'{}' is a destructor and cannot be called directly", DELETE_METHOD))
+                            .with_label(e.span, "calling it here would release the resource twice")
+                            .with_note("it is called for you when the value is destroyed"));
                     }
                 } else {
                     self.visit(func);
@@ -357,11 +366,12 @@ impl<'a, 'c> Checker<'a, 'c> {
         let Some(ty) = self.ty_of(base) else { return };
         if self.model.is_copy(&ty) { return; }
         let shown = self.cx.show(&ty);
-        self.error(base.span, format!(
-            "cannot borrow this temporary: `{}` owns a resource, and a temporary \
-             belongs to no scope, so its '{}' would never run and the resource \
-             would leak. Bind it with a `let` first, then borrow that",
-            shown, DELETE_METHOD));
+        self.push(Error::new(base.span, "cannot borrow this temporary")
+            .with_label(base.span, format!("`{}` owns a resource", shown))
+            .with_note(format!(
+                "a temporary belongs to no scope, so its '{}' would never run and the \
+                 resource would leak; bind it with a `let` first, then borrow that",
+                DELETE_METHOD)));
     }
 
     // --- temporary lifetime extension
@@ -475,17 +485,19 @@ impl<'a, 'c> Checker<'a, 'c> {
             Root::Field(b) => {
                 let name = self.binding_name(b);
                 let shown = self.cx.show(&ty);
-                self.error(e.span, format!(
-                    "cannot move a '{}' out of a field of '{}': it owns a resource, and moving \
-                     one field out of a value would leave the rest without an owner. Borrow it \
-                     with '&' instead", shown, name));
+                self.push(Error::new(e.span, format!(
+                    "cannot move a '{}' out of a field of '{}'", shown, name))
+                    .with_label(e.span, "it owns a resource")
+                    .with_note("moving one field out of a value would leave the rest without \
+                                an owner; borrow it with '&' instead"));
             }
             Root::Borrowed => {
                 let shown = self.cx.show(&ty);
-                self.error(e.span, format!(
-                    "cannot move a '{}' out of a pointer or an element: it owns a resource, and \
-                     the place it is moved out of would be left invalid. Borrow it with '&' \
-                     instead", shown));
+                self.push(Error::new(e.span, format!(
+                    "cannot move a '{}' out of a pointer or an element", shown))
+                    .with_label(e.span, "it owns a resource")
+                    .with_note("the place it is moved out of would be left invalid; borrow it \
+                                with '&' instead"));
             }
             // a value nobody else names; ownership travels with it.
             Root::Temp => {}
@@ -569,11 +581,12 @@ impl<'a, 'c> Checker<'a, 'c> {
             Some(State::Moved(_)) => return Vec::new(),
             Some(State::Maybe(at)) => {
                 let at = *at;
-                self.error(at, format!(
-                    "'{}' owns a resource and is moved away here, but not on every path that \
-                     reaches the end of its scope, so whether it still needs destroying is not \
-                     decidable at compile time. Move it on every path, or on none",
-                    name));
+                self.push(Error::new(at, format!(
+                    "'{}' is moved away on some paths but not others", name))
+                    .with_label(at, "moved here")
+                    .with_note("it owns a resource, so whether it still needs destroying at \
+                                the end of its scope is not decidable at compile time; move \
+                                it on every path, or on none"));
                 return Vec::new();
             }
             None => {}
@@ -815,9 +828,10 @@ impl<'a, 'c> Checker<'a, 'c> {
                 if let Some(ty) = self.ty_of(&e) {
                     if !self.model.is_copy(&ty) && matches!(self.root(&e), Root::Temp) {
                         let shown = self.cx.show(&ty);
-                        self.error(span, format!(
-                            "this '{}' owns a resource but is discarded without an owner, so it \
-                             would never be destroyed. Bind it with `let`", shown));
+                        self.push(Error::new(span, format!(
+                            "this '{}' owns a resource but is discarded without an owner", shown))
+                            .with_label(span, "nothing would ever destroy it")
+                            .with_note("bind it with `let`"));
                     }
                 }
                 out.push(Metadata { span, id, value: StmtNode::Expr(e) });
@@ -851,10 +865,11 @@ impl<'a, 'c> Checker<'a, 'c> {
                         if self.slot(b).is_some() {
                             if self.reads(&value, b) {
                                 let name = self.binding_name(b);
-                                self.error(span, format!(
-                                    "cannot overwrite '{}': it owns a resource that must be \
-                                     destroyed first, but the new value reads it. Bind the new \
-                                     value with `let` before assigning", name));
+                                self.push(Error::new(span, format!("cannot overwrite '{}'", name))
+                                    .with_label(span, "the new value reads what it replaces")
+                                    .with_note("it owns a resource that must be destroyed \
+                                                first; bind the new value with `let` before \
+                                                assigning"));
                             } else {
                                 let (i, j) = self.find_slot(b).unwrap();
                                 let drops = self.destroy(i, j, span);
@@ -870,9 +885,11 @@ impl<'a, 'c> Checker<'a, 'c> {
                         if let Some(ty) = self.ty_of(&left) {
                             if !self.model.is_copy(&ty) {
                                 let shown = self.cx.show(&ty);
-                                self.error(span, format!(
-                                    "cannot overwrite a '{}' in place: it owns a resource, and the \
-                                     value being replaced would never be destroyed", shown));
+                                self.push(Error::new(span, format!(
+                                    "cannot overwrite a '{}' in place", shown))
+                                    .with_label(span, "it owns a resource")
+                                    .with_note("the value being replaced would never be \
+                                                destroyed"));
                             }
                         }
                     }
@@ -913,9 +930,10 @@ impl<'a, 'c> Checker<'a, 'c> {
                     .collect();
                 for (b, at) in escaped {
                     let name = self.binding_name(b);
-                    self.error(at, format!(
-                        "'{}' is declared outside this loop and its value is moved away inside it, \
-                         so the next iteration would move a value that is already gone", name));
+                    self.push(Error::new(at, format!(
+                        "'{}' is declared outside this loop but moved away inside it", name))
+                        .with_label(at, "moved here")
+                        .with_note("the next iteration would move a value that is already gone"));
                 }
                 // the body may run zero times, so nothing it did is guaranteed.
                 self.moved = entry;
@@ -960,9 +978,9 @@ impl<'a, 'c> Checker<'a, 'c> {
                     // as long as the returned expression does not read them.
                     if let Some(b) = self.first_dropped_read(&e) {
                         let name = self.binding_name(b);
-                        self.error(span, format!(
-                            "'{}' is destroyed when this scope ends, but the returned expression \
-                             reads it", name));
+                        self.push(Error::new(span, format!(
+                            "'{}' is destroyed when this scope ends", name))
+                            .with_label(span, "but the returned expression reads it"));
                     }
                     out.extend(drops);
                     out.push(Metadata { span, id, value: StmtNode::Return(e) });

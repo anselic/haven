@@ -1,9 +1,0 @@
-proc main() i32 {
-    let xs = Vec::from_slice::<i32>([1, 2, 3, 4, 5]);
-
-    for (x in xs.iter()) {
-        println(x);
-    }
-
-    return 0;
-}

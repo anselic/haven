@@ -1,6 +1,6 @@
 // Moved on one path and not the other: whether it still needs destroying is a
 // runtime question, and there are no drop flags.
-//@ error: not on every path
+//@ error: moved away on some paths but not others
 import std/alloc { alloc, dealloc }
 
 struct Buf {

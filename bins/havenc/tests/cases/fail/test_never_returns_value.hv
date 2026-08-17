@@ -1,6 +1,6 @@
 // `!` is the type of an expression that never yields a value, so a `!`-returning
 // proc cannot actually return one: `return 5` is `i32`, not `!`.
-//@ error: Expected !, got i32
+//@ error: expected `!`, got `i32`
 
 proc bad() ! {
     return 5;

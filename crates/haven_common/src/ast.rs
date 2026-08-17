@@ -50,15 +50,61 @@ impl chumsky::span::Span for Span {
     fn end(&self) -> usize { self.end }
 }
 
+/// One diagnostic, in the shape ariadne renders: a short headline, a primary
+/// span, any number of extra labelled spans, and an optional trailing note.
+///
+/// The split exists because ariadne puts `msg` on the report's header line *and*
+/// (by default) on the underline next to the source. A single long sentence
+/// carrying both the *what* and the *why* wrapped onto a second line there,
+/// which breaks the box drawing around the snippet. So `msg` stays a short
+/// headline, the detail moves to a label on the span it is actually about, and
+/// advice or background moves to [`note`](Error::note), which ariadne prints
+/// below the snippet where length costs nothing.
 #[derive(Clone, Debug)]
 pub struct Error {
+    /// Headline. Keep it to one short line - it is the header *and* the
+    /// fallback label when `labels` is empty.
     pub msg: String,
+    /// The primary location. Also selects which file the snippet quotes.
     pub span: Span,
+    /// Extra underlines, each with its own explanation. The first one whose
+    /// span equals `span` takes over the primary underline; the rest are drawn
+    /// alongside, which is how a "expected here / found there" pair is shown.
+    pub labels: Vec<(Span, String)>,
+    /// Free-form advice printed under the snippet. This is where a long
+    /// explanation or a suggested fix belongs.
+    pub note: Option<String>,
 }
 
 impl Error {
-    pub fn new(span: Span, msg: String) -> Self {
-        Self { span, msg }
+    pub fn new(span: Span, msg: impl Into<String>) -> Self {
+        Self { span, msg: msg.into(), labels: Vec::new(), note: None }
+    }
+
+    /// Underline `span` with `msg`. Call with the error's own span to replace
+    /// the default underline text, or with another span to point at a second
+    /// place involved in the error.
+    pub fn with_label(mut self, span: Span, msg: impl Into<String>) -> Self {
+        self.labels.push((span, msg.into()));
+        self
+    }
+
+    /// Attach the trailing note. Overwrites any previous one.
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    /// Prefix the headline with the context an outer check adds, keeping the
+    /// labels and note. Rebuilding the error from `msg` alone - the obvious way
+    /// to write `format!("in {}: {}", what, e.msg)` - would silently throw the
+    /// inner error's detail away, so wrapping goes through here.
+    ///
+    /// Only the header grows, and the header is drawn above the snippet box
+    /// rather than inside it, so length costs nothing there.
+    pub fn context(mut self, prefix: impl AsRef<str>) -> Self {
+        self.msg = format!("{}: {}", prefix.as_ref(), self.msg);
+        self
     }
 }
 
@@ -1079,28 +1125,38 @@ pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
     },
 ];
 
-/// Check one attribute written on `target`. `Err` carries a ready-to-report
-/// message; the caller supplies the span.
-pub fn check_attribute(attr: &AttributeNode<'_>, target: AttrTarget) -> Result<(), String> {
+/// Check one attribute written on `target`. `Err` carries the headline and the
+/// trailing note, already split - the caller supplies the span and assembles the
+/// [`Error`]. Split here rather than at the call site because only this function
+/// knows which half is the complaint and which half is the advice; every one of
+/// these messages is a "what" followed by a "do this instead", and the "do this
+/// instead" is long enough to wrap the underline if it stays on the headline.
+pub fn check_attribute(
+    attr: &AttributeNode<'_>,
+    target: AttrTarget,
+) -> Result<(), (String, String)> {
     let Some(spec) = KNOWN_ATTRIBUTES.iter().find(|s| s.name == attr.name) else {
         let known = KNOWN_ATTRIBUTES.iter()
             .map(|s| format!("@{}", s.name)).collect::<Vec<_>>().join(", ");
-        return Err(format!(
-            "unknown attribute `@{}`. Known attributes are {}", attr.name, known));
+        return Err((
+            format!("unknown attribute `@{}`", attr.name),
+            format!("known attributes are {}", known)));
     };
     match (spec.value, attr.value.is_some()) {
-        (AttrValue::Never, true) => return Err(format!(
-            "`@{}` takes no value; write `@{}` on its own", attr.name, attr.name)),
-        (AttrValue::Always, false) => return Err(format!(
-            "`@{}` needs a value, e.g. `@{}({})`", attr.name, attr.name,
-            spec.values.and_then(|v| v.first()).unwrap_or(&"..."))),
+        (AttrValue::Never, true) => return Err((
+            format!("`@{}` takes no value", attr.name),
+            format!("write `@{}` on its own", attr.name))),
+        (AttrValue::Always, false) => return Err((
+            format!("`@{}` needs a value", attr.name),
+            format!("e.g. `@{}({})`", attr.name,
+                spec.values.and_then(|v| v.first()).unwrap_or(&"...")))),
         _ => {}
     }
     if let (Some(allowed), Some(written)) = (spec.values, attr.value.as_deref()) {
         if !allowed.contains(&written) {
-            return Err(format!(
-                "`@{}({})` is not a valid value; expected {}",
-                attr.name, written, allowed.join(" or ")));
+            return Err((
+                format!("`@{}({})` is not a valid value", attr.name, written),
+                format!("expected {}", allowed.join(" or "))));
         }
     }
     if !spec.targets.contains(&target) {
@@ -1112,9 +1168,9 @@ pub fn check_attribute(attr: &AttributeNode<'_>, target: AttrTarget) -> Result<(
         } else {
             String::new()
         };
-        return Err(format!(
-            "`@{}` cannot be written on {}; it applies to {}{}",
-            attr.name, target.label(), ok, hint));
+        return Err((
+            format!("`@{}` cannot be written on {}", attr.name, target.label()),
+            format!("it applies to {}{}", ok, hint)));
     }
     Ok(())
 }

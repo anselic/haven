@@ -1,4 +1,4 @@
-//@ error: Expected [i32; 2], got [i32]
+//@ error: expected `[i32; 2]`, got `[i32]`
 proc expect_slice(xs: [i32]) {}
 proc expect_array2(xs: [i32; 2]) {}
 

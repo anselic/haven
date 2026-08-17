@@ -1,7 +1,7 @@
 // A trait without `pub` cannot be imported by another module. Before `trait`
 // took a visibility marker at all, `is_pub` was hardcoded to `true` and this
 // import silently succeeded.
-//@ error: is private; add `pub` to export it
+//@ error: is private
 
 import helpers/secret { Secret }
 

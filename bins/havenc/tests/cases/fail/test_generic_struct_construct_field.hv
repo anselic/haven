@@ -1,4 +1,4 @@
-//@ error: Expected i32, got f32
+//@ error: expected `i32`, got `f32`
 // The turbofish binds `T = i32`, so the `value: T` field is checked against the
 // substituted `i32`. Passing an `f32` there is an error - and the message naming
 // `i32` (not `T`) proves the param was substituted before checking.

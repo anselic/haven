@@ -1,6 +1,6 @@
 // The destructor is called automatically, so calling it by hand releases the
 // resource twice.
-//@ error: is a destructor and is called for you
+//@ error: is a destructor and cannot be called directly
 import std/alloc { alloc, dealloc }
 
 struct Buf {

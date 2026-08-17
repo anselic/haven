@@ -1,6 +1,6 @@
 // with no annotation there is nothing to give `[]` an element type.
 //@ error: cannot infer the type of 'xs'
-//@ error: Cannot infer type of empty slice literal
+//@ error: cannot infer the type of an empty slice literal
 @export
 proc main() i32 {
     let xs = [];

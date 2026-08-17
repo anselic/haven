@@ -1,7 +1,7 @@
 // The impl binds `Item = i32`, so the trait's `next(*self) Option<Self::Item>`
 // becomes `Option<i32>` — but the impl's `next` returns `Option<f32>`. The
 // substituted signature and the impl's must agree.
-//@ error: does not match the trait
+//@ error: implements it differently from the trait
 
 enum Option<T> { None, Some(T) }
 

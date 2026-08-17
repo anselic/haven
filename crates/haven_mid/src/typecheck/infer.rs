@@ -57,10 +57,7 @@ fn method_signature<'a>(
     // an ordinary function, already in final form in the value scope.
     let Some(sig) = cx.generic_fns.get(m.name) else {
         if !type_args.is_empty() {
-            return Err(Error {
-                msg: format!("method '{}' takes no generic arguments", field),
-                span: span.clone(),
-            });
+            return Err(Error::new(span.clone(), format!("method '{}' takes no generic arguments", field)));
         }
         return Ok(match cx.lookup(m.name) {
             Some((_, Type::Function { params, return_type })) =>
@@ -73,15 +70,16 @@ fn method_signature<'a>(
     // function declares past the impl's own list.
     let own = &sig.generics[sig.generics.len().min(m.generics.len())..];
     if type_args.len() != own.len() {
-        return Err(Error {
-            msg: format!(
-                "method '{}' declares {} generic parameter{} of its own; supply \
-                 {} with a turbofish, e.g. `.{}::<...>(...)` (they cannot be \
-                 inferred from the arguments), got {}",
-                field, own.len(), if own.len() == 1 { "" } else { "s" },
-                if own.len() == 1 { "it" } else { "them" }, field, type_args.len()),
-            span: span.clone(),
-        });
+        return Err(Error::new(span.clone(), format!(
+            "method '{}' expects {} generic argument{} in `::<...>`, got {}",
+            field, own.len(), if own.len() == 1 { "" } else { "s" }, type_args.len()))
+            .with_label(span.clone(), format!(
+                "declares {} generic parameter{} of its own",
+                own.len(), if own.len() == 1 { "" } else { "s" }))
+            .with_note(format!(
+                "supply {} with a turbofish, e.g. `.{}::<...>(...)` - they cannot be \
+                 inferred from the arguments",
+                if own.len() == 1 { "it" } else { "them" }, field)));
     }
 
     let (mut types, mut consts) = bind_turbofish(cx, field, own, type_args, span)?;
@@ -128,23 +126,17 @@ fn resolve_bounded_method<'a>(
         }
     }
     let Some((params, return_type)) = sig else {
-        return Err(Error {
-            msg: format!(
-                "no method '{}' on type parameter '{}'; add a trait bound that provides it \
-                 (e.g. `<{}: SomeTrait>`)",
-                field, param, param),
-            span: span.clone(),
-        });
+        return Err(Error::new(span.clone(),
+            format!("no method '{}' on type parameter '{}'", field, param))
+            .with_note(format!(
+                "add a trait bound that provides it, e.g. `<{}: SomeTrait>`", param)));
     };
 
     // `Self` in the trait signature refers to the param type `T` here.
     let self_ty = Type::Param(param);
     if args.len() != params.len() {
-        return Err(Error {
-            msg: format!("method '{}' expects {} argument(s), got {}",
-                field, params.len(), args.len()),
-            span: span.clone(),
-        });
+        return Err(Error::new(span.clone(), format!("method '{}' expects {} argument(s), got {}",
+            field, params.len(), args.len())));
     }
     for (pty, arg) in params.iter().zip(args) {
         let expected = subst_self(pty, &self_ty);
@@ -185,38 +177,27 @@ fn resolve_bounded_assoc<'a>(
         }
     }
     let Some((receiver, params, return_type)) = sig else {
-        return Err(Error {
-            msg: format!(
-                "no associated function '{}' on type parameter '{}'; add a trait bound \
-                 that provides it (e.g. `<{}: SomeTrait>`)",
-                method, param, param),
-            span: span.clone(),
-        });
+        return Err(Error::new(span.clone(),
+            format!("no associated function '{}' on type parameter '{}'", method, param))
+            .with_note(format!(
+                "add a trait bound that provides it, e.g. `<{}: SomeTrait>`", param)));
     };
     // `P::m()` names it without a receiver, so `m` must actually be associated.
     if receiver != Receiver::Associated {
-        return Err(Error {
-            msg: format!(
-                "'{}::{}' takes a receiver; call it as a method, `x.{}(...)`",
-                param, method, method),
-            span: span.clone(),
-        });
+        return Err(Error::new(span.clone(),
+            format!("'{}::{}' takes a receiver", param, method))
+            .with_note(format!("call it as a method, `x.{}(...)`", method)));
     }
     if !type_args.is_empty() {
-        return Err(Error {
-            msg: format!("associated function '{}' takes no generic arguments", method),
-            span: span.clone(),
-        });
+        return Err(Error::new(span.clone(), format!(
+            "associated function '{}' takes no generic arguments", method)));
     }
 
     // `Self` in the trait signature is the param type `P` here.
     let self_ty = Type::Param(param);
     if args.len() != params.len() {
-        return Err(Error {
-            msg: format!("associated function '{}' expects {} argument(s), got {}",
-                method, params.len(), args.len()),
-            span: span.clone(),
-        });
+        return Err(Error::new(span.clone(), format!("associated function '{}' expects {} argument(s), got {}",
+            method, params.len(), args.len())));
     }
     for (pty, arg) in params.iter().zip(args) {
         let expected = subst_self(pty, &self_ty);
@@ -239,11 +220,8 @@ fn expect_pointer_to<'a>(
     let want = Type::Pointer(Box::new(pointee.clone()));
     let got = infer(cx, arg)?;
     if got != want {
-        return Err(Error {
-            msg: format!("{}() {} argument must be `{}`, got `{}`",
-                         intrinsic, which, cx.show(&want), cx.show(&got)),
-            span: arg.span,
-        });
+        return Err(Error::new(arg.span, format!("{}() {} argument must be `{}`, got `{}`",
+                     intrinsic, which, cx.show(&want), cx.show(&got))));
     }
     Ok(())
 }
@@ -286,10 +264,8 @@ fn typecheck_intrinsic<'a>(
             let value_ty = infer(cx, &args[0])?;
             // an enum casts to/from its integer repr, so it is allowed here too.
             if !value_ty.is_numeric() && !cx.enums.contains_key(&value_ty.def().unwrap_or(DefId::UNRESOLVED)) {
-                return Err(Error {
-                    msg: format!("numerical_cast() argument must be a numeric type, got {}", cx.show(&value_ty)),
-                    span,
-                });
+                return Err(Error::new(span, format!(
+                    "numerical_cast() argument must be a numeric type, got {}", cx.show(&value_ty))));
             }
             cx.node_types.insert(expr_id, target_ty.clone());
             Ok(target_ty)
@@ -306,10 +282,8 @@ fn typecheck_intrinsic<'a>(
             let value_ty = infer(cx, &args[0])?;
             // `str` is a raw pointer too, so it may be reinterpreted like any other.
             if !matches!(value_ty, Type::Pointer(_) | Type::Str) {
-                return Err(Error {
-                    msg: format!("ptr_cast() argument must be a pointer, got {}", cx.show(&value_ty)),
-                    span,
-                });
+                return Err(Error::new(span, format!(
+                    "ptr_cast() argument must be a pointer, got {}", cx.show(&value_ty))));
             }
             cx.node_types.insert(expr_id, target_ty.clone());
             Ok(target_ty)
@@ -332,11 +306,8 @@ fn typecheck_intrinsic<'a>(
             // given, so a `u64` length and a `u32` one both work unconverted.
             if !matches!(count_ty, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
                                  | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64) {
-                return Err(Error {
-                    msg: format!("{}() second argument must be an integer count, got `{}`",
-                                 intrinsic, cx.show(&count_ty)),
-                    span,
-                });
+                return Err(Error::new(span, format!("{}() second argument must be an integer count, got `{}`",
+                             intrinsic, cx.show(&count_ty))));
             }
             cx.node_types.insert(expr_id, Type::Void);
             Ok(Type::Void)
@@ -347,10 +318,8 @@ fn typecheck_intrinsic<'a>(
 
             let value_ty = infer(cx, &args[0])?;
             if value_ty != ty {
-                return Err(Error {
-                    msg: format!("simd_splat() value argument must be of the element type, got {}", cx.show(&value_ty)),
-                    span,
-                });
+                return Err(Error::new(span, format!(
+                    "simd_splat() value argument must be of the element type, got {}", cx.show(&value_ty))));
             }
 
             let simd_ty = Type::Simd(Box::new(ty), size);
@@ -365,10 +334,8 @@ fn typecheck_intrinsic<'a>(
             let offset_ty = infer(cx, &args[1])?;
 
             if !offset_ty.is_integer() {
-                return Err(Error {
-                    msg: format!("simd_load() offset argument must be an integer type, got {}", cx.show(&offset_ty)),
-                    span,
-                });
+                return Err(Error::new(span, format!(
+                    "simd_load() offset argument must be an integer type, got {}", cx.show(&offset_ty))));
             }
 
             match slice_ty {
@@ -378,10 +345,9 @@ fn typecheck_intrinsic<'a>(
                     Ok(simd_ty)
                 },
                 _ => {
-                    return Err(Error {
-                        msg: format!("simd_load() first argument must be a slice or pointer to the element type, got {}", cx.show(&slice_ty)),
-                        span,
-                    });
+                    return Err(Error::new(span, "simd_load() first argument has the wrong type")
+                        .with_label(span, format!("expected `[{0}]` or `*{0}`, got `{1}`",
+                            cx.show(&ty), cx.show(&slice_ty))));
                 }
             }
         }
@@ -394,27 +360,23 @@ fn typecheck_intrinsic<'a>(
             let value_ty = infer(cx, &args[2])?;
 
             if !offset_ty.is_integer() {
-                return Err(Error {
-                    msg: format!("simd_store() offset argument must be an integer type, got {}", cx.show(&offset_ty)),
-                    span,
-                });
+                return Err(Error::new(span, format!(
+                    "simd_store() offset argument must be an integer type, got {}", cx.show(&offset_ty))));
             }
 
             let expected_value_ty = Type::Simd(Box::new(ty.clone()), size);
             if value_ty != expected_value_ty {
-                return Err(Error {
-                    msg: format!("simd_store() value argument must be a SIMD vector of the element type and size, got {}", cx.show(&value_ty)),
-                    span,
-                });
+                return Err(Error::new(span, "simd_store() value argument has the wrong type")
+                    .with_label(span, format!("expected `{}`, got `{}`",
+                        cx.show(&expected_value_ty), cx.show(&value_ty))));
             }
 
             match slice_ty {
                 Type::Slice(inner) | Type::Pointer(inner) if *inner == ty => Ok(Type::Void),
                 _ => {
-                    return Err(Error {
-                        msg: format!("simd_store() first argument must be a slice or pointer to the element type, got {}", cx.show(&slice_ty)),
-                        span,
-                    });
+                    return Err(Error::new(span, "simd_store() first argument has the wrong type")
+                        .with_label(span, format!("expected `[{0}]` or `*{0}`, got `{1}`",
+                            cx.show(&ty), cx.show(&slice_ty))));
                 }
             }
         }
@@ -438,16 +400,18 @@ fn typecheck_intrinsic<'a>(
                 None => matches!(v, Type::Simd(inner, _) if **inner == ty),
             };
             if !half_ok(&value1_ty) {
-                return Err(Error {
-                    msg: format!("simd_concat() first value argument must be a SIMD vector of the element type and half the size, got {}", cx.show(&value1_ty)),
-                    span,
-                });
+                return Err(Error::new(span, "simd_concat() first value argument has the wrong type")
+                    .with_label(span, format!("got `{}`", cx.show(&value1_ty)))
+                    .with_note(format!(
+                        "both operands must be SIMD vectors of `{}` at half the result size",
+                        cx.show(&ty))));
             }
             if !half_ok(&value2_ty) {
-                return Err(Error {
-                    msg: format!("simd_concat() second value argument must be a SIMD vector of the element type and half the size, got {}", cx.show(&value2_ty)),
-                    span,
-                });
+                return Err(Error::new(span, "simd_concat() second value argument has the wrong type")
+                    .with_label(span, format!("got `{}`", cx.show(&value2_ty)))
+                    .with_note(format!(
+                        "both operands must be SIMD vectors of `{}` at half the result size",
+                        cx.show(&ty))));
             }
 
             let result_ty = Type::Simd(Box::new(ty.clone()), size.clone());
@@ -474,10 +438,12 @@ fn typecheck_intrinsic<'a>(
                     Ok(result_ty)
                 }
                 _ => {
-                    return Err(Error {
-                        msg: format!("{}() value argument must be a SIMD vector of the element type and larger size, got {}", intrinsic, cx.show(&value_ty)),
-                        span,
-                    });
+                    return Err(Error::new(span,
+                        format!("{}() value argument has the wrong type", intrinsic))
+                        .with_label(span, format!("got `{}`", cx.show(&value_ty)))
+                        .with_note(format!(
+                            "it must be a SIMD vector of `{}` wider than the result",
+                            cx.show(&ty))));
                 }
             }
         }
@@ -571,11 +537,15 @@ fn type_untyped_lit<'a>(
         _ => {
             let v = untyped_lit(expr).expect("untyped_lit_shape checked this leaf");
             if !literal_fits(v, expected) {
-                let msg = match v {
-                    Some(v) => format!("integer literal {} does not fit in {}", v, cx.show(expected)),
-                    None => format!("Expected {}, got a float literal", cx.show(expected)),
-                };
-                return Err(Error { msg, span: expr.span.clone() });
+                return Err(match v {
+                    Some(v) => Error::new(expr.span.clone(),
+                        format!("integer literal {} does not fit in {}", v, cx.show(expected)))
+                        .with_label(expr.span.clone(),
+                            format!("out of range for `{}`", cx.show(expected))),
+                    None => Error::new(expr.span.clone(), "type mismatch")
+                        .with_label(expr.span.clone(),
+                            format!("expected `{}`, got a float literal", cx.show(expected))),
+                });
             }
             // `-<literal>` is one unit: the literal inside it is typed too.
             if let ExprNode::Unary { operand, .. } = &expr.value {
@@ -652,11 +622,9 @@ pub(crate) fn check_expr<'a>(
             match expected {
                 Type::Slice(elem_ty) => Type::Slice(elem_ty.clone()),
                 _ => {
-                    let msg = format!("Expected {}, got []", cx.show(expected));
-                    return Err(Error {
-                        msg,
-                        span,
-                    });
+                    return Err(Error::new(span, "type mismatch")
+                        .with_label(span, format!("expected `{}`, got an empty slice literal",
+                            cx.show(expected))));
                 }
             }
         },
@@ -705,11 +673,11 @@ pub(crate) fn check_expr<'a>(
         );
 
     if !compatible {
-        let msg = format!("Expected {}, got {}", cx.show(expected), cx.show(&actual));
-        return Err(Error {
-            msg,
-            span,
-        });
+        // header stays short and the types go on the underline: a monomorphized
+        // type name can be long enough on its own to wrap the header line.
+        return Err(Error::new(span, "type mismatch")
+            .with_label(span, format!("expected `{}`, got `{}`",
+                cx.show(expected), cx.show(&actual))));
     }
 
     cx.node_types.insert(metadata.id, actual);
@@ -744,14 +712,12 @@ pub(crate) fn infer<'a>(
         // meant; a value too big for that has to say which type it wants.
         ExprNode::IntLit(v) => {
             if !literal_fits(Some(*v), &Type::Int32) {
-                return Err(Error {
-                    msg: format!(
-                        "integer literal {} does not fit in i32; add a width suffix (`{}i64`) \
-                         or a type annotation to say which integer type it is",
-                        v, v,
-                    ),
-                    span,
-                });
+                return Err(Error::new(span, format!(
+                    "integer literal {} does not fit in i32", v))
+                    .with_label(span, "a bare literal defaults to i32")
+                    .with_note(format!(
+                        "add a width suffix (`{}i64`) or a type annotation to say which \
+                         integer type it is", v)));
             }
             Type::Int32
         },
@@ -764,29 +730,23 @@ pub(crate) fn infer<'a>(
         // `Msg::Note` needs `Msg::Note(...)`.
         ExprNode::Path(path) => {
             let Some((ename, _val, repr)) = enum_variant(cx, path) else {
-                return Err(Error {
-                    msg: format!("Undefined variable '{}'", path),
-                    span,
-                });
+                return Err(Error::new(span, format!("Undefined variable '{}'", path)));
             };
             let variant = path.variant();
             if cx.enums[&ename].payloads.get(variant).is_some_and(|p| !p.is_empty()) {
-                return Err(Error {
-                    msg: format!("variant '{}' carries a payload; construct it with `{}(...)`", path, path),
-                    span,
-                });
+                return Err(Error::new(span, format!("variant '{}' carries a payload", path))
+                    .with_note(format!("construct it with `{}(...)`", path)));
             }
             // a generic enum's variant can never be used bare - a bare path has no
             // syntax to attach a turbofish, so even a unit variant needs the call
             // form: `Option::None::<i32>()`.
             if cx.generic_enums.contains_key(&ename) {
-                return Err(Error {
-                    msg: format!(
-                        "enum '{}' is generic; construct '{}' with explicit type arguments, e.g. `{}::<...>()`",
-                        cx.name_of(ename), path, path,
-                    ),
-                    span,
-                });
+                return Err(Error::new(span,
+                    format!("enum '{}' is generic", cx.name_of(ename)))
+                    .with_label(span, "missing type arguments")
+                    .with_note(format!(
+                        "a bare path has nowhere to put a turbofish, so even a unit \
+                         variant needs the call form: `{}::<...>()`", path)));
             }
             let _ = repr;
             Type::named(ename)
@@ -795,10 +755,7 @@ pub(crate) fn infer<'a>(
         ExprNode::Var(name) => {
             let Some((binding, ty)) = cx.lookup(name) else {
                 let msg = format!("Undefined variable '{}'", name);
-                return Err(Error {
-                    msg,
-                    span,
-                });
+                return Err(Error::new(span, msg));
             };
             let binding = *binding;
             let ty = ty.clone();
@@ -815,30 +772,25 @@ pub(crate) fn infer<'a>(
         // and rewrites this node to a bare `Var` of that symbol, so nothing past
         // mono sees a `FnRef`.
         ExprNode::FnRef { name, type_args } => {
-            let fname = name.path.as_single().ok_or_else(|| Error {
-                msg: format!("'{}' is not a function", name),
-                span: span.clone(),
-            })?;
+            let fname = name.path.as_single().ok_or_else(|| Error::new(span.clone(), format!(
+                "'{}' is not a function", name)))?;
             let Some(sig) = cx.generic_fns.get(fname).cloned() else {
                 // a non-generic function reference carries no turbofish, so a name
                 // here that isn't a generic fn is either undefined or a plain fn
                 // wrongly given type arguments.
                 let msg = if cx.lookup(fname).is_some() {
-                    format!("'{}' is not generic and takes no type arguments", fname)
+                    format!("'{}' takes no type arguments", fname)
                 } else {
                     format!("unknown function '{}'", fname)
                 };
-                return Err(Error { msg, span });
+                return Err(Error::new(span, msg));
             };
             if type_args.len() != sig.generics.len() {
-                return Err(Error {
-                    msg: format!(
-                        "{}() expects {} generic argument{} in `::<...>`, got {}",
-                        fname, sig.generics.len(),
-                        if sig.generics.len() == 1 { "" } else { "s" }, type_args.len(),
-                    ),
-                    span,
-                });
+                return Err(Error::new(span, format!(
+                    "{}() expects {} generic argument{} in `::<...>`, got {}",
+                    fname, sig.generics.len(),
+                    if sig.generics.len() == 1 { "" } else { "s" }, type_args.len(),
+                )));
             }
             let (type_bindings, const_bindings) =
                 bind_turbofish(cx, fname, &sig.generics, type_args, &span)?;
@@ -851,10 +803,8 @@ pub(crate) fn infer<'a>(
         },
 
         ExprNode::Slice(inner) if inner.len() == 0 => {
-            return Err(Error {
-                msg: "Cannot infer type of empty slice literal".to_string(),
-                span,
-            });
+            return Err(Error::new(span, "cannot infer the type of an empty slice literal")
+                .with_note("annotate it, e.g. `let xs: []i32 = [];`"));
         },
 
         // Infer [...] as Array first, convert to slice later if needed
@@ -877,28 +827,17 @@ pub(crate) fn infer<'a>(
             let slice_ty = infer(cx, slice)?;
             let index_ty = infer(cx, index)?;
             if !index_ty.is_integer() {
-                let msg = format!(
-                    "Expected index of type i32, got {}",
-                    cx.show(&index_ty)
-                );
-                return Err(Error {
-                    msg,
-                    span,
-                });
+                return Err(Error::new(span, "index must be an integer")
+                    .with_label(span, format!("got `{}`", cx.show(&index_ty))));
             }
             match slice_ty {
                 Type::Slice(inner)
                 | Type::Array(inner, _)
                 | Type::Pointer(inner) => *inner,
                 _ => {
-                    let msg = format!(
-                        "Expected a slice or pointer type for indexing, got {}",
-                        cx.show(&slice_ty)
-                    );
-                    return Err(Error {
-                        msg,
-                        span,
-                    });
+                    return Err(Error::new(span, "this type cannot be indexed")
+                        .with_label(span, format!("got `{}`", cx.show(&slice_ty)))
+                        .with_note("indexing needs a slice, array, or pointer"));
                 }
             }
         },
@@ -918,27 +857,17 @@ pub(crate) fn infer<'a>(
                 UnaryOp::Deref => match operand_ty {
                     Type::Pointer(inner) => *inner,
                     _ => {
-                        let msg = format!(
-                            "Expected a pointer type for dereference, got {}",
-                            cx.show(&operand_ty)
-                        );
-                        return Err(Error {
-                            msg,
-                            span,
-                        });
+                        return Err(Error::new(span, "this type cannot be dereferenced")
+                            .with_label(span, format!("expected a pointer, got `{}`",
+                                cx.show(&operand_ty))));
                     }
                 },
                 UnaryOp::Neg => if operand_ty.is_numeric() {
                     operand_ty
                 } else {
-                    let msg = format!(
-                        "Expected a numeric type for negation, got {}",
-                        operand_ty
-                    );
-                    return Err(Error {
-                        msg,
-                        span,
-                    });
+                    return Err(Error::new(span, "this type cannot be negated")
+                        .with_label(span, format!("expected a numeric type, got `{}`",
+                            operand_ty)));
                 },
                 UnaryOp::Not => Type::Bool,
             }
@@ -957,11 +886,8 @@ pub(crate) fn infer<'a>(
 
                     // check if both are numeric (scalar or SIMD)
                     if !left_ty.is_numeric_or_numeric_simd() {
-                        let msg = format!(
-                            "Expected a numeric type for binary operator, got {}",
-                            cx.show(&left_ty)
-                        );
-                        return Err(Error { msg, span });
+                        return Err(Error::new(span, "binary operator needs numeric operands")
+                            .with_label(span, format!("got `{}`", cx.show(&left_ty))));
                     }
 
                     match op {
@@ -982,11 +908,9 @@ pub(crate) fn infer<'a>(
                 BitAnd | BitOr | BitXor | Shl | Shr => {
                     let left_ty = binary_operand_ty(cx, left, right)?;
                     if !left_ty.is_integer() {
-                        let msg = format!(
-                            "Expected an integer type for bitwise operator '{}', got {}",
-                            op, cx.show(&left_ty)
-                        );
-                        return Err(Error { msg, span });
+                        return Err(Error::new(span,
+                            format!("bitwise operator '{}' needs integer operands", op))
+                            .with_label(span, format!("got `{}`", cx.show(&left_ty))));
                     }
                     left_ty
                 },
@@ -1005,22 +929,18 @@ pub(crate) fn infer<'a>(
                 let (type_subst, const_subst, resolved_args) = match cx.generic_enums.get(&ename).cloned() {
                     Some(params) => {
                         if type_args.is_empty() {
-                            return Err(Error {
-                                msg: format!(
-                                    "enum '{}' is generic; construct '{}' with type arguments, e.g. `{}::<...> {{ ... }}`",
-                                    cx.name_of(ename), name, name,
-                                ),
-                                span,
-                            });
+                            return Err(Error::new(span,
+                                format!("enum '{}' is generic", cx.name_of(ename)))
+                                .with_label(span, "missing type arguments")
+                                .with_note(format!(
+                                    "construct it as `{}::<...> {{ ... }}`", name)));
                         }
                         bind_struct_generics(cx, &cx.name_of(ename), &params, type_args, &span)?
                     }
                     None => {
                         if !type_args.is_empty() {
-                            return Err(Error {
-                                msg: format!("enum constructor '{}' takes no type arguments", name),
-                                span,
-                            });
+                            return Err(Error::new(span, format!(
+                                "enum constructor '{}' takes no type arguments", name)));
                         }
                         (HashMap::new(), HashMap::new(), Vec::new())
                     }
@@ -1028,36 +948,27 @@ pub(crate) fn infer<'a>(
                 let pstruct = cx.payloads[&(ename, variant)];
                 let pdef = match cx.types.get(&pstruct) {
                     Some(d) if !d.fields.is_empty() => d.fields.clone(),
-                    _ => return Err(Error {
-                        msg: format!("variant '{}' has no fields; construct it as `{}`", name, name),
-                        span,
-                    }),
+                    _ => return Err(Error::new(span, format!("variant '{}' has no fields", name))
+                        .with_note(format!("construct it as `{}`", name))),
                 };
                 // a tuple variant's fields are named "0", "1", ...; those can't be
                 // written in a `{ }` literal, so point the user at the `( )` form.
                 if pdef.first().is_some_and(|(n, _)| n.bytes().all(|b| b.is_ascii_digit())) {
-                    return Err(Error {
-                        msg: format!("variant '{}' is a tuple variant; construct it with `{}(...)`", name, name),
-                        span,
-                    });
+                    return Err(Error::new(span, format!("variant '{}' is a tuple variant", name))
+                        .with_note(format!("construct it with `{}(...)`", name)));
                 }
                 if fields.len() != pdef.len() {
-                    return Err(Error {
-                        msg: format!("variant '{}' expects {} field(s), got {}",
-                            name, pdef.len(), fields.len()),
-                        span,
-                    });
+                    return Err(Error::new(span, format!("variant '{}' expects {} field(s), got {}",
+                        name, pdef.len(), fields.len())));
                 }
                 // field order must match the declaration (same rule as a struct
                 // literal); each field checks against its (param-substituted)
                 // declared payload type.
                 for ((def_name, def_ty), (lit_name, lit_value)) in pdef.iter().zip(fields.iter()) {
                     if def_name != lit_name {
-                        return Err(Error {
-                            msg: format!("In variant '{}': expected field '{}', got '{}'",
-                                name, def_name, lit_name),
-                            span: lit_value.span.clone(),
-                        });
+                        return Err(Error::new(lit_value.span.clone(), format!(
+                            "In variant '{}': expected field '{}', got '{}'",
+                            name, def_name, lit_name)));
                     }
                     let expected = subst_param_type(&type_subst, &const_subst, def_ty);
                     check_expr(cx, &expected, lit_value)?;
@@ -1073,20 +984,14 @@ pub(crate) fn infer<'a>(
             // ordinary - which is why this asks what the name *resolved to*
             // rather than how it was spelled.)
             if cx.enums.contains_key(&name.def) {
-                return Err(Error {
-                    msg: format!("Unknown enum variant '{}'", name),
-                    span,
-                });
+                return Err(Error::new(span, format!("Unknown enum variant '{}'", name)));
             }
             let tdef = name.def;
             let name = cx.name_of(tdef);
 
             let def = match cx.types.get(&tdef) {
                 Some(d) => d.fields.clone(),
-                None => return Err(Error {
-                    msg: format!("Unknown struct '{}'", name),
-                    span,
-                }),
+                None => return Err(Error::new(span, format!("Unknown struct '{}'", name))),
             };
 
             // Bind the struct's params to the turbofish args so `Param` field types
@@ -1097,51 +1002,40 @@ pub(crate) fn infer<'a>(
             let (type_subst, const_subst, struct_args) = match cx.generic_structs.get(&tdef).cloned() {
                 Some(params) => {
                     if type_args.is_empty() {
-                        return Err(Error {
-                            msg: format!(
-                                "constructing generic struct '{}' needs type arguments, e.g. `{}::<...> {{ ... }}`",
-                                name, name,
-                            ),
-                            span,
-                        });
+                        return Err(Error::new(span,
+                            format!("struct '{}' is generic", name))
+                            .with_label(span, "missing type arguments")
+                            .with_note(format!(
+                                "construct it as `{}::<...> {{ ... }}`", name)));
                     }
                     bind_struct_generics(cx, &name, &params, type_args, &span)?
                 }
                 None => {
                     if !type_args.is_empty() {
-                        return Err(Error {
-                            msg: format!(
-                                "struct '{}' is not generic; no type arguments expected",
-                                name,
-                            ),
-                            span,
-                        });
+                        return Err(Error::new(span, format!(
+                            "struct '{}' is not generic; no type arguments expected",
+                            name,
+                        )));
                     }
                     (HashMap::new(), HashMap::new(), Vec::new())
                 }
             };
 
             if fields.len() != def.len() {
-                return Err(Error {
-                    msg: format!(
-                        "Struct '{}' expects {} fields, got {}",
-                        name, def.len(), fields.len()
-                    ),
-                    span,
-                });
+                return Err(Error::new(span, format!(
+                    "Struct '{}' expects {} fields, got {}",
+                    name, def.len(), fields.len()
+                )));
             }
 
             // field order must match definition; each field checks against its
             // (param-substituted) declared type.
             for ((def_name, def_ty), (lit_name, lit_value)) in def.iter().zip(fields.iter()) {
                 if def_name != lit_name {
-                    return Err(Error {
-                        msg: format!(
-                            "In struct '{}': expected field '{}', got '{}'",
-                            name, def_name, lit_name
-                        ),
-                        span: lit_value.span.clone(),
-                    });
+                    return Err(Error::new(lit_value.span.clone(), format!(
+                        "In struct '{}': expected field '{}', got '{}'",
+                        name, def_name, lit_name
+                    )));
                 }
                 let expected = subst_param_type(&type_subst, &const_subst, def_ty);
                 check_expr(cx, &expected, lit_value)?;
@@ -1161,31 +1055,22 @@ pub(crate) fn infer<'a>(
                 // auto-deref one level of pointer to a struct (like C's `->`)
                 Type::Pointer(inner) => match inner.as_ref() {
                     Type::Named { def, args } => (*def, args.as_slice()),
-                    _ => return Err(Error {
-                        msg: format!("Cannot access field '{}' on type {}", field, cx.show(&base_ty)),
-                        span,
-                    }),
+                    _ => return Err(Error::new(span, format!(
+                        "Cannot access field '{}' on type {}", field, cx.show(&base_ty)))),
                 },
-                _ => return Err(Error {
-                    msg: format!("Cannot access field '{}' on type {}", field, cx.show(&base_ty)),
-                    span,
-                }),
+                _ => return Err(Error::new(span, format!(
+                    "Cannot access field '{}' on type {}", field, cx.show(&base_ty)))),
             };
 
             let def = match cx.types.get(&struct_def).map(|i| &i.fields) {
                 Some(d) => d,
-                None => return Err(Error {
-                    msg: format!("Unknown struct '{}'", cx.name_of(struct_def)),
-                    span,
-                }),
+                None => return Err(Error::new(span, format!("Unknown struct '{}'", cx.name_of(struct_def)))),
             };
 
             let field_ty = match def.iter().find(|(n, _)| n == field) {
                 Some((_, ty)) => ty.clone(),
-                None => return Err(Error {
-                    msg: format!("Struct '{}' has no field '{}'", cx.name_of(struct_def), field),
-                    span,
-                }),
+                None => return Err(Error::new(span, format!(
+                    "Struct '{}' has no field '{}'", cx.name_of(struct_def), field))),
             };
             // for a generic-struct instance (`Option<i32>`, `Buf<i32, 8>`), the
             // field type is stored with `Param`s (`value: T`, `[T; N]`); substitute
@@ -1236,10 +1121,8 @@ pub(crate) fn infer<'a>(
                     // turbofish here could bind - and silently dropping it would
                     // typecheck a different call than the one written.
                     if !type_args.is_empty() {
-                        return Err(Error {
-                            msg: format!("trait method '{}' takes no generic arguments", field),
-                            span,
-                        });
+                        return Err(Error::new(span, format!(
+                            "trait method '{}' takes no generic arguments", field)));
                     }
                     cx.node_types.insert(metadata.id, ret.clone());
                     return Ok(ret);
@@ -1255,12 +1138,9 @@ pub(crate) fn infer<'a>(
                         // the same rule top-level functions follow (trait-impl
                         // methods are always public - see `Member::is_pub`).
                         if !m.is_pub && m.module != cx.current_module {
-                            return Err(Error {
-                                msg: format!(
-                                    "method '{}' is private to its module; mark it \
-                                     `pub` to call it from another module", field),
-                                span,
-                            });
+                            return Err(Error::new(span,
+                                format!("method '{}' is private to its module", field))
+                                .with_note("mark it `pub` to call it from another module"));
                         }
                         method_signature(cx, &m, &u, field, type_args, &span)?
                     }
@@ -1270,11 +1150,8 @@ pub(crate) fn infer<'a>(
                     // params[0] is the receiver `self`; args match the rest.
                     let arg_params = &params[1..];
                     if args.len() != arg_params.len() {
-                        return Err(Error {
-                            msg: format!("method '{}' expects {} argument(s), got {}",
-                                field, arg_params.len(), args.len()),
-                            span,
-                        });
+                        return Err(Error::new(span, format!("method '{}' expects {} argument(s), got {}",
+                            field, arg_params.len(), args.len())));
                     }
                     for (param_ty, arg) in arg_params.iter().zip(args.iter()) {
                         check_expr(cx, param_ty, arg)?;
@@ -1325,32 +1202,25 @@ pub(crate) fn infer<'a>(
                     let (type_subst, const_subst, resolved_args) = match cx.generic_enums.get(&ename).cloned() {
                         Some(params) => {
                             if type_args.is_empty() {
-                                return Err(Error {
-                                    msg: format!(
-                                        "enum '{}' is generic; construct '{}' with type arguments, e.g. `{}::<...>(...)`",
-                                        cx.name_of(ename), cname, cname,
-                                    ),
-                                    span,
-                                });
+                                return Err(Error::new(span,
+                                    format!("enum '{}' is generic", cx.name_of(ename)))
+                                    .with_label(span, "missing type arguments")
+                                    .with_note(format!(
+                                        "construct it as `{}::<...>(...)`", cname)));
                             }
                             bind_struct_generics(cx, &cx.name_of(ename), &params, type_args, &span)?
                         }
                         None => {
                             if !type_args.is_empty() {
-                                return Err(Error {
-                                    msg: format!("enum constructor '{}' takes no type arguments", cname),
-                                    span,
-                                });
+                                return Err(Error::new(span, format!(
+                                    "enum constructor '{}' takes no type arguments", cname)));
                             }
                             (HashMap::new(), HashMap::new(), Vec::new())
                         }
                     };
                     if args.len() != payload_tys.len() {
-                        return Err(Error {
-                            msg: format!("variant '{}' expects {} field(s), got {}",
-                                cname, payload_tys.len(), args.len()),
-                            span,
-                        });
+                        return Err(Error::new(span, format!("variant '{}' expects {} field(s), got {}",
+                            cname, payload_tys.len(), args.len())));
                     }
                     for (pty, arg) in payload_tys.iter().zip(args.iter()) {
                         let expected = subst_param_type(&type_subst, &const_subst, pty);
@@ -1389,33 +1259,19 @@ pub(crate) fn infer<'a>(
                 // syntax message hides
                 if let ExprNode::Var(name) = &func.value {
                     if cx.lookup(name).is_none() {
-                        return Err(Error {
-                            msg: format!(
-                                "unknown function '{}', is it defined and imported into this module?",
-                                name,
-                            ),
-                            span,
-                        });
+                        return Err(Error::new(span, format!("unknown function '{}'", name))
+                            .with_note("is it defined and imported into this module?"));
                     }
                 }
-                return Err(Error {
-                    msg: "type arguments (`::<...>`) are only valid on generic or intrinsic calls".into(),
-                    span,
-                });
+                return Err(Error::new(span, "unexpected type arguments")
+                    .with_note("`::<...>` is only valid on a generic or intrinsic call"));
             }
             let callee_ty = infer(cx, func)?;
             match callee_ty {
                 Type::Function { params, return_type } => {
                     if params.len() != args.len() {
-                        let msg = format!(
-                            "Expected {} arguments, got {}",
-                            params.len(),
-                            args.len()
-                        );
-                        return Err(Error {
-                            msg,
-                            span,
-                        });
+                        return Err(Error::new(span, format!(
+                            "expected {} argument(s), got {}", params.len(), args.len())));
                     }
 
                     for (param_ty, arg_expr) in params.iter().zip(args.iter()) {
@@ -1425,11 +1281,9 @@ pub(crate) fn infer<'a>(
                     *return_type
                 }
                 _ => {
-                    let msg = format!("Expected a function, got {}", cx.show(&callee_ty));
-                    return Err(Error {
-                        msg,
-                        span,
-                    });
+                    return Err(Error::new(span, "this is not callable")
+                        .with_label(span, format!("expected a function, got `{}`",
+                            cx.show(&callee_ty))));
                 }
             }
         },
@@ -1498,7 +1352,8 @@ pub(crate) fn check_stmt<'a>(
                 // checked against, exactly as before.
                 Some(ty) => {
                     if let Err(msg) = check_const_scope(&cx.const_generics, ty) {
-                        return Err(Error { msg: format!("in declaration of '{}': {}", name, msg), span: stmt.span.clone() });
+                        return Err(Error::new(stmt.span.clone(), format!(
+                            "in declaration of '{}': {}", name, msg)));
                     }
                     let ty = ty.clone();
                     check_expr(cx, &ty, value)?;
@@ -1508,18 +1363,14 @@ pub(crate) fn check_stmt<'a>(
                 // check it against, so a width-less literal in it defaults
                 // (`let n = 0;` is an `i32`), and an expression that cannot be
                 // typed on its own asks for the annotation back.
-                None => infer(cx, value).map_err(|e| Error {
-                    msg: format!("cannot infer the type of '{}': {}", name, e.msg),
-                    span: e.span,
-                })?,
+                None => infer(cx, value)
+                    .map_err(|e| e.context(format!("cannot infer the type of '{}'", name)))?,
             };
             // a local has to have storage and a value; neither is true of `void`,
             // which is what a call to a procedure that returns nothing yields.
             if ty == Type::Void {
-                return Err(Error {
-                    msg: format!("'{}' cannot be declared with type void", name),
-                    span: stmt.span.clone(),
-                });
+                return Err(Error::new(stmt.span.clone(), format!(
+                    "'{}' cannot be declared with type void", name)));
             }
             // the local's binding identity is this Declare stmt's node id, which
             // is globally unique - so shadowed same-named locals stay distinct.
@@ -1535,10 +1386,8 @@ pub(crate) fn check_stmt<'a>(
             // (mutating through a pointer/field is still the pointee's business.)
             if let ExprNode::Var(name) = &left.value {
                 if cx.global_consts.contains(name) {
-                    return Err(Error {
-                        msg: format!("cannot assign to constant global '{}'", name),
-                        span: left.span.clone(),
-                    });
+                    return Err(Error::new(left.span.clone(), format!(
+                        "cannot assign to constant global '{}'", name)));
                 }
             }
             let left_ty = infer(cx, left)?;
@@ -1573,10 +1422,8 @@ pub(crate) fn check_stmt<'a>(
             let enum_name: Option<DefId> = match &scrut_ty {
                 Type::Named { def, .. } if cx.enums.contains_key(def) => Some(*def),
                 t if t.is_integer() => None,
-                other => return Err(Error {
-                    msg: format!("match scrutinee must be an enum or integer type, got {}", cx.show(other)),
-                    span: scrutinee.span.clone(),
-                }),
+                other => return Err(Error::new(scrutinee.span.clone(), format!(
+                    "match scrutinee must be an enum or integer type, got {}", cx.show(other)))),
             };
             // `cx.enums[&en].payloads` holds the enum's OWN declared payload types
             // (`Type::Param("T")` for a generic enum's field) - if the scrutinee is
@@ -1609,7 +1456,7 @@ pub(crate) fn check_stmt<'a>(
 
             for (pat, body) in arms {
                 if has_wildcard {
-                    return Err(Error { msg: "unreachable match arm after `_`".into(), span: pat.span.clone() });
+                    return Err(Error::new(pat.span.clone(), "unreachable match arm after `_`"));
                 }
                 // payload bindings this arm introduces into its own scope.
                 let mut arm_bindings: Vec<(&'a str, Binding<'a>, Type<'a>)> = Vec::new();
@@ -1617,45 +1464,46 @@ pub(crate) fn check_stmt<'a>(
                     PatternNode::Wildcard => has_wildcard = true,
                     PatternNode::Int(n) => {
                         if let Some(en) = enum_name {
-                            return Err(Error { msg: format!("integer pattern in a match on enum '{}'", cx.name_of(en)), span: pat.span.clone() });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "integer pattern in a match on enum '{}'", cx.name_of(en))));
                         }
                         if !covered_ints.insert(*n) {
-                            return Err(Error { msg: format!("duplicate match arm for `{}`", n), span: pat.span.clone() });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "duplicate match arm for `{}`", n)));
                         }
                     }
                     PatternNode::Path(p) => {
                         let Some(en) = enum_name else {
-                            return Err(Error { msg: format!("enum-variant pattern `{}` in a match on integer type", p), span: pat.span.clone() });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "enum-variant pattern `{}` in a match on integer type", p)));
                         };
                         let variant = check_variant_pattern(cx, en, p, &pat.span)?;
                         // a bare `E::V` on a data variant would leave the payload
                         // unbound - require the destructuring form `E::V(..)`.
                         let arity = cx.enums[&en].payloads.get(variant).map_or(0, |p| p.len());
                         if arity != 0 {
-                            return Err(Error {
-                                msg: format!("variant `{}` carries {} field(s); destructure it as `{}(..)`", p, arity, p),
-                                span: pat.span.clone(),
-                            });
+                            return Err(Error::new(pat.span.clone(), format!("variant `{}` carries {} field(s); destructure it as `{}(..)`", p, arity, p)));
                         }
                         if !covered_variants.insert(variant) {
-                            return Err(Error { msg: format!("duplicate match arm for `{}`", p), span: pat.span.clone() });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "duplicate match arm for `{}`", p)));
                         }
                     }
                     PatternNode::Variant { path, fields } => {
                         let Some(en) = enum_name else {
-                            return Err(Error { msg: format!("enum-variant pattern `{}` in a match on integer type", path), span: pat.span.clone() });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "enum-variant pattern `{}` in a match on integer type", path)));
                         };
                         let variant = check_variant_pattern(cx, en, path, &pat.span)?;
                         let payload = cx.enums[&en].payloads.get(variant).cloned().unwrap_or_default();
                         if fields.len() != payload.len() {
-                            return Err(Error {
-                                msg: format!("variant `{}` has {} field(s) but the pattern binds {}",
-                                    path, payload.len(), fields.len()),
-                                span: pat.span.clone(),
-                            });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "variant `{}` has {} field(s) but the pattern binds {}",
+                                path, payload.len(), fields.len())));
                         }
                         if !covered_variants.insert(variant) {
-                            return Err(Error { msg: format!("duplicate match arm for `{}`", path), span: pat.span.clone() });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "duplicate match arm for `{}`", path)));
                         }
                         for (fpat, (_, fty)) in fields.iter().zip(payload.iter()) {
                             match &fpat.value {
@@ -1666,50 +1514,42 @@ pub(crate) fn check_stmt<'a>(
                                     *bname, Binding::Local(fpat.id),
                                     subst_param_type(&type_subst, &const_subst, fty),
                                 )),
-                                other => return Err(Error {
-                                    msg: format!("unsupported payload sub-pattern `{}`", other),
-                                    span: fpat.span.clone(),
-                                }),
+                                other => return Err(Error::new(fpat.span.clone(), format!(
+                                    "unsupported payload sub-pattern `{}`", other))),
                             }
                         }
                     }
                     PatternNode::StructVariant { path, fields } => {
                         let Some(en) = enum_name else {
-                            return Err(Error { msg: format!("enum-variant pattern `{}` in a match on integer type", path), span: pat.span.clone() });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "enum-variant pattern `{}` in a match on integer type", path)));
                         };
                         let variant = check_variant_pattern(cx, en, path, &pat.span)?;
                         let payload = cx.enums[&en].payloads.get(variant).cloned().unwrap_or_default();
                         if payload.is_empty() {
-                            return Err(Error {
-                                msg: format!("variant `{}` has no fields to destructure with `{{ }}`", path),
-                                span: pat.span.clone(),
-                            });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "variant `{}` has no fields to destructure with `{{ }}`", path)));
                         }
                         if fields.len() != payload.len() {
-                            return Err(Error {
-                                msg: format!("variant `{}` has {} field(s) but the pattern binds {}",
-                                    path, payload.len(), fields.len()),
-                                span: pat.span.clone(),
-                            });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "variant `{}` has {} field(s) but the pattern binds {}",
+                                path, payload.len(), fields.len())));
                         }
                         if !covered_variants.insert(variant) {
-                            return Err(Error { msg: format!("duplicate match arm for `{}`", path), span: pat.span.clone() });
+                            return Err(Error::new(pat.span.clone(), format!(
+                                "duplicate match arm for `{}`", path)));
                         }
                         // by-name: each named field must exist on the payload struct;
                         // a `Bind` view is keyed by its node id, a `_` ignores it.
                         let mut seen: HashSet<&str> = HashSet::new();
                         for (fname, fpat) in fields {
                             let Some((_, fty)) = payload.iter().find(|(n, _)| n == fname) else {
-                                return Err(Error {
-                                    msg: format!("variant `{}` has no field `{}`", path, fname),
-                                    span: fpat.span.clone(),
-                                });
+                                return Err(Error::new(fpat.span.clone(), format!(
+                                    "variant `{}` has no field `{}`", path, fname)));
                             };
                             if !seen.insert(*fname) {
-                                return Err(Error {
-                                    msg: format!("field `{}` bound more than once in `{}`", fname, path),
-                                    span: fpat.span.clone(),
-                                });
+                                return Err(Error::new(fpat.span.clone(), format!(
+                                    "field `{}` bound more than once in `{}`", fname, path)));
                             }
                             match &fpat.value {
                                 PatternNode::Wildcard => {}
@@ -1717,17 +1557,15 @@ pub(crate) fn check_stmt<'a>(
                                     *bname, Binding::Local(fpat.id),
                                     subst_param_type(&type_subst, &const_subst, fty),
                                 )),
-                                other => return Err(Error {
-                                    msg: format!("unsupported payload sub-pattern `{}`", other),
-                                    span: fpat.span.clone(),
-                                }),
+                                other => return Err(Error::new(fpat.span.clone(), format!(
+                                    "unsupported payload sub-pattern `{}`", other))),
                             }
                         }
                     }
-                    PatternNode::Bind(name) => return Err(Error {
-                        msg: format!("bare binding `{}` is not a valid match pattern; bindings appear inside a variant destructure", name),
-                        span: pat.span.clone(),
-                    }),
+                    PatternNode::Bind(name) => return Err(
+                        Error::new(pat.span.clone(),
+                            format!("bare binding `{}` is not a valid match pattern", name))
+                            .with_note("bindings appear inside a variant destructure")),
                 }
                 cx.push_scope();
                 for (bname, binding, bty) in &arm_bindings {
@@ -1746,17 +1584,15 @@ pub(crate) fn check_stmt<'a>(
                             .filter(|v| !covered_variants.contains(**v)).cloned().collect();
                         if !missing.is_empty() {
                             missing.sort();
-                            return Err(Error {
-                                msg: format!("non-exhaustive match on enum '{}': missing {}; cover them or add a `_` arm",
-                                    cx.name_of(en), missing.join(", ")),
-                                span: stmt.span.clone(),
-                            });
+                            return Err(Error::new(stmt.span.clone(),
+                                format!("non-exhaustive match on enum '{}'", cx.name_of(en)))
+                                .with_label(stmt.span.clone(),
+                                    format!("missing {}", missing.join(", ")))
+                                .with_note("cover every variant, or add a `_` arm"));
                         }
                     }
-                    None => return Err(Error {
-                        msg: "non-exhaustive match on an integer type: add a `_` arm".into(),
-                        span: stmt.span.clone(),
-                    }),
+                    None => return Err(Error::new(stmt.span.clone(), "non-exhaustive match on an integer type")
+                        .with_note("an integer match needs a `_` arm")),
                 }
             }
         },

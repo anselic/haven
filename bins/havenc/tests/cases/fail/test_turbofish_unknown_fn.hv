@@ -1,4 +1,4 @@
-//@ error: unknown function 'unwrap', is it defined and imported into this module?
+//@ error: unknown function 'unwrap'
 // A turbofished call to a name that doesn't resolve (undefined, or - as here -
 // not imported, since imports aren't re-exported) reports the missing symbol,
 // not a misleading "type arguments are only valid on generic calls".

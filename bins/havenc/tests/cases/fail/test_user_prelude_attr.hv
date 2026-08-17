@@ -8,7 +8,7 @@
 // *dependency's* mark, which is discovered as the prelude, or made inert by an
 // explicit `--prelude`; only the leaf's own redundant mark is the mistake named
 // here.) To make this package the prelude, nominate it with `--prelude`.
-//@ error: so this `@!prelude` has no effect
+//@ error: this `@!prelude` has no effect
 
 @!prelude
 

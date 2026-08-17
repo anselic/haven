@@ -159,10 +159,9 @@ fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), 
             }
             Ok(())
         }
-        _ => Err(Error {
-            msg: "global initializer must be a constant (a literal, a string, a struct/array literal of constants, or a function name)".into(),
-            span: expr.span.clone(),
-        }),
+        _ => Err(Error::new(expr.span.clone(), "global initializer is not a constant")
+            .with_note("a global may be initialized with a literal, a string, a \
+                        struct/array literal of constants, or a function name")),
     }
 }
 
@@ -176,28 +175,24 @@ fn check_toplevel<'a>(
                 // monomorphization isn't implemented yet, so a generic function
                 // has no single concrete ABI to export
                 if !generics.is_empty() {
-                    return Err(Error {
-                        msg: format!("@export function '{}' cannot be generic", name),
-                        span: node.span.clone(),
-                    });
+                    return Err(Error::new(node.span.clone(), format!(
+                        "@export function '{}' cannot be generic", name)));
                 }
                 for (param_name, ty) in params {
                     // resolve enum names first (@export can't be generic) so an
                     // enum param is checked as its integer repr, not an unknown struct.
                     let ty = ty.clone();
                     if let Err(msg) = check_export_type(&ty, &cx.types, &cx.enums, &cx.names) {
-                        return Err(Error {
-                            msg: format!("parameter '{}' in @export function '{}': {}", param_name, name, msg),
-                            span: node.span.clone(),
-                        });
+                        return Err(Error::new(node.span.clone(), format!(
+                            "parameter '{}' in @export function '{}': {}", param_name, name, msg))
+                            .with_label(node.span.clone(), format!("parameter '{}'", param_name)));
                     }
                 }
                 let return_type = return_type.clone();
                 if let Err(msg) = check_export_type(&return_type, &cx.types, &cx.enums, &cx.names) {
-                    return Err(Error {
-                        msg: format!("return type in @export function '{}': {}", name, msg),
-                        span: node.span.clone(),
-                    });
+                    return Err(Error::new(node.span.clone(), format!(
+                        "return type in @export function '{}': {}", name, msg))
+                        .with_label(node.span.clone(), "return type"));
                 }
             }
 
@@ -224,10 +219,8 @@ fn check_toplevel<'a>(
                 if let GenericParam::Type { name: pn, bounds } = g {
                     for b in bounds {
                         if !cx.traits.contains_key(&b.def) {
-                            return Err(Error {
-                                msg: format!("unknown trait '{}' in bound '{}: {}' of '{}'", b, pn, b, name),
-                                span: node.span.clone(),
-                            });
+                            return Err(Error::new(node.span.clone(), format!(
+                                "unknown trait '{}' in bound '{}: {}' of '{}'", b, pn, b, name)));
                         }
                     }
                 }
@@ -239,25 +232,20 @@ fn check_toplevel<'a>(
             // producing an unresolved param.
             for (pname, ty) in params {
                 if let Err(msg) = check_const_scope(&cx.const_generics, ty) {
-                    return Err(Error {
-                        msg: format!("parameter '{}' of '{}': {}", pname, name, msg),
-                        span: node.span.clone(),
-                    });
+                    return Err(Error::new(node.span.clone(), format!(
+                        "parameter '{}' of '{}': {}", pname, name, msg))
+                        .with_label(node.span.clone(), format!("parameter '{}'", pname)));
                 }
             }
             if let Err(msg) = check_const_scope(&cx.const_generics, return_type) {
-                return Err(Error {
-                    msg: format!("return type of '{}': {}", name, msg),
-                    span: node.span.clone(),
-                });
+                return Err(Error::new(node.span.clone(), format!("return type of '{}': {}", name, msg))
+                    .with_label(node.span.clone(), "return type"));
             }
 
             let return_ty = return_type.clone();
             if let Err(msg) = check_type_resolves(cx, &return_ty) {
-                return Err(Error {
-                    msg: format!("return type of '{}': {}", name, msg),
-                    span: node.span.clone(),
-                });
+                return Err(Error::new(node.span.clone(), format!("return type of '{}': {}", name, msg))
+                    .with_label(node.span.clone(), "return type"));
             }
 
             cx.push_scope();
@@ -275,10 +263,9 @@ fn check_toplevel<'a>(
             for (pname, ty) in params {
                 let resolved = ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &resolved) {
-                    return Err(Error {
-                        msg: format!("parameter '{}' of '{}': {}", pname, name, msg),
-                        span: node.span.clone(),
-                    });
+                    return Err(Error::new(node.span.clone(), format!(
+                        "parameter '{}' of '{}': {}", pname, name, msg))
+                        .with_label(node.span.clone(), format!("parameter '{}'", pname)));
                 }
                 cx.insert(pname, Some(Binding::Param(pname)), resolved);
             }
@@ -297,12 +284,18 @@ fn check_toplevel<'a>(
                 cx.generic_bounds = HashMap::new();
                 // a `!` function promises never to return; the failure is that
                 // control can fall off its end, not that a value is missing.
-                let msg = if return_ty == Type::Never {
-                    format!("function '{}' has return type '!' but can fall off its end without diverging (end it with `abort(...)` or a call that never returns)", name)
+                return Err(if return_ty == Type::Never {
+                    Error::new(node.span.clone(),
+                        format!("function '{}' can fall off its end", name))
+                        .with_label(node.span.clone(),
+                            "declared '!', so it must never return")
+                        .with_note("end it with `abort(...)` or a call that never returns")
                 } else {
-                    format!("function '{}' has return type '{}' but not all paths return a value", name, return_type)
-                };
-                return Err(Error { msg, span: node.span.clone() });
+                    Error::new(node.span.clone(),
+                        format!("function '{}': not all paths return a value", name))
+                        .with_label(node.span.clone(),
+                            format!("declared return type is '{}'", return_type))
+                });
             }
 
             cx.pop_scope();
@@ -318,18 +311,15 @@ fn check_toplevel<'a>(
             for (pname, ty) in params {
                 let resolved = ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &resolved) {
-                    return Err(Error {
-                        msg: format!("parameter '{}' of extern '{}': {}", pname, name, msg),
-                        span: node.span.clone(),
-                    });
+                    return Err(Error::new(node.span.clone(), format!(
+                        "parameter '{}' of extern '{}': {}", pname, name, msg))
+                        .with_label(node.span.clone(), format!("parameter '{}'", pname)));
                 }
             }
             let resolved_ret = return_type.clone();
             if let Err(msg) = check_type_resolves(cx, &resolved_ret) {
-                return Err(Error {
-                    msg: format!("return type of extern '{}': {}", name, msg),
-                    span: node.span.clone(),
-                });
+                return Err(Error::new(node.span.clone(), format!("return type of extern '{}': {}", name, msg))
+                    .with_label(node.span.clone(), "return type"));
             }
         }
 
@@ -344,37 +334,31 @@ fn check_toplevel<'a>(
             let mut seen = std::collections::HashSet::new();
             for (field_name, field_ty) in fields {
                 if !seen.insert(*field_name) {
-                    return Err(Error {
-                        msg: format!("Duplicate field '{}' in struct '{}'", field_name, name),
-                        span: node.span.clone(),
-                    });
+                    return Err(Error::new(node.span.clone(), format!(
+                        "Duplicate field '{}' in struct '{}'", field_name, name)));
                 }
                 // resolve the struct's own type params to `Param` first, so they
                 // aren't reported as unknown struct names.
                 let resolved = field_ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &resolved) {
-                    return Err(Error {
-                        msg: format!("In field '{}' of struct '{}': {}", field_name, name, msg),
-                        span: node.span.clone(),
-                    });
+                    return Err(Error::new(node.span.clone(), format!(
+                        "in field '{}' of struct '{}': {}", field_name, name, msg))
+                        .with_label(node.span.clone(), format!("field '{}'", field_name)));
                 }
                 // every `ConstVal::Param` in the field (an `[T; N]` size) must name
                 // one of the struct's declared const params.
                 if let Err(msg) = check_const_scope(&const_params, &resolved) {
-                    return Err(Error {
-                        msg: format!("In field '{}' of struct '{}': {}", field_name, name, msg),
-                        span: node.span.clone(),
-                    });
+                    return Err(Error::new(node.span.clone(), format!(
+                        "in field '{}' of struct '{}': {}", field_name, name, msg))
+                        .with_label(node.span.clone(), format!("field '{}'", field_name)));
                 }
             }
         }
 
         TopLevelNode::Global { name, ty, value, .. } => {
             if let Err(msg) = check_type_resolves(cx, ty) {
-                return Err(Error {
-                    msg: format!("In global '{}': {}", name, msg),
-                    span: node.span.clone(),
-                });
+                return Err(Error::new(node.span.clone(), format!("in global '{}': {}", name, msg))
+                    .with_label(node.span.clone(), format!("global '{}'", name)));
             }
             check_const_initializer(cx, value)?;
             check_expr(cx, ty, value)?;
@@ -431,7 +415,12 @@ pub fn typecheck_program<'a>(
             let def = *def;
             let (repr, has_explicit_repr) = match enum_repr(attributes) {
                 Ok(r) => r,
-                Err(msg) => { errors.push(Error { msg, span: node.span.clone() }); continue; }
+                Err(msg) => {
+                    errors.push(Error::new(node.span.clone(), msg)
+                        .with_note("expected an integer type \
+                                    (i8/i16/i32/i64/u8/u16/u32/u64) or C"));
+                    continue;
+                }
             };
             if !generics.is_empty() {
                 cx.generic_enums.insert(def, generics.clone());
@@ -448,10 +437,8 @@ pub fn typecheck_program<'a>(
             for (vname, explicit, payload) in variants {
                 let val = explicit.unwrap_or(next);
                 if vmap.insert(*vname, val).is_some() {
-                    errors.push(Error {
-                        msg: format!("Duplicate variant '{}' in enum '{}'", vname, name),
-                        span: node.span.clone(),
-                    });
+                    errors.push(Error::new(node.span.clone(), format!(
+                        "Duplicate variant '{}' in enum '{}'", vname, name)));
                     dup = true;
                     break;
                 }
@@ -629,10 +616,8 @@ pub fn typecheck_program<'a>(
             let mut dup = false;
             for m in methods {
                 if ms.contains_key(m.name) {
-                    errors.push(Error {
-                        msg: format!("Duplicate method '{}' in trait '{}'", m.name, name),
-                        span: node.span.clone(),
-                    });
+                    errors.push(Error::new(node.span.clone(), format!(
+                        "Duplicate method '{}' in trait '{}'", m.name, name)));
                     dup = true;
                     break;
                 }
@@ -698,10 +683,8 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
     let trait_def = match cx.traits.get(&imp.trait_) {
         Some(d) => d.clone(),
         None => {
-            errors.push(Error {
-                msg: format!("unknown trait '{}' in `extend {}: {}`", trait_, target, trait_),
-                span: imp.span.clone(),
-            });
+            errors.push(Error::new(imp.span.clone(), format!(
+                "unknown trait '{}' in `extend {}: {}`", trait_, target, trait_)));
             return;
         }
     };
@@ -712,26 +695,20 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
     let mut assoc: HashMap<&'a str, Type<'a>> = HashMap::new();
     for (name, ty) in &imp.assoc_bindings {
         if !trait_def.assoc_types.contains(name) {
-            errors.push(Error {
-                msg: format!("trait '{}' has no associated type '{}'", trait_, name),
-                span: imp.span.clone(),
-            });
+            errors.push(Error::new(imp.span.clone(), format!(
+                "trait '{}' has no associated type '{}'", trait_, name)));
             continue;
         }
         if assoc.insert(*name, ty.clone()).is_some() {
-            errors.push(Error {
-                msg: format!("associated type '{}' is bound more than once", name),
-                span: imp.span.clone(),
-            });
+            errors.push(Error::new(imp.span.clone(), format!(
+                "associated type '{}' is bound more than once", name)));
         }
     }
     for name in &trait_def.assoc_types {
         if !assoc.contains_key(name) {
-            errors.push(Error {
-                msg: format!("type '{}' does not implement trait '{}': missing associated type '{}'",
-                    target, trait_, name),
-                span: imp.span.clone(),
-            });
+            errors.push(Error::new(imp.span.clone(), format!(
+                "type '{}' does not implement trait '{}': missing associated type '{}'",
+                target, trait_, name)));
         }
     }
 
@@ -758,11 +735,9 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
             None => None,
         };
         let Some((params, return_type)) = found else {
-            errors.push(Error {
-                msg: format!("type '{}' does not implement trait '{}': missing method '{}'",
-                    target, trait_, mname),
-                span: imp.span.clone(),
-            });
+            errors.push(Error::new(imp.span.clone(),
+                format!("type '{}' does not implement trait '{}'", target, trait_))
+                .with_label(imp.span.clone(), format!("missing method '{}'", mname)));
             continue;
         };
         // expected parameter list: the receiver's `self` type (if any) followed
@@ -780,12 +755,13 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
             || params.iter().zip(&expected).any(|(a, b)| a != b)
             || return_type != expected_ret
         {
-            errors.push(Error {
-                msg: format!(
-                    "type '{}' implements '{}::{}' with a signature that does not match the trait",
-                    target, trait_, mname),
-                span: imp.span.clone(),
-            });
+            errors.push(Error::new(imp.span.clone(),
+                format!("signature mismatch on '{}::{}'", trait_, mname))
+                .with_label(imp.span.clone(),
+                    format!("'{}' implements it differently from the trait", target))
+                .with_note(format!("expected `({}) {}`",
+                    expected.iter().map(|t| cx.show(t)).collect::<Vec<_>>().join(", "),
+                    cx.show(&expected_ret))));
         }
     }
 
@@ -796,15 +772,12 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
     // structural type has no equivalent of. Allowing it would compile to a
     // silent leak rather than an error, so it is rejected here.
     if Some(imp.trait_) == cx.delete_trait && !matches!(imp.head, TyHead::Def(_)) {
-        errors.push(Error {
-            msg: format!(
-                "`{}` cannot implement `Delete`: only a struct or enum may own a \
-                 resource. A primitive or structural type ([T], *T, [T; N]) is a \
-                 value or a borrowed view, and destroying one would destroy \
-                 something it does not own",
-                target),
-            span: imp.span.clone(),
-        });
+        errors.push(Error::new(imp.span.clone(),
+            format!("`{}` cannot implement `Delete`", target))
+            .with_label(imp.span.clone(), "only a struct or enum may own a resource")
+            .with_note("a primitive or structural type ([T], *T, [T; N]) is a value or a \
+                        borrowed view, and destroying one would destroy something it does \
+                        not own"));
     }
 
     cx.impls.push(imp.clone());

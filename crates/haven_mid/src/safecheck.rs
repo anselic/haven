@@ -303,10 +303,8 @@ pub fn alloc_check_program<'a>(
         for s in body { blamed.extend(dirty_calls_stmt(&clean, &mut locals, &r, s)); }
         for (callee, span) in blamed {
             errors.push(Error::new(span, format!(
-                "Function '{}' is marked as @alloc(false) but calls '{}', which may allocate.",
-                show(name),
-                show(callee),
-            )));
+                "'{}' is marked as @alloc(false) but may allocate", show(name)))
+                .with_label(span, format!("calls '{}', which may allocate", show(callee))));
         }
     }
 

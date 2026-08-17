@@ -86,9 +86,7 @@ pub(crate) fn enum_repr<'a>(attributes: &[Attribute<'a>]) -> Result<(Type<'a>, b
                 Some("u16") => Ok((Type::Uint16, true)),
                 Some("u32") => Ok((Type::Uint32, true)),
                 Some("u64") => Ok((Type::Uint64, true)),
-                Some(other) => Err(format!(
-                    "unknown @repr('{}') on enum; expected an integer type \
-                     (i8/i16/i32/i64/u8/u16/u32/u64) or C", other)),
+                Some(other) => Err(format!("unknown @repr('{}') on enum", other)),
             };
         }
     }
@@ -118,16 +116,12 @@ pub(crate) fn check_variant_pattern<'a>(cx: &Context<'a>, en: DefId, r: &NameRef
     // that mono recorded as specializing it.
     let is_instance = cx.instances.get(&en).is_some_and(|t| *t == r.def);
     if r.def != en && !is_instance {
-        return Err(Error {
-            msg: format!("pattern `{}` is not a variant of enum '{}'", r, cx.name_of(en)),
-            span: span.clone(),
-        });
+        return Err(Error::new(span.clone(), format!(
+            "pattern `{}` is not a variant of enum '{}'", r, cx.name_of(en))));
     }
     if !cx.enums[&en].variants.contains_key(variant) {
-        return Err(Error {
-            msg: format!("enum '{}' has no variant '{}'", cx.name_of(en), variant),
-            span: span.clone(),
-        });
+        return Err(Error::new(span.clone(), format!(
+            "enum '{}' has no variant '{}'", cx.name_of(en), variant)));
     }
     Ok(variant)
 }
