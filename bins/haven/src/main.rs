@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 mod config;
 
@@ -54,12 +54,18 @@ enum Cmd {
         /// Diagnostic output format forwarded to `havenc`.
         #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
         message_format: MessageFormat,
+
+        #[command(flatten)]
+        compiler_flags: CompilerFlags,
     },
 
     /// Build an executable and run it. Arguments after `--` go to the program.
     Run {
         #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
         message_format: MessageFormat,
+
+        #[command(flatten)]
+        compiler_flags: CompilerFlags,
 
         /// Arguments passed through to the built program.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -78,6 +84,43 @@ enum MessageFormat {
     Json,
 }
 
+/// Mirrors `havenc`'s `-F`/`--compiler-flags`, shared by `build` and `run`.
+#[derive(Args, Clone, Debug)]
+struct CompilerFlags {
+    /// Flags for the LLVM IR compiler, forwarded verbatim to
+    /// `havenc --compiler-flags`.
+    ///
+    /// This *replaces* `havenc`'s default rather than adding to it, so carry
+    /// `-O3 -Wno-override-module` along unless you mean to drop them. The usual
+    /// reason to reach for this is an optimization report:
+    ///
+    ///     haven build -F "-O3 -Wno-override-module -Rpass=loop-vectorize \
+    ///                     -Rpass-missed=loop-vectorize"
+    ///
+    /// Unlike `havenc`'s own flag, a leading `-` in the value needs no `=` or
+    /// escaping here.
+    #[arg(short = 'F', long, value_name = "FLAGS", allow_hyphen_values = true)]
+    compiler_flags: Option<String>,
+}
+
+/// The settings one `haven build`/`haven run` applies to every `havenc` it
+/// drives, threaded through the dependency walk so a leaf and its libraries are
+/// compiled alike. Grouped rather than passed one parameter at a time because
+/// the walk hands them down through four frames untouched.
+#[derive(Copy, Clone)]
+struct BuildOpts<'a> {
+    fmt: MessageFormat,
+    /// `havenc --compiler-flags`, when the user overrode it. `None` leaves
+    /// `havenc`'s own default in force, so the default lives in one place.
+    compiler_flags: Option<&'a str>,
+}
+
+impl<'a> BuildOpts<'a> {
+    fn new(fmt: MessageFormat, flags: &'a CompilerFlags) -> Self {
+        BuildOpts { fmt, compiler_flags: flags.compiler_flags.as_deref() }
+    }
+}
+
 impl MessageFormat {
     fn as_str(self) -> &'static str {
         match self {
@@ -91,8 +134,10 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.cmd {
         Cmd::New { path, lib, .. } => cmd_new(&path, lib),
-        Cmd::Build { message_format } => cmd_build(message_format).map(|_| ()),
-        Cmd::Run { message_format, args } => cmd_run(message_format, &args),
+        Cmd::Build { message_format, compiler_flags } =>
+            cmd_build(BuildOpts::new(message_format, &compiler_flags)).map(|_| ()),
+        Cmd::Run { message_format, compiler_flags, args } =>
+            cmd_run(BuildOpts::new(message_format, &compiler_flags), &args),
         Cmd::Doc => cmd_doc(),
     };
     match result {
@@ -164,9 +209,9 @@ fn write_new_file(path: &Path, contents: &str) -> Result<(), String> {
 
 /// Compile the current project. Returns the path to the produced artifact on
 /// success (the executable, or the library `havenc` emitted).
-fn cmd_build(fmt: MessageFormat) -> Result<PathBuf, String> {
+fn cmd_build(opts: BuildOpts<'_>) -> Result<PathBuf, String> {
     let project = Project::find_and_load(&cwd()?)?;
-    build_project(&project, fmt, /*force_executable=*/ false)
+    build_project(&project, opts, /*force_executable=*/ false)
 }
 
 /// The shared compile path used by both `build` and `run`: build `project`'s
@@ -175,7 +220,7 @@ fn cmd_build(fmt: MessageFormat) -> Result<PathBuf, String> {
 /// overridden to build an executable so there is a binary to launch.
 fn build_project(
     project: &Project,
-    fmt: MessageFormat,
+    opts: BuildOpts<'_>,
     force_executable: bool,
 ) -> Result<PathBuf, String> {
     project.validate()?;
@@ -184,8 +229,8 @@ fn build_project(
     // stack so a cycle back to it is caught here, not one frame down.
     let mut cache: HashMap<PathBuf, (PathBuf, Vec<(String, PathBuf)>)> = HashMap::new();
     let mut on_stack: Vec<PathBuf> = vec![canonical_root(project)];
-    let deps = dep_closure(project, fmt, &mut cache, &mut on_stack)?;
-    compile_project(project, &deps, force_executable, fmt)
+    let deps = dep_closure(project, opts, &mut cache, &mut on_stack)?;
+    compile_project(project, &deps, force_executable, opts)
 }
 
 /// The canonicalized package root: the identity a package is memoized and
@@ -201,7 +246,7 @@ fn canonical_root(project: &Project) -> PathBuf {
 /// dependency list, so the leaf re-resolves the intermediate's `import`s itself.
 fn dep_closure(
     project: &Project,
-    fmt: MessageFormat,
+    opts: BuildOpts<'_>,
     cache: &mut HashMap<PathBuf, (PathBuf, Vec<(String, PathBuf)>)>,
     on_stack: &mut Vec<PathBuf>,
 ) -> Result<Vec<(String, PathBuf)>, String> {
@@ -210,7 +255,7 @@ fn dep_closure(
     // transitively.
     let mut flat: BTreeMap<String, PathBuf> = BTreeMap::new();
     for dep in project.dependencies()? {
-        let (artifact, sub) = build_dependency(&dep.project, fmt, cache, on_stack)
+        let (artifact, sub) = build_dependency(&dep.project, opts, cache, on_stack)
             .map_err(|e| format!("dependency `{}`: {}", dep.name, e))?;
         for (name, path) in sub {
             flat.entry(name).or_insert(path);
@@ -226,7 +271,7 @@ fn dep_closure(
 /// build stack is a dependency cycle.
 fn build_dependency(
     project: &Project,
-    fmt: MessageFormat,
+    opts: BuildOpts<'_>,
     cache: &mut HashMap<PathBuf, (PathBuf, Vec<(String, PathBuf)>)>,
     on_stack: &mut Vec<PathBuf>,
 ) -> Result<(PathBuf, Vec<(String, PathBuf)>), String> {
@@ -239,8 +284,8 @@ fn build_dependency(
     }
     on_stack.push(key.clone());
     project.validate()?;
-    let deps = dep_closure(project, fmt, cache, on_stack)?;
-    let artifact = compile_project(project, &deps, /*force_executable=*/ false, fmt)?;
+    let deps = dep_closure(project, opts, cache, on_stack)?;
+    let artifact = compile_project(project, &deps, /*force_executable=*/ false, opts)?;
     on_stack.pop();
     cache.insert(key, (artifact.clone(), deps.clone()));
     Ok((artifact, deps))
@@ -253,7 +298,7 @@ fn compile_project(
     project: &Project,
     deps: &[(String, PathBuf)],
     force_executable: bool,
-    fmt: MessageFormat,
+    opts: BuildOpts<'_>,
 ) -> Result<PathBuf, String> {
     let entry = project.entry_path();
     if !entry.is_file() {
@@ -280,7 +325,19 @@ fn compile_project(
         .arg("--package-name")
         .arg(&project.project.name)
         .arg("--message-format")
-        .arg(fmt.as_str());
+        .arg(opts.fmt.as_str());
+
+    // Given to every package in the build, not just the leaf, so a report covers
+    // the libraries too. A `lib` dependency stops before codegen and never
+    // consults these, which is why the flags are still worth passing down: the
+    // one package in the graph that does reach LLVM should not depend on whether
+    // it happened to be the one the user was standing in.
+    //
+    // Spelled `--flag=value` in one argv entry: the value all but always opens
+    // with `-O`, and a separate entry would be read as another option.
+    if let Some(flags) = opts.compiler_flags {
+        cmd.arg(format!("--compiler-flags={}", flags));
+    }
 
     match output {
         Output::Shared => { cmd.arg("--shared"); }
@@ -331,7 +388,10 @@ fn compile_project(
     // declared one. Runs for dependencies too, since a library's packaging step
     // is as much its own business as a leaf's.
     if let Some(script) = project.build_script() {
-        run_build_script(project, &script, &artifact, output, fmt)?;
+        // `opts.fmt` only: a packaging script is a host program compiled against
+        // `std` alone, and flags aimed at the artifact's codegen (an optimization
+        // report, say) have no business turning up in its build.
+        run_build_script(project, &script, &artifact, output, opts.fmt)?;
     }
 
     status(Status::Finished, &label);
@@ -492,14 +552,14 @@ fn target_os() -> &'static str {
 // run
 // ---------------------------------------------------------------------------
 
-fn cmd_run(fmt: MessageFormat, args: &[String]) -> Result<(), String> {
+fn cmd_run(opts: BuildOpts<'_>, args: &[String]) -> Result<(), String> {
     let project = Project::find_and_load(&cwd()?)?;
     if project.is_library() {
         return Err("cannot `haven run` a library project \
                     (its `kind` has no `bin`)"
             .to_string());
     }
-    let bin = build_project(&project, fmt, /*force_executable=*/ true)?;
+    let bin = build_project(&project, opts, /*force_executable=*/ true)?;
 
     status(Status::Running, project.bin_name());
     let exit = Command::new(&bin)

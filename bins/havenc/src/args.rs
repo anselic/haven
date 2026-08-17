@@ -38,7 +38,11 @@ pub struct Args {
     pub compiler: String,
 
     /// LLVM IR compiler flags to pass to the compiler (e.g. `-O3 -Wall`, etc.)
-    #[arg(short='F', long, value_name = "FLAGS", default_value = "-O3 -Wno-override-module")]
+    ///
+    /// `allow_hyphen_values`, because every realistic value opens with `-O` and
+    /// would otherwise be read as another option unless spelled `-F=<flags>`.
+    #[arg(short='F', long, value_name = "FLAGS", allow_hyphen_values = true,
+          default_value = "-O3 -Wno-override-module")]
     pub compiler_flags: String,
 
     /// Compile as a shared dynamic library (.so / .dll / .dylib)

@@ -420,23 +420,41 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 }
             }
         }
-        Index { dst, slice, index, index_ty, element_ty } =>
-            // %result = getelementptr <PointeeTy>, ptr <BasePtr> {, <IdxTy> <Idx> }*
-            // The index type must match the operand's real width (e.g. a u64
-            // index emits an i64 operand), not a hardcoded i32.
-            //
-            // The stride is the element's *storage* type: a sequence of structs is
-            // contiguous inline `%Name` records (what `alloc`/`size_of` produce),
-            // not an array of `ptr` handles, so an aggregate element strides by its
-            // named type. For a scalar element this is identical to `emit_type`.
-            emitln!(cx, "    {dst} = getelementptr {}, ptr {slice}, {} {index}", emit_field_type(&element_ty, &cx.types, &cx.symbols), emit_type(&index_ty, &cx.types)),
+        // %result = getelementptr <PointeeTy>, ptr <BasePtr> {, <IdxTy> <Idx> }*
+        // The index type must match the operand's real width (e.g. a u64
+        // index emits an i64 operand), not a hardcoded i32.
+        //
+        // The stride is the element's *storage* type: a sequence of structs is
+        // contiguous inline `%Name` records (what `alloc`/`size_of` produce),
+        // not an array of `ptr` handles, so an aggregate element strides by its
+        // named type. For a scalar element this is identical to `emit_type`.
+        Index { dst, slice, index, index_ty, element_ty } => {
+            let elem = emit_field_type(&element_ty, &cx.types, &cx.symbols);
+            // LLVM widens a narrow gep index to pointer width by *sign*
+            // extension, whatever the source language meant by it. An unsigned
+            // index therefore addresses backwards once it passes half its range
+            // - `buf[i]` with a `u32` `i >= 2^31` reads 2^31 elements the wrong
+            // side of `buf` - so widen it here, explicitly and unsigned, rather
+            // than let the implicit rule pick. Cheaper as well as correct: the
+            // vectorizer has to guard a sign-extended induction variable against
+            // overflow before it can use it, and a `zext` needs no such guard.
+            match unsigned_narrow_index(&index_ty) {
+                Some(bits) => {
+                    emitln!(cx, "    {dst}.zx = zext i{bits} {index} to i64");
+                    emitln!(cx, "    {dst} = getelementptr {elem}, ptr {slice}, i64 {dst}.zx");
+                }
+                // Signed, or already pointer-width: the implicit widening is the
+                // one that was wanted.
+                None => emitln!(cx, "    {dst} = getelementptr {elem}, ptr {slice}, {} {index}", emit_type(&index_ty, &cx.types)),
+            }
+        }
         InsertValue { dst, elem, ty, val, index } =>
             emitln!(cx, "    {dst} = insertvalue {{ ptr, i32 }} {elem}, {} {}, {index}", emit_type(&ty, &cx.types), emit_value(val)),
         ExtractValue { dst, val, index } => emitln!(cx, "    {dst} = extractvalue {{ ptr, i32 }} {}, {index}", emit_value(val)),
 
-        Alloca { dst, ty, align } =>  emitln!(cx, "    {dst} = alloca {}, align {}", emit_type(&ty, &cx.types), align.unwrap_or(1)),
-        Store { ptr, val, ty, align } => emitln!(cx, "    store {} {}, ptr {ptr}, align {}", emit_type(&ty, &cx.types), emit_value(val), align.unwrap_or(1)),
-        Load { dst, ptr, ty, align } => emitln!(cx, "    {dst} = load {}, ptr {ptr}, align {}", emit_type(&ty, &cx.types), align.unwrap_or(1)),
+        Alloca { dst, ty, align } =>  emitln!(cx, "    {dst} = alloca {}{}", emit_type(&ty, &cx.types), align_suffix(align)),
+        Store { ptr, val, ty, align } => emitln!(cx, "    store {} {}, ptr {ptr}{}", emit_type(&ty, &cx.types), emit_value(val), align_suffix(align)),
+        Load { dst, ptr, ty, align } => emitln!(cx, "    {dst} = load {}, ptr {ptr}{}", emit_type(&ty, &cx.types), align_suffix(align)),
 
         // an array's elements are inline storage, so an array of structs is
         // `[N x %Name]` (matching a struct's array *field*, and `size_of`), not
@@ -446,7 +464,7 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             emitln!(cx, "    {dst} = getelementptr [{length} x {}], ptr {array}, i32 0, i32 {index}", emit_field_type(&ty, &cx.types, &cx.symbols)),
 
         AllocaStruct { dst, def, align } =>
-            emitln!(cx, "    {dst} = alloca %{}, align {}", cx.sym(def), align.unwrap_or(1)),
+            emitln!(cx, "    {dst} = alloca %{}{}", cx.sym(def), align_suffix(align)),
         FieldPtr { dst, struct_def, base, field_index } =>
             emitln!(cx, "    {dst} = getelementptr %{}, ptr {base}, i32 0, i32 {field_index}", cx.sym(struct_def)),
         // a zero-offset gep off the global symbol yields its address as a `ptr`
@@ -643,6 +661,43 @@ fn emit_block<'a>(cx: &mut EmitCtx<'a>, block: BasicBlock<'a>) {
     } else {
         panic!("block {} has no terminator", block.id);
     }
+}
+
+/// The bit width of an index type that is unsigned *and* narrower than a
+/// pointer - the only case where LLVM's implicit sign-extension of a gep index
+/// is the wrong widening. `None` for a signed index (sign-extension is right)
+/// and for a 64-bit one (already pointer width, nothing to widen).
+fn unsigned_narrow_index(ty: &Type<'_>) -> Option<u32> {
+    match ty {
+        Type::Uint8 => Some(8),
+        Type::Uint16 => Some(16),
+        Type::Uint32 => Some(32),
+        _ => None,
+    }
+}
+
+/// The `, align N` suffix for a `load`/`store`/`alloca`, or nothing at all.
+///
+/// Nothing is the interesting case. Omitted, LLVM assigns the *ABI alignment of
+/// the type* from the target data layout - which is the alignment haven's
+/// layout model already assumes everywhere else: aggregates are emitted as plain
+/// (unpacked) `%Name = type { .. }`, so LLVM is the one computing their field
+/// offsets and padding; `Sizeof` asks the data layout rather than counting bytes
+/// here; and an enum's payload blob picks an `[N x i64]`/`[N x i32]`/`[N x i8]`
+/// chunk type precisely so its ABI alignment covers the widest variant.
+///
+/// The previous `align.unwrap_or(1)` therefore did not describe a packed layout,
+/// it just declined to describe the real one - and cost every access for it.
+/// `align 1` on a vector load is an unaligned move, and it blocks any transform
+/// that needs a known alignment. An explicit `Some(n)` still wins, for a caller
+/// that knows better than the type does.
+///
+/// Deliberately *not* used by `emit_struct_to_regs`/`emit_regs_to_struct` below,
+/// which keep their hardcoded `align 1`: those read and write an eightbyte at a
+/// time through a struct whose own alignment may well be 4, so 1 is the true
+/// bound there rather than a missing one.
+fn align_suffix(align: Option<usize>) -> String {
+    align.map(|n| format!(", align {n}")).unwrap_or_default()
 }
 
 /// Emit loads pulling each eightbyte of a Direct-class struct out of the storage
