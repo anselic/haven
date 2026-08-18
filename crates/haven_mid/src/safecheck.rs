@@ -156,8 +156,8 @@ fn dirty_calls_stmt<'a>(clean: &CleanMap<'a>, locals: &mut Vec<&'a str>, r: &Res
             dirty
         }
 
-        StmtNode::Break | StmtNode::Continue => vec![],
-        StmtNode::Return(e) => dirty_calls_expr(clean, locals, r, e),
+        StmtNode::Break | StmtNode::Continue | StmtNode::Return(None) => vec![],
+        StmtNode::Return(Some(e)) => dirty_calls_expr(clean, locals, r, e),
     }
 }
 
@@ -224,8 +224,8 @@ fn collect_calls_stmt<'a>(calls: &mut HashSet<&'a str>, locals: &mut Vec<&'a str
                 locals.truncate(mark);
             }
         }
-        StmtNode::Return(e) => collect_calls_expr(calls, locals, r, e),
-        StmtNode::Break | StmtNode::Continue => {}
+        StmtNode::Return(Some(e)) => collect_calls_expr(calls, locals, r, e),
+        StmtNode::Return(None) | StmtNode::Break | StmtNode::Continue => {}
     }
 }
 

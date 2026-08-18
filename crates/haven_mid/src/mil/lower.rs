@@ -303,7 +303,13 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             cx.terminate(Terminator::Jump(cx.loop_stack.last().unwrap().break_block));
         }
 
-        StmtNode::Return(expr) => {
+        // `return;` in a void proc: nothing to compute, nothing to copy into an
+        // sret slot (a void proc has none), just leave.
+        StmtNode::Return(None) => {
+            cx.terminate(Terminator::Return(None));
+        }
+
+        StmtNode::Return(Some(expr)) => {
             let val = lower_expr(cx, expr);
             // `return abort(...)`: the operand already terminated the block with
             // `unreachable` and produced no real value. Nothing left to return.

@@ -1,0 +1,52 @@
+// `return;` - a return with no value, leaving a `void` proc early. It is only
+// legal where there is nothing to carry out (see fail/test_return_bare_nonvoid),
+// and it has to run the same drop glue that falling off the end of the proc
+// would: an owner live at the point of return is still destroyed on the way out.
+//@ exit: 0
+
+struct Res { id: i32 }
+
+extend Res: Delete {
+    proc delete(*self) { print("drop "); println(self.id); }
+}
+
+// early return out of a branch, with an owner live across it.
+proc guard(n: i32) void {
+    let r: Res = Res { id: n };
+    println(100 + n);
+    if (n < 0) {
+        return;
+    }
+    println(200 + n);
+}
+
+// early return from inside a loop - the return leaves the proc, not just the
+// loop, so the `999` below is unreachable when `limit` is in range.
+proc scan(limit: i32) void {
+    let i: i32 = 0;
+    while (i < 10) {
+        if (i == limit) {
+            println(i);
+            return;
+        }
+        i = i + 1;
+    }
+    println(999);
+}
+
+// a trailing `return;` is redundant but legal, and must not emit a second
+// terminator after the implicit one.
+proc trailing() void {
+    println(7);
+    return;
+}
+
+@export
+proc main() i32 {
+    guard(1);
+    guard(-1);
+    scan(3);
+    scan(50);
+    trailing();
+    return 0;
+}

@@ -88,11 +88,30 @@ fn lexer<'a> (
     Vec<Metadata<Token<'a>>>,
     extra::Err<Rich<'a, char>>,
 > {
+    // Both integer macros yield a `Result<_, String>` rather than failing the
+    // parser outright, because a literal that is out of range must not be left
+    // for another lexer alternative to reinterpret. `256u8` would otherwise
+    // backtrack and lex as `256` followed by a stray `u8`, and `0x100u8` as the
+    // decimal `0` followed by an identifier `x100u8` - in both cases the range
+    // error the author needs to see is replaced by a baffling one about the
+    // character after the digits. The `.validate` calls below report the message
+    // and keep going with a placeholder token.
     macro_rules! try_parse_int {
-        ($ty:ty, $val:expr, $span:expr) => {
+        ($ty:ty, $val:expr) => {
             $val.parse::<$ty>()
-                .map_err(|_| Rich::custom($span,
-                    format!("failed to parse literal: {} does not fit in {}", $val, stringify!($ty))))
+                .map_err(|_| format!("failed to parse literal: {} does not fit in {}",
+                    $val, stringify!($ty)))
+        };
+    }
+
+    // the same, for a `0x` literal whose digits have already been stripped of
+    // their prefix. Reported with the prefix back on, so the message quotes what
+    // was actually written.
+    macro_rules! try_parse_hex {
+        ($ty:ty, $val:expr) => {
+            <$ty>::from_str_radix($val, 16)
+                .map_err(|_| format!("failed to parse literal: 0x{} does not fit in {}",
+                    $val, stringify!($ty)))
         };
     }
 
@@ -118,6 +137,41 @@ fn lexer<'a> (
             }
         });
 
+    // `0x`-prefixed literals, for the places where the bit pattern *is* the
+    // meaning - ABI magic numbers, flag masks. They carry the same width
+    // suffixes as decimal literals and are otherwise the same token, so
+    // `0xFFu8` and `255u8` are indistinguishable past the lexer. Tried before
+    // `int` below, or the leading `0` would lex as a decimal literal and leave
+    // `x2A` behind as an identifier.
+    let hex = just("0x").or(just("0X"))
+        .ignore_then(text::digits(16).to_slice())
+        .then(
+            just('i').or(just('I')).or(just('u')).or(just('U'))
+                .map(|c| c.to_ascii_lowercase())
+                .then(text::int(10).from_str::<u32>().unwrapped())
+                .or_not()
+        ).validate(|(n, suffix): (&str, _), e, emitter| {
+            let parsed = match suffix {
+                Some(('i', 8))  => try_parse_hex!(i8, n).map(Token::Int8),
+                Some(('i', 16)) => try_parse_hex!(i16, n).map(Token::Int16),
+                Some(('i', 32)) => try_parse_hex!(i32, n).map(Token::Int32),
+                Some(('i', 64)) => try_parse_hex!(i64, n).map(Token::Int64),
+                Some(('u', 8))  => try_parse_hex!(u8, n).map(Token::Uint8),
+                Some(('u', 16)) => try_parse_hex!(u16, n).map(Token::Uint16),
+                Some(('u', 32)) => try_parse_hex!(u32, n).map(Token::Uint32),
+                Some(('u', 64)) => try_parse_hex!(u64, n).map(Token::Uint64),
+                None => try_parse_hex!(i128, n).map(Token::IntLit),
+                Some((other, width)) => Err(format!("invalid integer literal suffix '{other}{width}'")),
+            };
+            match parsed {
+                Ok(token) => token,
+                Err(msg) => {
+                    emitter.emit(Rich::custom(e.span(), msg));
+                    Token::IntLit(0)
+                }
+            }
+        });
+
     let int = text::int(10)
         .to_slice()
         .then(
@@ -125,21 +179,28 @@ fn lexer<'a> (
                 .map(|c| c.to_ascii_lowercase())
                 .then(text::int(10).from_str::<u32>().unwrapped())
                 .or_not()
-        ).try_map(|(n, suffix): (&str, _), span| {
-            match suffix {
-                Some(('i', 8))  => try_parse_int!(i8, n, span).map(Token::Int8),
-                Some(('i', 16)) => try_parse_int!(i16, n, span).map(Token::Int16),
-                Some(('i', 32)) => try_parse_int!(i32, n, span).map(Token::Int32),
-                Some(('i', 64)) => try_parse_int!(i64, n, span).map(Token::Int64),
-                Some(('u', 8))  => try_parse_int!(u8, n, span).map(Token::Uint8),
-                Some(('u', 16)) => try_parse_int!(u16, n, span).map(Token::Uint16),
-                Some(('u', 32)) => try_parse_int!(u32, n, span).map(Token::Uint32),
-                Some(('u', 64)) => try_parse_int!(u64, n, span).map(Token::Uint64),
+        ).validate(|(n, suffix): (&str, _), e, emitter| {
+            let parsed = match suffix {
+                Some(('i', 8))  => try_parse_int!(i8, n).map(Token::Int8),
+                Some(('i', 16)) => try_parse_int!(i16, n).map(Token::Int16),
+                Some(('i', 32)) => try_parse_int!(i32, n).map(Token::Int32),
+                Some(('i', 64)) => try_parse_int!(i64, n).map(Token::Int64),
+                Some(('u', 8))  => try_parse_int!(u8, n).map(Token::Uint8),
+                Some(('u', 16)) => try_parse_int!(u16, n).map(Token::Uint16),
+                Some(('u', 32)) => try_parse_int!(u32, n).map(Token::Uint32),
+                Some(('u', 64)) => try_parse_int!(u64, n).map(Token::Uint64),
                 // `i128` is wide enough to hold every `i64` and `u64` the literal
                 // could later be asked to be; anything past that has no possible
                 // target type, so it is a lex error either way.
-                None => try_parse_int!(i128, n, span).map(Token::IntLit),
-                Some((other, width)) => Err(Rich::custom(span, format!("invalid integer literal suffix '{other}{width}'"))),
+                None => try_parse_int!(i128, n).map(Token::IntLit),
+                Some((other, width)) => Err(format!("invalid integer literal suffix '{other}{width}'")),
+            };
+            match parsed {
+                Ok(token) => token,
+                Err(msg) => {
+                    emitter.emit(Rich::custom(e.span(), msg));
+                    Token::IntLit(0)
+                }
             }
         });
 
@@ -237,6 +298,7 @@ fn lexer<'a> (
     ));
 
     let token = float
+        .or(hex)
         .or(int)
         .or(str_)
         .or(fstr)
@@ -1193,8 +1255,9 @@ fn parse_stmt<'tks, 'src: 'tks>() -> P<'tks, 'src, Stmt<'src>> {
             just(Token::Break).to(StmtNode::Break),
         )).then_ignore(just(Token::Semicolon));
 
+        // the expression is optional: `return;` leaves a `void` proc early.
         let return_ = just(Token::Return)
-            .ignore_then(parse_expr())
+            .ignore_then(parse_expr().or_not())
             .then_ignore(just(Token::Semicolon))
             .map(StmtNode::Return);
 

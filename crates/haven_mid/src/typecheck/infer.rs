@@ -1601,8 +1601,18 @@ pub(crate) fn check_stmt<'a>(
             // nothing to check
         },
 
-        StmtNode::Return(expr) => {
+        StmtNode::Return(Some(expr)) => {
             check_expr(cx, return_ty, expr)?;
+        },
+
+        // `return;` carries nothing out, so it only means anything in a proc that
+        // returns nothing. Anywhere else the value the caller is owed is missing.
+        StmtNode::Return(None) => {
+            if *return_ty != Type::Void {
+                return Err(Error::new(stmt.span.clone(),
+                    format!("this proc returns '{}', so `return` needs a value", return_ty))
+                    .with_label(stmt.span.clone(), "expected `return <value>;`"));
+            }
         },
     }
 

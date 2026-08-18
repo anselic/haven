@@ -1008,7 +1008,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                     .map(|(p, body)| (p.clone(), Box::new(self.rebuild_stmt(body, b))))
                     .collect(),
             },
-            StmtNode::Return(e) => StmtNode::Return(self.rebuild_expr(e, b)),
+            StmtNode::Return(e) => StmtNode::Return(e.as_ref().map(|e| self.rebuild_expr(e, b))),
             StmtNode::Continue => StmtNode::Continue,
             StmtNode::Break => StmtNode::Break,
         };

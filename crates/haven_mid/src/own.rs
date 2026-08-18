@@ -392,7 +392,8 @@ impl<'a, 'c> Checker<'a, 'c> {
     /// as each is processed.
     fn hoist_stmt(&mut self, value: &mut StmtNode<'a>, decls: &mut Vec<Stmt<'a>>) {
         match value {
-            StmtNode::Expr(e) | StmtNode::Return(e) => self.hoist_temps(e, decls),
+            StmtNode::Expr(e) => self.hoist_temps(e, decls),
+            StmtNode::Return(Some(e)) => self.hoist_temps(e, decls),
             StmtNode::Declare { value, .. } => self.hoist_temps(value, decls),
             StmtNode::Assign { left, value } => {
                 self.hoist_temps(left, decls);
@@ -400,7 +401,7 @@ impl<'a, 'c> Checker<'a, 'c> {
             }
             StmtNode::If { condition, .. } => self.hoist_temps(condition, decls),
             StmtNode::While { .. } | StmtNode::Match { .. } | StmtNode::Block(_)
-            | StmtNode::Break | StmtNode::Continue => {}
+            | StmtNode::Return(None) | StmtNode::Break | StmtNode::Continue => {}
         }
     }
 
@@ -968,11 +969,21 @@ impl<'a, 'c> Checker<'a, 'c> {
                 all_diverge
             }
 
-            StmtNode::Return(e) => {
+            // `return;` carries no value, so there is nothing to consume and
+            // nothing that could read an owner on the way out - the scope's
+            // owners are simply dropped ahead of it.
+            StmtNode::Return(None) => {
+                let drops = self.unwind(0, span);
+                out.extend(drops);
+                out.push(Metadata { span, id, value: StmtNode::Return(None) });
+                true
+            }
+
+            StmtNode::Return(Some(e)) => {
                 self.consume(&e);
                 let drops = self.unwind(0, span);
                 if drops.is_empty() {
-                    out.push(Metadata { span, id, value: StmtNode::Return(e) });
+                    out.push(Metadata { span, id, value: StmtNode::Return(Some(e)) });
                 } else if self.ret_ty == Type::Void {
                     // nothing carries a value out, so the owners can go first -
                     // as long as the returned expression does not read them.
@@ -983,7 +994,7 @@ impl<'a, 'c> Checker<'a, 'c> {
                             .with_label(span, "but the returned expression reads it"));
                     }
                     out.extend(drops);
-                    out.push(Metadata { span, id, value: StmtNode::Return(e) });
+                    out.push(Metadata { span, id, value: StmtNode::Return(Some(e)) });
                 } else {
                     // the value has to be computed before this scope's owners are
                     // destroyed - it may well be reading them - so it is bound to
@@ -996,7 +1007,7 @@ impl<'a, 'c> Checker<'a, 'c> {
                     self.cx.resolved.insert(var.id, Binding::Local(decl.id));
                     out.push(decl);
                     out.extend(drops);
-                    out.push(Metadata { span, id, value: StmtNode::Return(var) });
+                    out.push(Metadata { span, id, value: StmtNode::Return(Some(var)) });
                 }
                 true
             }

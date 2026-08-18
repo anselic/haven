@@ -19,14 +19,14 @@ extend Gain: Plugin {
     proc vendor() str { return "Haven"; }
     proc version() str { return "1.0.0"; }
     proc category() str { return "audio-effect"; }
-    proc channels() u32 { return 2u32; }
-    proc param_count() u32 { return 1u32; }
+    proc channels() u32 { return 2; }
+    proc param_count() u32 { return 1; }
     proc param(index: u32) FloatParam {
-        return FloatParam::new(0u32, "Gain", 0.0f64, 2.0f64, 1.0f64);
+        return FloatParam::new(0u32, "Gain", 0.0, 2.0, 1.0);
     }
     // construct fresh state
     proc new() Self {
-        return Self { gain: 1.0f64, sample_rate: 44100.0f64 };
+        return Self { gain: 1.0, sample_rate: 44100.0 };
     }
 
     // --- live state ---
@@ -43,17 +43,17 @@ extend Gain: Plugin {
         let outs = ctx.audio_outputs;
         let ins = ctx.audio_inputs;
         let channels = outs.channel_count;
-        let ch = 0u32;
+        let ch: u32 = 0;
 
         while (ch < channels) {
             let src = ins.data32[ch];
             let dst = outs.data32[ch];
-            let i = 0u32;
+            let i: u32 = 0;
             while (i < frames) {
                 dst[i] = numerical_cast::<f32>(numerical_cast::<f64>(src[i]) * g);
-                i = i + 1u32;
+                i = i + 1;
             }
-            ch = ch + 1u32;
+            ch = ch + 1;
         }
 
         return ClapProcessStatus::Continue;
@@ -61,7 +61,7 @@ extend Gain: Plugin {
 }
 
 @export const clap_entry: ClapPluginEntry = ClapPluginEntry {
-    clap_version: ClapVersion { major: 1u32, minor: 2u32, revision: 2u32 },
+    clap_version: ClapVersion { major: 1, minor: 2, revision: 2 },
     init: plug_entry_init::<Gain>,
     deinit: plug_entry_deinit::<Gain>,
     get_factory: plug_entry_get_factory::<Gain>,

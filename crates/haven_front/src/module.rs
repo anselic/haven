@@ -727,8 +727,8 @@ fn self_subst_stmt<'a>(s: &mut Stmt<'a>, target: &Type<'a>, head: Option<&Path<'
                 self_subst_stmt(body, target, head);
             }
         }
-        StmtNode::Return(e) => self_subst_expr(e, target, head),
-        StmtNode::Continue | StmtNode::Break => {}
+        StmtNode::Return(Some(e)) => self_subst_expr(e, target, head),
+        StmtNode::Return(None) | StmtNode::Continue | StmtNode::Break => {}
     }
 }
 
@@ -1558,8 +1558,8 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                     self.locals.truncate(mark);
                 }
             }
-            StmtNode::Return(e) => self.expr(e, gparams),
-            StmtNode::Continue | StmtNode::Break => {}
+            StmtNode::Return(Some(e)) => self.expr(e, gparams),
+            StmtNode::Return(None) | StmtNode::Continue | StmtNode::Break => {}
         }
     }
 

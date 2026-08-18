@@ -21,9 +21,9 @@ trap 'rm -rf "$tmp"' EXIT
 # artifact and point $HAVEN_STD at it, exactly as the test harness does.
 echo "building std.hvmeta..."
 export HAVEN_STD="$tmp/std.hvmeta"
-"$bin" "$root/std/src/lib.hv" --lib --package-name std --prelude std \
-    --c-file "$root/std/c/rt.c" --c-file "$root/std/c/env.c" \
-    --c-file "$root/std/c/fs.c" --c-file "$root/std/c/process.c" \
+"$bin" "$root/stdlib/std/src/lib.hv" --lib --package-name std --prelude std \
+    --c-file "$root/stdlib/std/c/rt.c" --c-file "$root/stdlib/std/c/env.c" \
+    --c-file "$root/stdlib/std/c/fs.c" --c-file "$root/stdlib/std/c/process.c" \
     --link-lib m -o "$HAVEN_STD"
 
 for f in "$here/run"/*.hv; do

@@ -1,0 +1,9 @@
+// A suffixed hex literal is range-checked against the width it names, the same
+// way a decimal one is: `0x100` needs nine bits and `u8` has eight.
+//@ error: does not fit in u8
+
+@export
+proc main() i32 {
+    let mask: u8 = 0x100u8;
+    return 0;
+}

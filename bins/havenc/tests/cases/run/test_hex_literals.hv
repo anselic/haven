@@ -1,0 +1,35 @@
+// Hex integer literals: `0x`/`0X`, upper- or lower-case digits, carrying the
+// same width suffixes as decimal literals. A hex literal is the same token as
+// the decimal one past the lexer, so `0xFF` and `255` are interchangeable - the
+// point is only that a bit pattern can be written as a bit pattern.
+
+@export
+proc main() i32 {
+    println(0x2A);        // 42  - unsuffixed, width from context
+    println(0x2a);        // 42  - lower-case digits
+    println(0X2A);        // 42  - upper-case prefix
+    println(0xff);        // 255
+    println(0x0);         // 0
+
+    // suffixed, one per width. The unsigned ones print through the same
+    // `println`, so they are compared as the values they denote.
+    println(numerical_cast::<i32>(0x7Fi8));  // 127  - i8 max (i8 has no Display)
+    println(0x7FFFi16);   // 32767
+    println(0x7FFFFFFFi32);          // 2147483647
+    println(0x7FFFFFFFFFFFFFFFi64);  // 9223372036854775807
+    println(0xFFu8);      // 255  - u8 max, would not fit i8
+    println(0xFFFFu16);   // 65535
+    println(0xFFFFFFFFu32);          // 4294967295
+
+    // the shape this was added for: a magic number and a flag mask.
+    let magic: u32 = 0x4C505648u32;
+    println(magic);       // 1280333384
+    let flags: u32 = 0x1u32 | 0x20u32;
+    println(flags);       // 33
+
+    // hex and decimal are the same value, so arithmetic mixes freely.
+    println(0x10 + 16);   // 32
+    println(0xF & 0x9);   // 9
+
+    return 0;
+}

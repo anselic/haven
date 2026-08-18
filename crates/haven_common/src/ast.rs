@@ -900,7 +900,9 @@ pub enum StmtNode<'a> {
     // TODO add label? (e.g. `continue 'label;`)
     Continue,
     Break,
-    Return(Expr<'a>),
+    /// `return e;`, or `return;` - the bare form only makes sense in a proc
+    /// returning `void`, which typecheck enforces.
+    Return(Option<Expr<'a>>),
 }
 
 /// A `match` arm pattern.
@@ -983,7 +985,8 @@ impl<'a> Display for StmtNode<'a> {
 
             StmtNode::Continue => write!(f, "continue"),
             StmtNode::Break => write!(f, "break"),
-            StmtNode::Return(expr) => write!(f, "return {}", expr.value),
+            StmtNode::Return(Some(expr)) => write!(f, "return {}", expr.value),
+            StmtNode::Return(None) => write!(f, "return"),
         }
     }
 }

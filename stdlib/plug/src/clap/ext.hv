@@ -9,7 +9,7 @@
 // `char name[CLAP_NAME_SIZE]` fields are `[u8; 256]`; `char module[CLAP_PATH_SIZE]`
 // is `[u8; 1024]`. CLAP_NAME_SIZE = 256, CLAP_PATH_SIZE = 1024.
 
-import plugin { ClapPlugin }
+import plugin { ClapPlugin, ClapHost }
 import events { ClapInputEvents, ClapOutputEvents }
 
 pub const CLAP_NAME_SIZE: u64 = 256u64;
@@ -109,6 +109,22 @@ pub struct ClapPluginParams {
     value_to_text: proc(*ClapPlugin, u32, f64, *u8, u32) bool,
     text_to_value: proc(*ClapPlugin, u32, str, *f64) bool,
     flush: proc(*ClapPlugin, *ClapInputEvents, *ClapOutputEvents) void,
+}
+
+// The *host* side of the same extension, fetched with the same id from
+// `host.get_extension`. A host caches parameter values, so whenever a plugin
+// changes them on its own - loading state is the usual case - it has to say so
+// here or the host keeps showing the old ones.
+pub const CLAP_PARAM_RESCAN_VALUES: u32 = 1u32; // 1 << 0
+pub const CLAP_PARAM_RESCAN_TEXT: u32 = 2u32;   // 1 << 1
+pub const CLAP_PARAM_RESCAN_INFO: u32 = 4u32;   // 1 << 2
+pub const CLAP_PARAM_RESCAN_ALL: u32 = 8u32;    // 1 << 3
+
+@repr(C)
+pub struct ClapHostParams {
+    rescan: proc(*ClapHost, u32) void,
+    clear: proc(*ClapHost, u32, u32) void,
+    request_flush: proc(*ClapHost) void,
 }
 
 // --- ext/state.h ----------------------------------------------------------

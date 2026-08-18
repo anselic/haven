@@ -1,0 +1,15 @@
+// `return;` carries nothing out, so it is only meaningful in a proc that returns
+// nothing. In one that owes its caller a value, the value is simply missing.
+//@ error: needs a value
+
+proc pick(n: i32) i32 {
+    if (n < 0) {
+        return;
+    }
+    return n;
+}
+
+@export
+proc main() i32 {
+    return pick(1);
+}
