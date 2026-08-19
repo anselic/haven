@@ -1,0 +1,139 @@
+import plug/clap/version { ClapVersion }
+import plug/clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }
+import plug/clap/plugin { ClapPluginEntry }
+import plug {
+    Plugin, FloatParam,
+    plug_entry_init, plug_entry_deinit, plug_entry_get_factory,
+}
+import dsp/filters { Biquad }
+
+// The lowpass runs one biquad per channel: a filter's state is the tail of the
+// signal that went through it, so channels cannot share one.
+const CHANNELS: u32 = 2;
+
+// Butterworth Q
+const LP_Q: f32 = 0.70710677;
+
+// The plugin's state
+struct ExamplePlugin {
+    gain: f64,
+    lowpass: f64,
+    sample_rate: f64,
+    filters: [Biquad; 2],
+    // The cutoff `filters` currently holds. Coefficients cost a few
+    // transcendentals, so they are recomputed when the knob moves rather than
+    // once per block.
+    tuned: f64,
+
+    // Rebuild the coefficients for the current cutoff and sample rate.
+    //
+    // `set` writes the new response into the existing filters instead of
+    // replacing them, which keeps `s1`/`s2` - the last two samples still working
+    // their way out - so sweeping the knob does not click.
+    proc retune(*self) {
+        // A biquad's coefficients degenerate as the cutoff approaches Nyquist
+        // (`alpha` goes to zero and the section stops being a lowpass), so the
+        // top of the knob's range is clamped short of it rather than trusted.
+        let limit: f64 = self.sample_rate * 0.49;
+        let cutoff: f64 = self.lowpass;
+        if (cutoff > limit) { cutoff = limit; }
+
+        let response: Biquad = Biquad::lowpass(
+            numerical_cast::<f32>(cutoff),
+            LP_Q,
+            numerical_cast::<f32>(self.sample_rate));
+
+        let ch: u32 = 0;
+        while (ch < CHANNELS) {
+            self.filters[ch].set(response);
+            ch = ch + 1;
+        }
+        self.tuned = self.lowpass;
+    }
+}
+
+extend ExamplePlugin: Plugin {
+    // --- metadata + static descriptors ---
+    proc id() str { return "com.haven.gain"; }
+    proc name() str { return "Example Plugin"; }
+    proc vendor() str { return "Haven"; }
+    proc version() str { return "1.0.0"; }
+    proc category() str { return "audio-effect"; }
+    proc channels() u32 { return 2; }
+    proc param_count() u32 { return 2; }
+    proc param(index: u32) FloatParam {
+        if (index == 0) {
+            return FloatParam::new(0, "Gain", 0.0, 2.0, 1.0);
+        } else {
+            return FloatParam::new(1, "Lowpass", 25.0, 22000.0, 22000.0);
+        }
+    }
+    // construct fresh state
+    proc new() Self {
+        return Self {
+            gain: 1.0,
+            lowpass: 22000.0,
+            sample_rate: 44100.0,
+            // real coefficients arrive from `activate`, which is the first place
+            // the actual sample rate is known.
+            filters: [Biquad::lowpass(22000.0, LP_Q, 44100.0),
+                      Biquad::lowpass(22000.0, LP_Q, 44100.0)],
+            tuned: 22000.0,
+        };
+    }
+
+    // --- live state ---
+    proc activate(*self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        self.retune();
+    }
+    proc param_get(*self, id: u32) f64 {
+        if (id == 0) {
+            return self.gain;
+        } else {
+            return self.lowpass;
+        }
+    }
+    proc param_set(*self, id: u32, value: f64) {
+        if (id == 0) {
+            self.gain = value;
+        } else {
+            self.lowpass = value;
+        }
+    }
+
+    proc process(*self, ctx: *ClapProcess) ClapProcessStatus {
+        // Parameter events for this block have already been applied, so one
+        // check per block catches every move of the knob.
+        if (self.lowpass != self.tuned) { self.retune(); }
+
+        let g = numerical_cast::<f32>(self.gain);
+        let frames = ctx.frames_count;
+        let outs = ctx.audio_outputs;
+        let ins = ctx.audio_inputs;
+        let channels = outs.channel_count;
+        if (channels > CHANNELS) { channels = CHANNELS; }
+        let ch: u32 = 0;
+
+        while (ch < channels) {
+            let src = ins.data32[ch];
+            let dst = outs.data32[ch];
+            let filter = &self.filters[ch];
+            let i: u32 = 0;
+            while (i < frames) {
+                dst[i] = filter.process(src[i]) * g;
+                i = i + 1;
+            }
+            ch = ch + 1;
+        }
+
+        return ClapProcessStatus::Continue;
+    }
+}
+
+@export const clap_entry: ClapPluginEntry = ClapPluginEntry {
+    clap_version: ClapVersion { major: 1, minor: 2, revision: 2 },
+    init: plug_entry_init::<ExamplePlugin>,
+    deinit: plug_entry_deinit::<ExamplePlugin>,
+    get_factory: plug_entry_get_factory::<ExamplePlugin>,
+};

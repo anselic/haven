@@ -1,8 +1,9 @@
 [project]
-name = "gain"
+name = "example_plugin"
 version = "0.1.0"
 kind = ["cdylib"]
 build = "build.hv"
 
 [dependencies]
 plug = { path = "../../stdlib/plug" }
+dsp = { path = "../../stdlib/dsp" }

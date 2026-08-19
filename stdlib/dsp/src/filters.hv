@@ -153,6 +153,18 @@ pub struct Biquad {
             (a + 1.0) - (a - 1.0) * cs - ta);
     }
 
+    /// Retune to `other`'s response, keeping the running state, so a filter can
+    /// be moved mid-stream without the discontinuity a fresh one would produce:
+    ///
+    ///     f.set(Biquad::lowpass(cutoff, q, sr));
+    pub proc set(*self, other: Biquad) {
+        self.b0 = other.b0;
+        self.b1 = other.b1;
+        self.b2 = other.b2;
+        self.a1 = other.a1;
+        self.a2 = other.a2;
+    }
+
     /// Filter one input sample `x`, returning the filtered output.
     @alloc(false)
     pub proc process(*self, x: f32) f32 {
