@@ -315,7 +315,7 @@ pub(crate) fn check_generic_call<'a>(
     // is all-or-nothing, either every param is written or every param is inferred.
     let (type_bindings, const_bindings, inferred) = if type_args.is_empty() {
         let (tb, cb) = infer_type_args(cx, name, sig, args, span)?;
-        let materialized = materialize_targs(name, &sig.generics, &tb, &cb, span)?;
+        let materialized = materialize_targs(name, &sig.generics, &tb, &cb, TargSite::Call, span)?;
         (tb, cb, Some(materialized))
     } else if type_args.len() == sig.generics.len() {
         let (tb, cb) = bind_turbofish(cx, name, &sig.generics, type_args, span)?;
@@ -371,6 +371,91 @@ fn infer_type_args<'a>(
     Ok((u.types, u.consts))
 }
 
+/// Recover a generic struct's type arguments from the values its literal gives
+/// its fields, for a literal written without a turbofish (`Serial { a: x, b: y }`
+/// rather than `Serial::<A, B> { .. }`).
+///
+/// The struct-literal counterpart of [`infer_type_args`], and deliberately the
+/// same shape: each declared field type is a pattern over the struct's params,
+/// and unifying it against the inferred field-value type binds whatever params
+/// appear in it. `a: A` against a `Gain` value binds `A = Gain`.
+///
+/// Best-effort per field, for the same reason: a field sharing no structure with
+/// its value binds nothing and is reported by [`materialize_targs`], while a
+/// structural mismatch is left to the `check_expr` pass below, whose message
+/// names the concrete types.
+///
+/// Fields are matched positionally against the declaration, which is what the
+/// caller enforces anyway - a literal must list every field in order - so a
+/// literal with the wrong arity or a misspelled field simply binds less and
+/// falls through to that check.
+pub(crate) fn infer_struct_type_args<'a>(
+    cx: &mut Context<'a>,
+    name: &str,
+    params: &[GenericParam<'a>],
+    def: &[(&'a str, Type<'a>)],
+    fields: &[(&'a str, Expr<'a>)],
+    span: &Span,
+) -> Result<Vec<GenericArg<'a>>, Error> {
+    let pnames = param_names(params);
+    let mut u = Unified::default();
+    for ((def_name, def_ty), (lit_name, lit_value)) in def.iter().zip(fields) {
+        if def_name != lit_name { break; }
+        // a field whose type mentions no parameter can teach us nothing, and
+        // inferring its value would only risk a spurious error ahead of the real
+        // per-field check.
+        if !mentions_param(def_ty, &pnames) { continue; }
+        let Ok(arg_ty) = infer(cx, lit_value) else { continue };
+        unify(def_ty, &arg_ty, &pnames, &mut u);
+    }
+    check_bounds(cx, name, params, &u.types, span)?;
+    materialize_targs(name, params, &u.types, &u.consts, TargSite::StructLit, span)
+}
+
+/// Whether `ty` mentions any of `params` anywhere inside it.
+fn mentions_param<'a>(ty: &Type<'a>, params: &[&'a str]) -> bool {
+    match ty {
+        Type::Param(n) => params.contains(n),
+        Type::Pointer(t) | Type::Slice(t) => mentions_param(t, params),
+        Type::Array(t, n) | Type::Simd(t, n) =>
+            mentions_param(t, params)
+                || matches!(n, ConstVal::Param(p) if params.contains(p)),
+        Type::Named { args, .. } => args.iter().any(|a| match a {
+            GenericArg::Type(t) => mentions_param(t, params),
+            GenericArg::Const(ConstVal::Param(p)) => params.contains(p),
+            GenericArg::Const(_) => false,
+        }),
+        Type::Function { params: ps, return_type } =>
+            ps.iter().any(|t| mentions_param(t, params)) || mentions_param(return_type, params),
+        _ => false,
+    }
+}
+
+/// Which syntax the args were being recovered from, so an "unbound parameter"
+/// message can name what the reader actually wrote. The two differ only in
+/// wording; a call is inferred from arguments and spelled with parentheses, a
+/// literal from field values and spelled with braces.
+#[derive(Clone, Copy)]
+pub(crate) enum TargSite { Call, StructLit }
+
+impl TargSite {
+    /// What failed to determine the parameter.
+    fn source(self) -> &'static str {
+        match self {
+            TargSite::Call => "not determined by these arguments",
+            TargSite::StructLit => "not determined by these field values",
+        }
+    }
+    /// How to write the turbofish explicitly instead.
+    fn example(self, name: &str) -> String {
+        match self {
+            TargSite::Call => format!("specify it explicitly, e.g. `{}::<...>(...)`", name),
+            TargSite::StructLit =>
+                format!("specify it explicitly, e.g. `{}::<...> {{ ... }}`", name),
+        }
+    }
+}
+
 /// Assemble inferred bindings into a positional turbofish, in the callee's
 /// declared param order, so monomorphization consumes it exactly as if the user
 /// had written `name::<...>`. Errors if any generic went unbound.
@@ -379,6 +464,7 @@ fn materialize_targs<'a>(
     generics: &[GenericParam<'a>],
     types: &HashMap<&'a str, Type<'a>>,
     consts: &HashMap<&'a str, ConstVal<'a>>,
+    site: TargSite,
     span: &Span,
 ) -> Result<Vec<GenericArg<'a>>, Error> {
     let mut out = Vec::with_capacity(generics.len());
@@ -398,9 +484,8 @@ fn materialize_targs<'a>(
                 };
                 return Err(Error::new(span.clone(),
                     format!("cannot infer type argument `{}` for `{}`", pn, name))
-                    .with_label(span.clone(), "not determined by these arguments")
-                    .with_note(format!(
-                        "specify it explicitly, e.g. `{}::<...>(...)`", name)));
+                    .with_label(span.clone(), site.source())
+                    .with_note(site.example(name)));
             }
         }
     }

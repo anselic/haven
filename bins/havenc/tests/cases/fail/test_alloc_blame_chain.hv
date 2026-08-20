@@ -1,0 +1,22 @@
+// A violation names the leaf that actually allocates, not just the immediate
+// callee.
+//
+// Dirtiness propagates *up* the call graph, so the callee a violation blames is
+// usually a wrapper that allocates nothing itself - with a generic combinator it
+// nearly always is. Reporting only `outer` would point at the one function in
+// the chain that is innocent, leaving the reader to walk the graph by hand.
+//@ error: marked as @alloc(false)
+//@ error: allocation reaches it through
+// the chain names each hop; the symbols are package-mangled, so match the shape
+// (`outer` -> `middle` -> the extern) rather than any one spelling.
+//@ error: $middle
+//@ error: rt_puts
+
+proc outer() { middle(); }
+proc middle() { println(0); }   // `println` is an unannotated extern: dirty
+
+@alloc(false)
+@export
+proc main() {
+    outer();
+}

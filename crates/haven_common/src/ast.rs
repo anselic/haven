@@ -1198,6 +1198,10 @@ pub struct MethodNode<'a> {
     pub receiver: Receiver,
     pub name: &'a str,
     pub generics: Vec<GenericParam<'a>>,
+    /// A `where T: Bound` clause on the method's *own* binder, merged into
+    /// `generics` by `haven_front::module`. Distinct from the enclosing
+    /// `extend` block's clause, which bounds the impl's parameters instead.
+    pub where_bounds: Vec<GenericParam<'a>>,
     pub params: Vec<(&'a str, Type<'a>)>,
     pub return_type: Type<'a>,
     pub body: Vec<Stmt<'a>>,
@@ -1304,6 +1308,12 @@ pub enum TopLevelNode<'a> {
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
         generics: Vec<GenericParam<'a>>,
+        /// A `where T: Bound` clause, kept separate from `generics` only until
+        /// `haven_front::module` merges it in. Writing a bound in the binder
+        /// (`<T: Bound>`) and writing it in a clause mean the same thing; the
+        /// clause exists so a long signature can put its bounds after the
+        /// return type instead of crowding the binder.
+        where_bounds: Vec<GenericParam<'a>>,
         params: Vec<(&'a str, Type<'a>)>,
         return_type: Type<'a>,
         body: Vec<Stmt<'a>>,

@@ -1,0 +1,39 @@
+// A generic struct literal written without a turbofish recovers its type
+// arguments from the values it gives its fields, exactly as a bare call recovers
+// a callee's from its arguments: each declared field type is a pattern over the
+// struct's parameters, and the field value's type fills it in.
+//
+// The turbofish is still accepted, and is still the only way to construct a
+// struct whose parameter no field mentions (see
+// `fail/test_generic_struct_infer_undetermined`).
+
+struct Pair<A, B> { a: A, b: B }
+struct Buf<T, const N: u64> { items: [T; N] }
+struct Nest<T> { inner: Pair<T, i32> }
+
+@export
+proc main() i32 {
+    // one parameter per field, bound from the values
+    let p = Pair { a: 1i32, b: true };
+    println(p.a);       // 1
+    println(p.b);       // true
+
+    // a nested generic literal is itself inferred, then binds the outer `T`
+    let n = Nest { inner: Pair { a: 7i32, b: 9 } };
+    println(n.inner.a); // 7
+
+    // a const parameter comes back from the array literal's length
+    let bf = Buf { items: [4i32, 5, 6] };
+    println(bf.items[2]);  // 6
+
+    // an explicit turbofish still wins, and still drives the literals' types
+    let q = Pair::<f32, i32> { a: 1.5, b: 2 };
+    println(q.a);       // 1.5
+    println(q.b);       // 2
+
+    // inference reaches a field whose type is a parameter behind structure
+    let s = Pair { a: [1i32, 2], b: 3i64 };
+    println(s.a[1]);    // 2
+    println(s.b);       // 3
+    return 0;
+}

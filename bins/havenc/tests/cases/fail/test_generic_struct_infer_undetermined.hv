@@ -1,0 +1,18 @@
+// Field values bind only the parameters the fields' declared types mention. `T`
+// appears in no field of `Phantom`, so no literal can determine it and the
+// turbofish is the only way to say what it is.
+//
+// The message is the struct-literal wording, not the call wording it shares an
+// implementation with: what failed to determine `T` is a set of *field values*,
+// and the fix is spelled with braces.
+//@ error: cannot infer type argument `T` for `Phantom`
+//@ error: not determined by these field values
+//@ error: Phantom::<...> { ... }
+
+struct Phantom<T> { n: i32 }
+
+@export
+proc main() i32 {
+    let p = Phantom { n: 1 };
+    return 0;
+}

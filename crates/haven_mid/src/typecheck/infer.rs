@@ -3,7 +3,7 @@ use haven_common::ast::*;
 use crate::intrinsics::Intrinsic;
 use haven_common::defs::{DefId, Member};
 use super::context::{Context, MethodCall, RecvAdjust};
-use super::generics::{bind_generics, bind_turbofish, check_bounds, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self};
+use super::generics::{bind_generics, bind_turbofish, check_bounds, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self, infer_struct_type_args};
 use super::enums::{enum_variant, split_enum_variant, enum_variant_ctor, check_variant_pattern};
 
 
@@ -996,19 +996,24 @@ pub(crate) fn infer<'a>(
 
             // Bind the struct's params to the turbofish args so `Param` field types
             // check against a concrete type (and `[T; N]` sizes against a concrete
-            // count). Non-generic structs take no args; a generic struct requires
-            // them (no context inference yet). `struct_args` are the resolved args
-            // in declaration order.
+            // count). Non-generic structs take no args; a generic struct either
+            // carries a turbofish or has its args recovered from the field values,
+            // exactly as a bare call recovers a callee's from its arguments.
+            // `struct_args` are the resolved args in declaration order.
             let (type_subst, const_subst, struct_args) = match cx.generic_structs.get(&tdef).cloned() {
                 Some(params) => {
-                    if type_args.is_empty() {
-                        return Err(Error::new(span,
-                            format!("struct '{}' is generic", name))
-                            .with_label(span, "missing type arguments")
-                            .with_note(format!(
-                                "construct it as `{}::<...> {{ ... }}`", name)));
-                    }
-                    bind_struct_generics(cx, &name, &params, type_args, &span)?
+                    let args: Vec<GenericArg<'a>> = if type_args.is_empty() {
+                        let inferred =
+                            infer_struct_type_args(cx, &name, &params, &def, fields, &span)?;
+                        // a literal with no turbofish keeps an empty `type_args`,
+                        // so record the recovered args under the node id for mono
+                        // to pick up - the same channel a bare generic call uses.
+                        cx.inferred_type_args.insert(expr.id, inferred.clone());
+                        inferred
+                    } else {
+                        type_args.to_vec()
+                    };
+                    bind_struct_generics(cx, &name, &params, &args, &span)?
                 }
                 None => {
                     if !type_args.is_empty() {

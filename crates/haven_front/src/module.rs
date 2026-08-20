@@ -443,23 +443,32 @@ fn resolve_bound_defs<'a>(generics: &[GenericParam<'a>], scopes: &Scopes<'a>) ->
     }).collect()
 }
 
-/// Merge an `extend` block's `where` clause onto the parameters inferred from
-/// its target, so `extend Vec<T>: Display where T: Display` leaves `T` carrying
-/// the bound that lets the body call `self.a.display()`.
+/// Whichever binder a `where` clause is attached to. Only the diagnostic differs:
+/// an `extend` block's parameters are *inferred from its target*, so an unbound
+/// name means the target does not mention it, while a `proc` writes its
+/// parameters out and an unbound name means they simply do not include it.
+enum WhereOwner<'x, 'a> {
+    Extend(&'x Type<'a>),
+    Proc(&'x str),
+}
+
+/// Merge a `where` clause onto the parameters it bounds, so `extend Vec<T>:
+/// Display where T: Display` leaves `T` carrying the bound that lets the body
+/// call `self.a.display()` - and likewise for `proc f<T>(..) where T: Display`.
 ///
-/// A clause naming something the target does not bind is an error rather than a
+/// A clause naming something the binder does not bind is an error rather than a
 /// silent no-op: `where U: Display` on `extend Vec<T>` binds nothing, and the
 /// method body would then fail much later with "no method on type parameter",
 /// pointing at the call instead of at the typo. The check also catches the
 /// tempting `where Vec: Display` - a *bound on the target itself*, which is not
 /// a thing an impl can state.
 ///
-/// `reported` deduplicates: the clause is copied onto every method of its block,
-/// so without it a one-line typo would produce one error per method.
+/// `reported` deduplicates: an `extend` clause is copied onto every method of
+/// its block, so without it a one-line typo would produce one error per method.
 fn apply_where_bounds<'a>(
     generics: &mut [GenericParam<'a>],
     where_bounds: &[GenericParam<'a>],
-    target: &Type<'a>,
+    owner: WhereOwner<'_, 'a>,
     span: &Span,
     reported: &mut HashSet<(usize, &'a str)>,
     errs: &mut Vec<Error>,
@@ -478,14 +487,25 @@ fn apply_where_bounds<'a>(
             }
             _ => {
                 if reported.insert((span.start, wname)) {
+                    let (label, note) = match &owner {
+                        WhereOwner::Extend(target) => (
+                            format!("`extend {}` does not bind '{}'", target, wname),
+                            format!(
+                                "an `extend` block's type parameters are inferred from its \
+                                 target, so only a name appearing inside `{}` can be bounded \
+                                 here",
+                                target)),
+                        WhereOwner::Proc(pname) => (
+                            format!("`proc {}` declares no type parameter '{}'", pname, wname),
+                            format!(
+                                "a `where` clause bounds a parameter the binder already \
+                                 declares; write `proc {}<{}>(..)` if it was meant to be one",
+                                pname, wname)),
+                    };
                     errs.push(Error::new(span.clone(),
                         format!("unbound type parameter '{}' in `where`", wname))
-                        .with_label(span.clone(),
-                            format!("`extend {}` does not bind '{}'", target, wname))
-                        .with_note(format!(
-                            "an `extend` block's type parameters are inferred from its \
-                             target, so only a name appearing inside `{}` can be bounded here",
-                            target)));
+                        .with_label(span.clone(), label)
+                        .with_note(note));
                 }
             }
         }
@@ -830,6 +850,10 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                     attributes: mnode.attributes.clone(),
                     // the impl's own parameters are prepended in `load_and_merge`.
                     generics: mnode.generics.clone(),
+                    // merged there too, once those parameters are in place - a
+                    // method's clause may bound one of them as readily as one of
+                    // its own.
+                    where_bounds: mnode.where_bounds.clone(),
                     params,
                     return_type,
                     body,
@@ -1254,6 +1278,17 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         // when it came from a directory import (`dsp::osc::Osc`), so walk it
         // rather than assuming exactly one.
         let segs = &path.segments;
+        // ...unless the qualifier is a type parameter of the enclosing item, in
+        // which case this is an associated-type projection (`A::Item` where
+        // `A: Iterator`), not a module path at all. It is not supported yet, and
+        // saying so beats sending the reader after an import that would not help:
+        // `A` is bound by the signature they are looking at.
+        if segs.len() == 2 && gparams.contains(segs[0]) {
+            self.error_here(format!(
+                "associated type projection '{}::{}' is not supported yet",
+                segs[0], segs[1]));
+            return TypeHead::Param(path.last());
+        }
         let Some((scope, n)) = self.qual_prefix(segs) else {
             self.error_here(format!(
                 "unknown module qualifier '{}' (did you `import .../{}`?)", segs[0], segs[0]));
@@ -1295,6 +1330,25 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             if in_call && Intrinsic::lookup(one).is_some() {
                 // a compiler intrinsic (`sizeof`, `null`, `__simd_*`): not declared
                 // in any module, resolved by the typechecker. leave it untouched.
+                return Some(one);
+            }
+            // A generic parameter of the enclosing item, read in value position.
+            // A `const` one declared in a binder is pushed as a local above and
+            // never reaches here; what does reach here is a parameter *inferred
+            // from an `extend` target*, where `Cascade<A, N>` cannot say which of
+            // `A` and `N` is a const, so both are bound as type parameters. The
+            // read is then legitimate source that the compiler cannot honour yet
+            // - which is worth saying, rather than claiming the name is unknown
+            // when it is declared two lines up.
+            if !in_call && gparams.contains(one) {
+                self.push(Error::new(span.clone(), format!(
+                    "generic parameter '{}' cannot be used as a value here", one))
+                    .with_label(span.clone(), format!(
+                        "'{}' is bound as a type parameter", one))
+                    .with_note(
+                        "an `extend` target binds every argument as a type parameter - \
+                         `extend Buf<T, N>` cannot tell `N` from `T` - so a const \
+                         parameter inferred from one is not readable as a value yet"));
                 return Some(one);
             }
             self.push(if in_call {
@@ -2692,13 +2746,13 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         for rm in m.methods.iter_mut() {
             rm.generics = impl_generics(&rm.target, &known);
             apply_where_bounds(
-                &mut rm.generics, &rm.where_bounds, &rm.target, &rm.span,
+                &mut rm.generics, &rm.where_bounds, WhereOwner::Extend(&rm.target), &rm.span,
                 &mut reported, &mut errs);
         }
         for ri in m.impls.iter_mut() {
             ri.generics = impl_generics(&ri.target, &known);
             apply_where_bounds(
-                &mut ri.generics, &ri.where_bounds, &ri.target, &ri.span,
+                &mut ri.generics, &ri.where_bounds, WhereOwner::Extend(&ri.target), &ri.span,
                 &mut reported, &mut errs);
         }
 
@@ -2708,8 +2762,19 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         let mut by_fn: HashMap<&'a str, &RawMethod<'a>> =
             m.methods.iter().map(|rm| (rm.fn_name, rm)).collect();
         for tl in m.items.iter_mut() {
-            let TopLevelNode::Function { name, generics, .. } = &mut tl.value else { continue };
-            let Some(rm) = by_fn.remove(*name) else { continue };
+            let TopLevelNode::Function { name, generics, where_bounds, .. } = &mut tl.value
+                else { continue };
+            let span = tl.span.clone();
+            let fn_name = *name;
+            let own_where = std::mem::take(where_bounds);
+            let Some(rm) = by_fn.remove(fn_name) else {
+                // a plain top-level `proc`: its binder is written out, so its
+                // clause has only that to merge onto.
+                apply_where_bounds(
+                    generics, &own_where, WhereOwner::Proc(fn_name), &span,
+                    &mut reported, &mut errs);
+                continue;
+            };
             for ig in &rm.generics {
                 let ig_name = match ig {
                     GenericParam::Type { name, .. } => *name,
@@ -2730,6 +2795,12 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             let own = std::mem::take(generics);
             generics.extend(rm.generics.iter().cloned());
             generics.extend(own);
+            // deliberately last: a method's own clause may name either one of
+            // its own parameters or one the `extend` target bound, and only now
+            // are both in `generics`.
+            apply_where_bounds(
+                generics, &own_where, WhereOwner::Proc(rm.name), &span,
+                &mut reported, &mut errs);
         }
     }
 

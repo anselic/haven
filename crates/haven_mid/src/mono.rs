@@ -894,6 +894,15 @@ impl<'p, 'a> Mono<'p, 'a> {
             ExprNode::Struct { name, type_args, fields } => {
                 let new_fields: Vec<(&'a str, Expr<'a>)> =
                     fields.iter().map(|(f, e)| (*f, self.rebuild_expr(e, b))).collect();
+                // a generic literal written without a turbofish carries an empty
+                // one on the node; the typechecker recovered its args from the
+                // field values, so fall back to those (same channel as a bare
+                // generic call).
+                let type_args: &[GenericArg<'a>] = if type_args.is_empty() {
+                    self.inferred_type_args.get(&expr.id).map_or(type_args, Vec::as_slice)
+                } else {
+                    type_args
+                };
                 if type_args.is_empty() {
                     ExprNode::Struct { name: name.clone(), type_args: Vec::new(), fields: new_fields }
                 } else if self.enum_templates.contains_key(&name.def) {
@@ -915,7 +924,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                     // exactly like the generic *type* `Option<i32>`: substitute the
                     // args, request the instance, swap in the flat name and drop the
                     // turbofish (mil looks the fields up by this name).
-                    let concrete = Type::Named { def: name.def, args: type_args.clone() };
+                    let concrete = Type::Named { def: name.def, args: type_args.to_vec() };
                     let Type::Named { def: inst, .. } = self.subst_ty(&concrete, b) else {
                         unreachable!("subst_ty of a Named is always a Named")
                     };
@@ -1041,7 +1050,10 @@ impl<'p, 'a> Mono<'p, 'a> {
                 def: name_override.map_or(*def, |(d, _)| d),
                 is_pub: *is_pub,
                 attributes: attributes.clone(),
+                // a monomorphic instance has no parameters left, so nothing
+                // remains for a clause to bound either.
                 generics: Vec::new(),
+                where_bounds: Vec::new(),
                 params: new_params,
                 return_type: new_return,
                 body: new_body,

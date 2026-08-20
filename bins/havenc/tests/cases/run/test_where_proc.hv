@@ -1,0 +1,57 @@
+// A `where` clause on a top-level `proc` and on a method, not just on `extend`.
+//
+// A `proc` writes its parameters out, so a clause is never its *only* way to
+// state a bound - `<T: Bound>` says the same thing. It exists because a bound
+// written in the binder crowds the one line a reader scans for the signature,
+// and a clause moves it out of the way. The two spellings merge into the same
+// parameter list, so they are interchangeable and may be mixed.
+
+trait Mono { proc tick(*self, x: f32) f32; }
+
+struct Gain { g: f32 }
+extend Gain: Mono { proc tick(*self, x: f32) f32 { return x * self.g; } }
+
+struct Serial<A, B> { a: A, b: B }
+extend Serial<A, B>: Mono where A: Mono, B: Mono {
+    proc tick(*self, x: f32) f32 { return self.b.tick(self.a.tick(x)); }
+}
+
+// a clause on a free proc, bounding both of its own parameters
+proc serial<A, B>(a: A, b: B) Serial<A, B> where A: Mono, B: Mono {
+    return Serial::<A, B> { a: a, b: b };
+}
+
+// mixed: `A` bounded in the binder, `B` in the clause. Both reach the body.
+proc first_of<A: Mono, B>(a: A, b: B, x: f32) f32 where B: Mono {
+    return a.tick(x) + b.tick(x);
+}
+
+extend Gain {
+    // a clause on a method's *own* binder
+    proc paired<B>(*self, b: B) Serial<Gain, B> where B: Mono {
+        return serial::<Gain, B>(Gain { g: self.g }, b);
+    }
+}
+
+struct Wrap<T> { inner: T }
+extend Wrap<T> {
+    // a clause naming a parameter the `extend` target bound, not one of the
+    // method's own - the impl's parameters lead the method's, and the clause is
+    // merged after both are in place.
+    proc run(*self, x: f32) f32 where T: Mono { return self.inner.tick(x); }
+}
+
+@export
+proc main() i32 {
+    let s = serial(Gain { g: 2.0 }, Gain { g: 3.0 });
+    println(s.tick(1.0));                              // 6
+
+    println(first_of(Gain { g: 2.0 }, Gain { g: 5.0 }, 1.0));  // 7
+
+    let g = Gain { g: 4.0 };
+    println(g.paired::<Gain>(Gain { g: 0.5 }).tick(1.0));      // 2
+
+    let w = Wrap::<Gain> { inner: Gain { g: 3.0 } };
+    println(w.run(2.0));                               // 6
+    return 0;
+}

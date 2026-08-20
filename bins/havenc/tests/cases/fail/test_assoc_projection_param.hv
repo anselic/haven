@@ -1,0 +1,24 @@
+// `A::Item` on a type parameter is an associated-type projection, which is not
+// supported yet - only `Self::Item` inside a trait resolves.
+//
+// The point of the fixture is the *wording*: a two-segment path is otherwise
+// read as `module::Type`, so this used to report an unknown module qualifier and
+// suggest an import, sending the reader after a module named `A` when `A` is a
+// type parameter bound by the signature in front of them.
+//@ error: associated type projection 'A::Item' is not supported yet
+
+trait Iterator {
+    type Item;
+    proc next(*self) Self::Item;
+}
+
+struct Pair<A> { a: A }
+
+extend Pair<A> where A: Iterator {
+    proc first(*self) A::Item { return self.a.next(); }
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

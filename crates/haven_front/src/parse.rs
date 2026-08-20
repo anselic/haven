@@ -1353,6 +1353,34 @@ fn parse_trait_bounds<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<NameRef<'src>>> {
         .boxed()
 }
 
+/// An optional `where T: A, U: B` clause, empty when absent.
+///
+/// `where` lexes as a `Var` (it is not a reserved keyword), so it is matched by
+/// text. Only the bounded form parses - a bare `where T` would say nothing -
+/// which is also why the clause reuses `GenericParam::Type` rather than earning
+/// a node of its own: a clause entry and a binder entry mean the same thing, and
+/// [`apply_where_bounds`] merges the former onto the latter.
+///
+/// Shared by `extend`, top-level `proc`s and methods. An `extend` block has no
+/// binder to write bounds in, so a clause is its *only* way to state one; a
+/// `proc` can write either `<T: Bound>` or a clause, and the two are equivalent.
+fn parse_where_bounds<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<GenericParam<'src>>> {
+    let var = select_ref! { Token::Var(ident) => ident };
+    select_ref! { Token::Var(s) if *s == "where" => () }
+        .ignore_then(
+            var.map(|s| *s)
+                .then_ignore(just(Token::Colon))
+                .then(parse_trait_bounds())
+                .map(|(name, bounds)| GenericParam::Type { name, bounds })
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .at_least(1)
+                .collect::<Vec<_>>())
+        .or_not()
+        .map(|w| w.unwrap_or_default())
+        .boxed()
+}
+
 /// An optional `<T, const N: u32, ...>` binder following a name, empty when
 /// absent. Shared by everything that can be generic - procs, externs, structs,
 /// enums, methods - so the spellings cannot drift apart.
@@ -1443,15 +1471,16 @@ fn parse_method<'tks, 'src: 'tks>() -> P<'tks, 'src, Method<'src>> {
         .then(parse_generics())
         .then(parse_params())
         .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
+        .then(parse_where_bounds())
         .then(
             parse_stmt()
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map_with(|((((((attributes, is_pub), name), generics), (receiver, params)), return_type), body), e|
+        .map_with(|(((((((attributes, is_pub), name), generics), (receiver, params)), return_type), where_bounds), body), e|
             Metadata::new(
-                MethodNode { is_pub, attributes, receiver, name, generics, params, return_type, body },
+                MethodNode { is_pub, attributes, receiver, name, generics, where_bounds, params, return_type, body },
                 e.span(),
             ))
         .boxed()
@@ -1514,6 +1543,7 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
         .then(generics.clone())
         .then(parse_param_list())
         .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
+        .then(parse_where_bounds())
         .then(
             parse_stmt()
                 // .separated_by(just(Token::Semicolon))
@@ -1523,12 +1553,13 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|((((((attributes, is_pub), name), generics), params), return_type), body)| (TopLevelNode::Function {
+        .map(|(((((((attributes, is_pub), name), generics), params), return_type), where_bounds), body)| (TopLevelNode::Function {
             name,
             def: DefId::UNRESOLVED,
             is_pub,
             attributes,
             generics,
+            where_bounds,
             params,
             return_type,
             body,
@@ -1674,23 +1705,8 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
     //
     // The target binds its type parameters implicitly, so there is no binder to
     // write a bound on and a `where` clause is the only place one can go:
-    // `extend Vec<T>: Display where T: Display { ... }`. Like `extend` itself,
-    // `where` lexes as a `Var` and is matched by text. Only the bounded form
-    // parses - a bare `where T` would say nothing - which is also why the clause
-    // reuses `GenericParam::Type` rather than earning a node of its own.
-    let where_bounds = select_ref! { Token::Var(s) if *s == "where" => () }
-        .ignore_then(
-            var.map(|s| *s)
-                .then_ignore(just(Token::Colon))
-                .then(parse_trait_bounds())
-                .map(|(name, bounds)| GenericParam::Type { name, bounds })
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .at_least(1)
-                .collect::<Vec<_>>())
-        .or_not()
-        .map(|w| w.unwrap_or_default())
-        .boxed();
+    // `extend Vec<T>: Display where T: Display { ... }`.
+    let where_bounds = parse_where_bounds();
 
     // an `extend` body item: an associated-type binding `type Item = Ty;` (tried
     // first, since it is the only one that leads with `type`) or a method.

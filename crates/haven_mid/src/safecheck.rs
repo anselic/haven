@@ -2,7 +2,7 @@ use haven_common::ast::*;
 use haven_common::defs::{Defs, MemberTable};
 use crate::intrinsics::Intrinsic;
 use crate::mono::concrete_method_name;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 // Runtime-safety (`@alloc(false)`) checking.
 //
@@ -229,13 +229,22 @@ fn collect_calls_stmt<'a>(calls: &mut HashSet<&'a str>, locals: &mut Vec<&'a str
     }
 }
 
-/// Compute the clean/dirty status of every callable via a fixpoint.
-fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>) -> CleanMap<'a> {
+/// The call graph, keyed by caller: every callable defined in this program
+/// mapped to the set of callables its body reaches directly. A name absent from
+/// it has no body here - an extern, or an unresolved callee - which is what
+/// makes it a leaf when tracing a blame chain.
+type CallGraph<'a> = HashMap<&'a str, HashSet<&'a str>>;
+
+/// Compute the clean/dirty status of every callable via a fixpoint, returning
+/// the call graph alongside it so a violation can be traced to the leaf that
+/// actually allocates.
+fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>)
+-> (CleanMap<'a>, CallGraph<'a>) {
     let mut clean: CleanMap<'a> = HashMap::new();
 
     // leaves: externs are clean iff annotated, functions start optimistically
     // clean and the call graph records who they call
-    let mut calls: HashMap<&'a str, HashSet<&'a str>> = HashMap::new();
+    let mut calls: CallGraph<'a> = HashMap::new();
     for node in program {
         match &node.value {
             TopLevelNode::Extern { name, attributes, .. } => {
@@ -272,7 +281,56 @@ fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>) -> CleanMap<
         if !changed { break; }
     }
 
-    clean
+    (clean, calls)
+}
+
+/// The shortest chain of calls from `start` down to the leaf that makes it
+/// dirty, e.g. `Serial$tick -> Bad$tick -> Vec$with_capacity -> malloc`.
+///
+/// Dirtiness propagates up the call graph, so the immediate callee a violation
+/// blames is usually a generic wrapper that allocates nothing itself - with
+/// combinators it nearly always is. Naming only that callee points the reader at
+/// the one function in the chain that is innocent; this recovers the rest.
+///
+/// Breadth-first, so the chain shown is the shortest explanation rather than
+/// whichever branch a depth-first walk happened to enter, and callees are
+/// visited in name order so the same program always reports the same chain.
+fn blame_chain<'a>(calls: &CallGraph<'a>, clean: &CleanMap<'a>, start: &'a str) -> Vec<&'a str> {
+    fn path_to<'a>(prev: &HashMap<&'a str, &'a str>, start: &'a str, end: &'a str) -> Vec<&'a str> {
+        let mut out = vec![end];
+        let mut cur = end;
+        while cur != start {
+            match prev.get(cur) {
+                Some(p) => { out.push(p); cur = p; }
+                None => break,
+            }
+        }
+        out.reverse();
+        out
+    }
+
+    let mut prev: HashMap<&'a str, &'a str> = HashMap::new();
+    let mut seen: HashSet<&'a str> = HashSet::new();
+    let mut queue: VecDeque<&'a str> = VecDeque::new();
+    seen.insert(start);
+    queue.push_back(start);
+
+    while let Some(cur) = queue.pop_front() {
+        // no body in this program: an unannotated extern, the indirect-call
+        // sentinel, or an unknown symbol. This is the leaf that allocates.
+        let Some(callees) = calls.get(cur) else { return path_to(&prev, start, cur) };
+        let mut dirty: Vec<&'a str> = callees.iter().copied()
+            .filter(|c| !clean.get(c).copied().unwrap_or(false))
+            .collect();
+        // a dirty function with no dirty callee cannot arise from the fixpoint,
+        // but treating it as a leaf keeps this total rather than looping.
+        if dirty.is_empty() { return path_to(&prev, start, cur); }
+        dirty.sort_unstable();
+        for d in dirty {
+            if seen.insert(d) { prev.insert(d, cur); queue.push_back(d); }
+        }
+    }
+    vec![start]
 }
 
 pub fn alloc_check_program<'a>(
@@ -281,7 +339,7 @@ pub fn alloc_check_program<'a>(
     node_types: &HashMap<usize, Type<'a>>,
 ) -> Result<(), Vec<Error>> {
     let r = Resolve { node_types, members: defs.members() };
-    let clean = compute_clean(program, &r);
+    let (clean, calls) = compute_clean(program, &r);
 
     // mono rewrites generic calls to their mangled instance name; prefer the
     // friendly spelling it recorded (`alloc::<Vec2>`) over `std.alloc$alloc$Vec2`
@@ -302,9 +360,21 @@ pub fn alloc_check_program<'a>(
         let mut blamed: Vec<(&'a str, Span)> = Vec::new();
         for s in body { blamed.extend(dirty_calls_stmt(&clean, &mut locals, &r, s)); }
         for (callee, span) in blamed {
-            errors.push(Error::new(span, format!(
+            let err = Error::new(span.clone(), format!(
                 "'{}' is marked as @alloc(false) but may allocate", show(name)))
-                .with_label(span, format!("calls '{}', which may allocate", show(callee))));
+                .with_label(span, format!("calls '{}', which may allocate", show(callee)));
+            // the immediate callee is only the entry point; say where the
+            // allocation actually is, unless it is the callee itself.
+            let chain = blame_chain(&calls, &clean, callee);
+            errors.push(if chain.len() > 1 {
+                let rendered = chain.iter().map(|n| match *n {
+                    INDIRECT_CALLEE => INDIRECT_CALLEE.to_string(),
+                    other => format!("'{}'", show(other)),
+                }).collect::<Vec<_>>().join(" -> ");
+                err.with_note(format!("allocation reaches it through: {}", rendered))
+            } else {
+                err
+            });
         }
     }
 

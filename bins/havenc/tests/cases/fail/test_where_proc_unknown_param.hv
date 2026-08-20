@@ -1,0 +1,18 @@
+// A `where` clause on a `proc` can only bound a parameter its binder declares.
+//
+// Left to bind nothing, `where B: Mono` would be a silent no-op and the body
+// would fail later against an unbounded parameter - or, as here, not at all,
+// leaving a signature that reads as if it were bounded when it is not. The
+// message differs from the `extend` one: a `proc` *writes* its parameters, so
+// the fix is to add it to the binder rather than to mention it in the target.
+//@ error: unbound type parameter 'B' in `where`
+//@ error: `proc bad` declares no type parameter 'B'
+
+trait Mono { proc tick(*self, x: f32) f32; }
+
+proc bad<A>(a: A) i32 where B: Mono { return 0; }
+
+@export
+proc main() i32 {
+    return 0;
+}
