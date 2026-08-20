@@ -333,7 +333,8 @@ fn item_is_pub(node: &TopLevelNode) -> bool {
         | TopLevelNode::Struct { is_pub, .. }
         | TopLevelNode::Global { is_pub, .. }
         | TopLevelNode::Enum { is_pub, .. }
-        | TopLevelNode::Trait { is_pub, .. } => *is_pub,
+        | TopLevelNode::Trait { is_pub, .. }
+        | TopLevelNode::Alias { is_pub, .. } => *is_pub,
         // `extend` blocks are rendered as method sections under their target type
         // (see `render_file`), not as items here.
         TopLevelNode::Extend { .. } => false,
@@ -362,7 +363,8 @@ fn item_name<'a>(node: &TopLevelNode<'a>) -> &'a str {
         | TopLevelNode::Struct { name, .. }
         | TopLevelNode::Global { name, .. }
         | TopLevelNode::Enum { name, .. }
-        | TopLevelNode::Trait { name, .. } => name,
+        | TopLevelNode::Trait { name, .. }
+        | TopLevelNode::Alias { name, .. } => name,
         // an `extend` target is a type, not a name: `[T]` and `*Point` have no
         // identifier to report. Group those under their constructor, and a named
         // target under the name it extends, which is what a reader looks for.
@@ -454,7 +456,7 @@ fn signature(node: &TopLevelNode, src: &str, start: usize, end: usize) -> String
         TopLevelNode::Trait { .. } => node.to_string(),
         // never rendered (extends are filtered out by `item_is_pub`), but the
         // match must stay exhaustive; fall back to the Display impl.
-        TopLevelNode::Extend { .. } => node.to_string(),
+        TopLevelNode::Extend { .. } | TopLevelNode::Alias { .. } => node.to_string(),
     }
 }
 

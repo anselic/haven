@@ -1,0 +1,18 @@
+// Aliases exported across a module boundary, for `test_type_alias_xmod`.
+
+pub type Sample = f32;
+
+pub struct Gain { g: Sample }
+
+extend Gain {
+    pub proc tick(*self, x: Sample) Sample { return x * (*self).g; }
+}
+
+// an alias whose body names a type of this module. A caller reaches it without
+// importing `Gain` at all: the body was resolved where it was written.
+pub type Amp = Gain;
+
+// an alias of an alias, declared *before* the one it depends on - resolution
+// repeats until every body's dependencies are ready, so source order is free.
+pub type Level = Loud;
+pub type Loud = Sample;

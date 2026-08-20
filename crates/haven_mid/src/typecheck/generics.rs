@@ -529,19 +529,32 @@ pub(crate) fn bind_struct_generics<'a>(
                 const_subst.insert(pname, ConstVal::Lit(*v));
                 resolved.push(GenericArg::Const(ConstVal::Lit(*v)));
             }
-            (GenericParam::Const(pname, _), GenericArg::Const(ConstVal::Param(fwd))) => return Err(Error::new(span.clone(), format!("struct '{}': forwarding const parameter '{}' to '{}' is not supported yet", name, fwd, pname))),
+            // forwarding an enclosing generic's own `const` param by name, exactly
+            // as `bind_turbofish` does for a call: bind it symbolically and let
+            // mono resolve it to a literal when the enclosing proc is specialized.
+            // This is what makes a method of `extend Buf<T, N>` typecheck at all -
+            // its `self` is a `Buf<T, N>` whose `N` is the method's own param.
+            (GenericParam::Const(pname, _), GenericArg::Const(ConstVal::Param(fwd))) => {
+                if !cx.const_generics.contains(fwd) {
+                    return Err(Error::new(span.clone(), format!(
+                        "struct '{}': unknown const parameter '{}'", name, fwd)));
+                }
+                const_subst.insert(pname, ConstVal::Param(fwd));
+                resolved.push(GenericArg::Const(ConstVal::Param(fwd)));
+            }
             (GenericParam::Type { name: pname, .. }, GenericArg::Const(_)) => return Err(Error::new(span.clone(), format!("struct '{}': expected a type argument for '{}', got a const value", name, pname))),
             (GenericParam::Const(pname, _), GenericArg::Type(ty)) => {
                 // a bare-ident arg (`N`) parses as a type; if it names an in-scope
-                // const param it's a (currently unsupported) forward, else it's a
-                // real type wrongly placed in a const slot.
-                if const_param_name(ty).is_some_and(|n| cx.const_generics.contains(&n)) {
-                    return Err(Error::new(span.clone(), format!(
-                        "struct '{}': forwarding const parameter '{}' to '{}' is not supported yet",
-                        name, const_param_name(ty).unwrap(), pname)));
+                // const param it's a forward (bind symbolically, as above),
+                // otherwise it's a real type wrongly placed in a const slot.
+                match const_param_name(ty).filter(|n| cx.const_generics.contains(n)) {
+                    Some(fwd) => {
+                        const_subst.insert(pname, ConstVal::Param(fwd));
+                        resolved.push(GenericArg::Const(ConstVal::Param(fwd)));
+                    }
+                    None => return Err(Error::new(span.clone(), format!(
+                        "struct '{}': expected a const argument for '{}', got a type", name, pname))),
                 }
-                return Err(Error::new(span.clone(), format!(
-                    "struct '{}': expected a const argument for '{}', got a type", name, pname)));
             }
         }
     }
@@ -666,23 +679,28 @@ pub(crate) fn check_type_resolves<'a>(cx: &Context<'a>, ty: &Type<'a>) -> Result
                     )
                 });
             }
-            // each applied arg's kind must match its param (type vs const);
-            // forwarding a const param into a named type isn't supported yet.
+            // each applied arg's kind must match its param (type vs const). a
+            // const *param* forwarded by name is fine as long as it is one the
+            // enclosing item declares - mono turns it into a literal once that
+            // item is specialized, and `check_const_scope` re-checks the rest.
             if let Some(params) = params {
                 for (gp, ga) in params.iter().zip(args) {
                     match (gp, ga) {
                         (GenericParam::Type { .. }, GenericArg::Type(_)) => {}
                         (GenericParam::Const(_, _), GenericArg::Const(ConstVal::Lit(_))) => {}
+                        (GenericParam::Const(_, _), GenericArg::Const(ConstVal::Param(f)))
+                            if cx.const_generics.contains(f) => {}
                         (GenericParam::Const(pn, _), GenericArg::Const(ConstVal::Param(f))) =>
-                            return Err(format!("{} '{}': forwarding const parameter '{}' to '{}' is not supported yet", kind, name, f, pn)),
+                            return Err(format!("{} '{}': unknown const parameter '{}' in argument for '{}'", kind, name, f, pn)),
                         (GenericParam::Type { name: pn, .. }, GenericArg::Const(_)) =>
                             return Err(format!("{} '{}': expected a type argument for '{}', got a const value", kind, name, pn)),
-                        (GenericParam::Const(pn, _), GenericArg::Type(t)) => {
-                            if const_param_name(t).is_some_and(|n| cx.const_generics.contains(&n)) {
-                                return Err(format!("{} '{}': forwarding const parameter '{}' to '{}' is not supported yet", kind, name, const_param_name(t).unwrap(), pn));
-                            }
-                            return Err(format!("{} '{}': expected a const argument for '{}', got a type", kind, name, pn));
-                        }
+                        // a bare identifier in a const slot parses as a type; it is
+                        // a forward when it names an in-scope const param, and a
+                        // real type in the wrong slot otherwise.
+                        (GenericParam::Const(_, _), GenericArg::Type(t))
+                            if const_param_name(t).is_some_and(|n| cx.const_generics.contains(&n)) => {}
+                        (GenericParam::Const(pn, _), GenericArg::Type(_)) =>
+                            return Err(format!("{} '{}': expected a const argument for '{}', got a type", kind, name, pn)),
                     }
                 }
             }

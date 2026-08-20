@@ -1,0 +1,14 @@
+// A struct literal written through an alias that does not name a struct.
+//
+// `Sample` is a perfectly good type, just not one with fields, so the mistake is
+// worth naming as what it is rather than reporting `Sample` as an unknown struct
+// - the name resolves, it simply expands to `f32`.
+//@ error: type alias 'Sample' names 'f32', which is not a struct
+
+type Sample = f32;
+
+@export
+proc main() i32 {
+    let s: Sample = Sample { x: 1.0f32 };
+    return 0;
+}

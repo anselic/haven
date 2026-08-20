@@ -1,0 +1,17 @@
+// A parameterised alias applied to the wrong number of arguments.
+//
+// The alias' binder is what the count is checked against, not the underlying
+// type's: `Quad` takes one argument even though `Buf` takes two, having already
+// supplied the second.
+//@ error: type alias 'Quad' expects 1 argument, got 2
+//@ error: is declared here
+
+struct Buf<T, const N: u64> { data: [T; N] }
+
+type Quad<T> = Buf<T, 4>;
+
+@export
+proc main() i32 {
+    let q: Quad<i32, f32> = Quad::<i32> { data: [1, 2, 3, 4] };
+    return 0;
+}

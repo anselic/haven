@@ -261,6 +261,7 @@ fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>)
             TopLevelNode::Struct { .. } | TopLevelNode::Global { .. }
             | TopLevelNode::Enum { .. } => {}
             TopLevelNode::Trait { .. } => unreachable!("traits dropped in monomorphization"),
+            TopLevelNode::Alias { .. } => unreachable!("aliases expanded before safecheck"),
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before safecheck"),
         }
     }

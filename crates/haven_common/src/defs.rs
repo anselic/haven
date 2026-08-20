@@ -106,6 +106,10 @@ pub struct ModId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DefKind {
     Fn, Extern, Global, Struct, Enum, Trait,
+    /// A `type Name = ...` alias. Has an identity so it can be imported, named
+    /// through a qualifier and reported on like any other item - but it is never
+    /// emitted: name resolution expands every use and drops the declaration.
+    Alias,
     /// The synthetic struct holding one data variant's payload fields. Has no
     /// source declaration of its own: [`Defs::add_payload`] mints one per data
     /// variant, so a payload struct is a type identity like any other rather

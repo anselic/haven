@@ -1048,7 +1048,7 @@ pub type Attribute<'a> = Metadata<AttributeNode<'a>>;
 /// is no item to attach to. Without the `!` a mark meant for the file would be
 /// swallowed by whatever declaration happened to follow it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AttrTarget { Function, Extern, Struct, Enum, Global, Trait, Module }
+pub enum AttrTarget { Function, Extern, Struct, Enum, Global, Trait, Alias, Module }
 
 impl AttrTarget {
     fn label(self) -> &'static str {
@@ -1059,6 +1059,7 @@ impl AttrTarget {
             AttrTarget::Enum     => "an enum",
             AttrTarget::Global   => "a global",
             AttrTarget::Trait    => "a trait",
+            AttrTarget::Alias    => "a type alias",
             AttrTarget::Module   => "a module",
         }
     }
@@ -1386,6 +1387,27 @@ pub enum TopLevelNode<'a> {
         value: Expr<'a>,
     },
 
+    /// A `type Name = Type;` declaration: another spelling for a type that
+    /// already exists, not a type of its own.
+    ///
+    /// `generics` lets the alias take parameters (`type Buf4<T> = Buf<T, 4>;`),
+    /// which the use site's arguments are substituted for on expansion. Like
+    /// [`TopLevelNode::Extend`] this variant does not survive the front end: name
+    /// resolution expands every use into the type it stands for and drops the
+    /// node, so nothing downstream has to know aliases exist. That is also why an
+    /// alias is transparent rather than a distinct type - `type Sample = f32`
+    /// makes `Sample` and `f32` the same type, and a method on one is a method on
+    /// the other.
+    Alias {
+        name: &'a str,
+        /// This item's identity, assigned by name resolution.
+        def: DefId,
+        is_pub: bool,
+        attributes: Vec<Attribute<'a>>,
+        generics: Vec<GenericParam<'a>>,
+        ty: Type<'a>,
+    },
+
     /// An `extend Type { ... }` (or `extend Type: Trait { ... }`) block adding
     /// methods to `target`. Inherent methods written directly in a struct/enum
     /// body are also parsed into one of these (with `trait_: None`). The module
@@ -1517,6 +1539,10 @@ impl<'a> Display for TopLevelNode<'a> {
                 }).collect::<String>();
 
                 write!(f, "{}{}enum {}{} {{\n{}}}", attrs_str, pub_str, name, generics_str, variants_str)
+            },
+            TopLevelNode::Alias { name, is_pub, generics, ty, .. } => {
+                let pub_str = if *is_pub { "pub " } else { "" };
+                write!(f, "{}type {}{} = {};", pub_str, name, fmt_generics(generics), ty)
             },
             TopLevelNode::Extend { target, trait_, where_bounds, assoc_bindings, methods } => {
                 let trait_str = match trait_ {

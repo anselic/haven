@@ -512,43 +512,200 @@ fn apply_where_bounds<'a>(
     }
 }
 
-fn impl_generics<'a>(target: &Type<'a>, known: &dyn Fn(&str) -> bool) -> Vec<GenericParam<'a>> {
+/// The declared generic parameters of every struct and enum in the program,
+/// keyed by definition.
+///
+/// [`impl_generics`] cannot do without it. In `extend Buf<T, N>` both arguments
+/// are bare identifiers, and the grammar offers no way to mark one as a value -
+/// so only the *declaration* of `Buf` says which slot is a `const`. Lacking it,
+/// `N` came out a type parameter, and every later use of it (as an array length,
+/// as a value in a method body) was nonsense.
+type TypeParams<'a> = HashMap<DefId, Vec<GenericParam<'a>>>;
+
+/// Resolve a written type path to the definition it names, through one module's
+/// scopes.
+///
+/// A free function rather than a [`Rewriter`] method because pass 1.25 runs
+/// before any rewriter exists. It mirrors `Rewriter::type_head`'s lookup minus
+/// the diagnostics: a path that resolves to nothing is left alone here, pass 2
+/// being where an unknown type is reported.
+fn type_def_of<'a>(scopes: &Scopes<'a>, path: &Path<'a>) -> Option<DefId> {
+    if let Some(one) = path.as_single() {
+        return scopes.types.get(one).map(|s| s.def);
+    }
+    // `<qualifier...>::Type`, the qualifier possibly several segments deep.
+    let segs = &path.segments;
+    let mut cur = scopes.quals.get(segs[0])?;
+    let mut n = 1;
+    while n + 1 < segs.len() {
+        match cur.children.get(segs[n]) {
+            Some(next) => { cur = next; n += 1; }
+            None => break,
+        }
+    }
+    if segs.len() - n != 1 { return None; }
+    cur.types.get(segs[n]).map(|s| s.def)
+}
+
+/// A type alias, with its body already resolved in the module that declared it.
+///
+/// Resolving up front rather than at each use is what makes an alias exportable:
+/// `pub type Chain = Serial<Gain, OnePole>` has to mean the same thing in a
+/// module that imported neither `Serial` nor `Gain`, and it can only do that if
+/// the names in its body were looked up where they were written.
+struct AliasDef<'a> {
+    generics: Vec<GenericParam<'a>>,
+    ty: Type<'a>,
+    /// where the alias was declared, for an arity error at a use site that has no
+    /// better span of its own.
+    span: Span,
+}
+
+type Aliases<'a> = HashMap<DefId, AliasDef<'a>>;
+
+/// Substitute an alias' parameters throughout its (already resolved) body.
+fn subst_alias<'a>(
+    ty: &Type<'a>,
+    types: &HashMap<&'a str, Type<'a>>,
+    consts: &HashMap<&'a str, ConstVal<'a>>,
+) -> Type<'a> {
+    let cv = |c: &ConstVal<'a>| match c {
+        ConstVal::Param(n) => consts.get(n).cloned().unwrap_or_else(|| c.clone()),
+        ConstVal::Lit(_) => c.clone(),
+    };
+    let go = |t: &Type<'a>| subst_alias(t, types, consts);
+    match ty {
+        Type::Param(n) => types.get(n).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Named { def, args } => Type::Named {
+            def: *def,
+            args: args.iter().map(|a| match a {
+                GenericArg::Type(t) => GenericArg::Type(go(t)),
+                GenericArg::Const(c) => GenericArg::Const(cv(c)),
+            }).collect(),
+        },
+        Type::Pointer(inner) => Type::Pointer(Box::new(go(inner))),
+        Type::Slice(inner) => Type::Slice(Box::new(go(inner))),
+        Type::Array(inner, n) => Type::Array(Box::new(go(inner)), cv(n)),
+        Type::Simd(inner, n) => Type::Simd(Box::new(go(inner)), cv(n)),
+        Type::Function { params, return_type } => Type::Function {
+            params: params.iter().map(go).collect(),
+            return_type: Box::new(go(return_type)),
+        },
+        _ => ty.clone(),
+    }
+}
+
+/// Whether every alias `ty` names has already been resolved, so resolving `ty`
+/// itself would expand all of them.
+///
+/// Walks the type as *written*, since that is all that exists before resolution:
+/// each path head is looked up the same way [`type_def_of`] will look it up.
+fn alias_deps_ready<'a>(
+    ty: &Type<'a>,
+    scopes: &Scopes<'a>,
+    declared: &HashSet<DefId>,
+    resolved: &Aliases<'a>,
+) -> bool {
+    let ready = |t: &Type<'a>| alias_deps_ready(t, scopes, declared, resolved);
+    match ty {
+        Type::Path { path, args } => {
+            if let Some(def) = type_def_of(scopes, path) {
+                if declared.contains(&def) && !resolved.contains_key(&def) { return false; }
+            }
+            args.iter().all(|a| match a {
+                GenericArg::Type(t) => ready(t),
+                GenericArg::Const(_) => true,
+            })
+        }
+        Type::Pointer(inner) | Type::Slice(inner)
+        | Type::Array(inner, _) | Type::Simd(inner, _) => ready(inner),
+        Type::Function { params, return_type } =>
+            params.iter().all(&ready) && ready(return_type),
+        _ => true,
+    }
+}
+
+/// The type and const parameters an `extend` target binds implicitly, in the
+/// order they appear in it.
+///
+/// `decl` yields the declared parameters of a type path's head, and is what
+/// makes a `const` argument recognisable - see [`TypeParams`]. It may answer
+/// `None` (an unresolvable head, which pass 2 reports), in which case every
+/// argument falls back to being read as a type.
+fn impl_generics<'a, 'd>(
+    target: &Type<'a>,
+    known: &dyn Fn(&str) -> bool,
+    decl: &dyn Fn(&Path<'a>) -> Option<&'d [GenericParam<'a>]>,
+) -> Vec<GenericParam<'a>> {
     fn push_ty<'a>(n: &'a str, out: &mut Vec<GenericParam<'a>>) {
         if !out.iter().any(|g| matches!(g, GenericParam::Type { name, .. } if *name == n)) {
             out.push(GenericParam::Type { name: n, bounds: Vec::new() });
         }
     }
-    fn push_const<'a>(n: &'a str, out: &mut Vec<GenericParam<'a>>) {
+    fn push_const<'a>(n: &'a str, ty: Type<'a>, out: &mut Vec<GenericParam<'a>>) {
         if !out.iter().any(|g| matches!(g, GenericParam::Const(name, _) if *name == n)) {
-            // the declared type of an inferred const param is unknowable from its
-            // use; `u32` matches how the parser types a bare array length.
-            out.push(GenericParam::Const(n, Type::Uint32));
+            out.push(GenericParam::Const(n, ty));
         }
     }
-    fn arg<'a>(a: &GenericArg<'a>, known: &dyn Fn(&str) -> bool, out: &mut Vec<GenericParam<'a>>) {
+    /// One argument of a type path, classified against the parameter it fills.
+    fn arg<'a, 'd>(
+        a: &GenericArg<'a>,
+        slot: Option<&GenericParam<'a>>,
+        known: &dyn Fn(&str) -> bool,
+        decl: &dyn Fn(&Path<'a>) -> Option<&'d [GenericParam<'a>]>,
+        out: &mut Vec<GenericParam<'a>>,
+    ) {
+        // a bare identifier parses as a *type* argument whatever it was meant to
+        // be, so a `const` slot is the only thing that can tell `N` from `T`. the
+        // declared type rides along with it: `const N: u64` rebuilt as a `u32`
+        // would stop the method's `[T; N]` matching the struct's field.
+        if let Some(GenericParam::Const(_, cty)) = slot {
+            let name = match a {
+                GenericArg::Const(ConstVal::Param(n)) => Some(*n),
+                GenericArg::Type(Type::Path { path, args }) if args.is_empty() =>
+                    path.as_single().filter(|n| !known(n)),
+                _ => None,
+            };
+            if let Some(n) = name {
+                push_const(n, cty.clone(), out);
+                return;
+            }
+        }
         match a {
-            GenericArg::Type(t) => walk(t, known, out),
-            GenericArg::Const(ConstVal::Param(n)) => push_const(n, out),
+            GenericArg::Type(t) => walk(t, known, decl, out),
+            // no slot to consult (an unresolvable head, or a const written where a
+            // type belongs - pass 2 and typecheck report those). `u32` matches how
+            // the parser types a bare array length.
+            GenericArg::Const(ConstVal::Param(n)) => push_const(n, Type::Uint32, out),
             GenericArg::Const(ConstVal::Lit(_)) => {}
         }
     }
-    fn walk<'a>(ty: &Type<'a>, known: &dyn Fn(&str) -> bool, out: &mut Vec<GenericParam<'a>>) {
+    fn walk<'a, 'd>(
+        ty: &Type<'a>,
+        known: &dyn Fn(&str) -> bool,
+        decl: &dyn Fn(&Path<'a>) -> Option<&'d [GenericParam<'a>]>,
+        out: &mut Vec<GenericParam<'a>>,
+    ) {
         match ty {
             Type::Path { path, args } => {
                 match path.as_single() {
                     Some(one) if args.is_empty() && !known(one) => push_ty(one, out),
                     _ => {}
                 }
-                for a in args { arg(a, known, out); }
+                let params = decl(path);
+                for (i, a) in args.iter().enumerate() {
+                    arg(a, params.and_then(|p| p.get(i)), known, decl, out);
+                }
             }
-            Type::Pointer(inner) | Type::Slice(inner) => walk(inner, known, out),
+            Type::Pointer(inner) | Type::Slice(inner) => walk(inner, known, decl, out),
             Type::Array(inner, n) | Type::Simd(inner, n) => {
-                walk(inner, known, out);
-                if let ConstVal::Param(n) = n { push_const(n, out); }
+                walk(inner, known, decl, out);
+                // an array length has no declaration to consult, so `u32` again.
+                if let ConstVal::Param(n) = n { push_const(n, Type::Uint32, out); }
             }
             Type::Function { params, return_type } => {
-                for p in params { walk(p, known, out); }
-                walk(return_type, known, out);
+                for p in params { walk(p, known, decl, out); }
+                walk(return_type, known, decl, out);
             }
             _ => {}
         }
@@ -557,8 +714,13 @@ fn impl_generics<'a>(target: &Type<'a>, known: &dyn Fn(&str) -> bool) -> Vec<Gen
     // descend one level before collecting, so the target itself is never taken
     // for a parameter.
     match target {
-        Type::Path { args, .. } => for a in args { arg(a, known, &mut out); },
-        other => walk(other, known, &mut out),
+        Type::Path { path, args } => {
+            let params = decl(path);
+            for (i, a) in args.iter().enumerate() {
+                arg(a, params.and_then(|p| p.get(i)), known, decl, &mut out);
+            }
+        }
+        other => walk(other, known, decl, &mut out),
     }
     out
 }
@@ -575,12 +737,14 @@ fn resolve_extend_target<'a>(
     target: &Type<'a>,
     generics: &[GenericParam<'a>],
     scopes: &Scopes<'a>,
+    type_params: &TypeParams<'a>,
+    aliases: &Aliases<'a>,
     members: &MemberTable<'a>,
     file: FileId,
 ) -> Option<(Type<'a>, TyHead)> {
     let mut errs = Vec::new();
     let mut rw = Rewriter {
-        scopes, members,
+        scopes, type_params, aliases, members,
         // this rewriter only resolves a type, which never consults the member
         // table, so the module never gates anything here.
         module: ModId(u32::MAX),
@@ -952,6 +1116,8 @@ fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], items: &[TopLevel<'a>]) -> 
                 check(attributes, AttrTarget::Global, &mut errs),
             TopLevelNode::Trait { attributes, .. } =>
                 check(attributes, AttrTarget::Trait, &mut errs),
+            TopLevelNode::Alias { attributes, .. } =>
+                check(attributes, AttrTarget::Alias, &mut errs),
             // an `extend` block takes no attributes of its own; each of its
             // methods is checked as the function it desugars into.
             TopLevelNode::Extend { methods, .. } => {
@@ -1045,6 +1211,13 @@ impl Namespace {
 /// place.
 struct Rewriter<'x, 'a> {
     scopes: &'x Scopes<'a>,
+    /// what every struct and enum declares, for `normalize_const_args`.
+    type_params: &'x TypeParams<'a>,
+    /// every resolved alias, for the expansion in `ty`. Empty while the aliases
+    /// themselves are being resolved and one still has unresolved dependencies -
+    /// which is why that pass only resolves a body once every alias it names is
+    /// already in here.
+    aliases: &'x Aliases<'a>,
     /// every method in the program, keyed by `(final type name, method name)`.
     /// what makes `Point::new()` resolve for an imported `Point`.
     members: &'x MemberTable<'a>,
@@ -1150,9 +1323,16 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 for a in args.iter_mut() {
                     if let GenericArg::Type(t) = a { self.ty(t, gparams); }
                 }
-                let args = std::mem::take(args);
+                let mut args = std::mem::take(args);
+                let last = path.last();
                 *ty = match self.type_head(path, gparams) {
-                    TypeHead::Def(def) => Type::Named { def, args },
+                    TypeHead::Def(def) => {
+                        self.normalize_const_args(def, &mut args);
+                        match self.aliases.get(&def) {
+                            Some(_) => self.expand_alias(def, args, last),
+                            None => Type::Named { def, args },
+                        }
+                    }
                     TypeHead::Param(name) => Type::Param(name),
                 };
             }
@@ -1165,6 +1345,102 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.ty(return_type, gparams);
             }
             _ => {}
+        }
+    }
+
+    /// Point a struct literal written through an alias at the struct it names.
+    ///
+    /// `def` is whatever the head resolved to; if that is an alias, expanding it
+    /// must land on a named type, since a literal of `type Sample = f32` is not a
+    /// thing that can be written. The expansion's own arguments replace the ones
+    /// at the literal - `Quad::<i32> { .. }` becomes `Buf::<i32, 4> { .. }` - so
+    /// typecheck sees exactly what the spelled-out form would have produced.
+    fn expand_literal_head(&mut self, name: &mut NameRef<'a>, type_args: &mut Vec<GenericArg<'a>>) {
+        if !self.aliases.contains_key(&name.def) { return }
+        let written = name.path.last();
+        match self.expand_alias(name.def, std::mem::take(type_args), written) {
+            Type::Named { def, args } => {
+                name.def = def;
+                *type_args = args;
+            }
+            // an arity error already reported by `expand_alias` lands here too;
+            // it left a `Param`, and a second message would only repeat it.
+            Type::Param(_) => {}
+            other => {
+                let span = self.span.clone();
+                self.error(&span, format!(
+                    "type alias '{}' names '{}', which is not a struct", written, other));
+            }
+        }
+    }
+
+    /// Replace a use of a type alias with the type it stands for.
+    ///
+    /// An alias is transparent: nothing downstream learns that `Sample` was ever
+    /// written, only that the type is `f32`. That is what lets a method on the
+    /// aliased type be called through the alias, and what keeps every later stage
+    /// free of a variant it would have to see through.
+    fn expand_alias(&mut self, def: DefId, args: Vec<GenericArg<'a>>, written: &'a str) -> Type<'a> {
+        let al = &self.aliases[&def];
+        if args.len() != al.generics.len() {
+            let span = self.span.clone();
+            self.errs.push(Error::new(span.clone(), format!(
+                "type alias '{}' expects {} argument{}, got {}",
+                written, al.generics.len(),
+                if al.generics.len() == 1 { "" } else { "s" }, args.len()))
+                .with_label(span, format!("used with {} here", args.len()))
+                .with_label(al.span.clone(), format!("'{}' is declared here", written)));
+            return Type::Param(written);
+        }
+        let mut types: HashMap<&'a str, Type<'a>> = HashMap::new();
+        let mut consts: HashMap<&'a str, ConstVal<'a>> = HashMap::new();
+        for (gp, ga) in al.generics.iter().zip(&args) {
+            match (gp, ga) {
+                (GenericParam::Type { name, .. }, GenericArg::Type(t)) => {
+                    types.insert(name, t.clone());
+                }
+                (GenericParam::Const(name, _), GenericArg::Const(c)) => {
+                    consts.insert(name, c.clone());
+                }
+                // a bare identifier naming a const param still arrives as a type
+                // when the alias' own binder is what declares it, there being no
+                // struct declaration for `normalize_const_args` to consult.
+                (GenericParam::Const(name, _), GenericArg::Type(Type::Param(n))) => {
+                    consts.insert(name, ConstVal::Param(n));
+                }
+                (GenericParam::Type { name, .. }, GenericArg::Const(_)) => {
+                    let span = self.span.clone();
+                    self.error(&span, format!(
+                        "type alias '{}': expected a type argument for '{}', got a const value",
+                        written, name));
+                }
+                (GenericParam::Const(name, _), GenericArg::Type(_)) => {
+                    let span = self.span.clone();
+                    self.error(&span, format!(
+                        "type alias '{}': expected a const argument for '{}', got a type",
+                        written, name));
+                }
+            }
+        }
+        subst_alias(&al.ty, &types, &consts)
+    }
+
+    /// Re-tag any argument that fills a `const` slot but parsed as a type.
+    ///
+    /// `Buf<T, N>` has no way to say which of its arguments is a value - both are
+    /// bare identifiers, and the parser has no declaration to consult - so both
+    /// arrive as `GenericArg::Type`. By here the head is resolved and the
+    /// declaration *is* in hand, and a parameter name sitting in a const slot can
+    /// only be a const param. Re-tagging it now is what lets this type be
+    /// compared against a `Buf<i32, 4>`, whose `4` is a `GenericArg::Const`:
+    /// until it was, an `extend Buf<T, N>` method never matched its own receiver
+    /// and every call on one read as a missing field.
+    fn normalize_const_args(&self, def: DefId, args: &mut [GenericArg<'a>]) {
+        let Some(params) = self.type_params.get(&def) else { return };
+        for (gp, ga) in params.iter().zip(args.iter_mut()) {
+            if let (GenericParam::Const(..), GenericArg::Type(Type::Param(n))) = (gp, &*ga) {
+                *ga = GenericArg::Const(ConstVal::Param(n));
+            }
         }
     }
 
@@ -1333,22 +1609,17 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 return Some(one);
             }
             // A generic parameter of the enclosing item, read in value position.
-            // A `const` one declared in a binder is pushed as a local above and
-            // never reaches here; what does reach here is a parameter *inferred
-            // from an `extend` target*, where `Cascade<A, N>` cannot say which of
-            // `A` and `N` is a const, so both are bound as type parameters. The
-            // read is then legitimate source that the compiler cannot honour yet
-            // - which is worth saying, rather than claiming the name is unknown
-            // when it is declared two lines up.
+            // A `const` one is pushed as a local above (whether it was declared in
+            // a binder or inferred from an `extend` target) and never reaches
+            // here, so what does reach here is a *type* parameter - a name that
+            // is declared, just not as anything with a value. Worth saying, rather
+            // than claiming the name is unknown when it is two lines up.
             if !in_call && gparams.contains(one) {
                 self.push(Error::new(span.clone(), format!(
-                    "generic parameter '{}' cannot be used as a value here", one))
+                    "type parameter '{}' cannot be used as a value", one))
                     .with_label(span.clone(), format!(
-                        "'{}' is bound as a type parameter", one))
-                    .with_note(
-                        "an `extend` target binds every argument as a type parameter - \
-                         `extend Buf<T, N>` cannot tell `N` from `T` - so a const \
-                         parameter inferred from one is not readable as a value yet"));
+                        "'{}' names a type, not a value", one))
+                    .with_note("only a `const` parameter stands for a value"));
                 return Some(one);
             }
             self.push(if in_call {
@@ -1537,9 +1808,14 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                     self.error_here(format!(
                         "'{}' has too many `::` segments; only `qualifier::Type` is supported", name));
                 }
-                for a in type_args {
+                for a in type_args.iter_mut() {
                     if let GenericArg::Type(t) = a { self.ty(t, gparams); }
                 }
+                // a literal may be written through an alias (`Quad::<i32> { .. }`
+                // for `type Quad<T> = Buf<T, 4>`), which names a struct just as
+                // well as the struct's own name does. Redirect to what it expands
+                // to, taking the arguments the alias supplied with it.
+                self.expand_literal_head(name, type_args);
                 for (_, fe) in fields { self.expr(fe, gparams); }
             }
             ExprNode::Access { base, .. } => self.expr(base, gparams),
@@ -1622,6 +1898,11 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         // types, a trait method's signature); `stmt`/`expr` narrow it as they go.
         self.span = tl.span.clone();
         match &mut tl.value {
+            // an alias' own body was resolved before this pass began (it has to
+            // be, since a *use* of it in any module expands during this one), and
+            // the declaration itself is dropped when modules are merged. Nothing
+            // left to rewrite.
+            TopLevelNode::Alias { .. } => {}
             TopLevelNode::Function { name, def, generics, params, return_type, body, .. } => {
                 let gparams = generic_names(generics);
                 let sym = *self.scopes.calls.get(*name)
@@ -1770,6 +2051,9 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
             TopLevelNode::Struct { name, .. } => ("type", *name),
             TopLevelNode::Enum { name, .. } => ("type", *name),
             TopLevelNode::Trait { name, .. } => ("trait", *name),
+            // an alias shares the type namespace, so `type Point = ...` beside a
+            // `struct Point` is the same collision as two structs.
+            TopLevelNode::Alias { name, .. } => ("type", *name),
             _ => continue,
         };
         if seen_types.contains(name) {
@@ -1817,6 +2101,15 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
                     if payload.is_empty() { continue; }
                     defs.add_payload(id, vname, arena.alloc_str(&format!("{}${}", sym, vname)));
                 }
+            }
+            // an alias is a name in the type namespace like a struct, and is
+            // importable and qualifiable like one - it just never reaches codegen,
+            // every use having been expanded by then. Its `Sym` name is never
+            // emitted; only the identity is load-bearing.
+            TopLevelNode::Alias { name, is_pub, attributes, .. } => {
+                let id = def(defs, DefKind::Alias, name, *is_pub,
+                    linkage_of(name, attributes, false), &tl.span);
+                st.structs.insert(name, Sym { name: defs.symbol(id, arena), def: id, is_pub: *is_pub });
             }
             // globals live in the callable/value namespace (referenced as vars).
             TopLevelNode::Global { name, is_pub, attributes, .. } => {
@@ -2737,20 +3030,102 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
     // push them onto the functions its methods desugared into. This could not
     // happen at desugaring time: telling the `T` of `extend [T]` from the
     // `Point` of `extend *Point` needs a type scope, and there wasn't one yet.
+    // every struct and enum in the program, so an `extend` target's arguments can
+    // be classified against what the type actually declares. built up front: the
+    // loop below takes `modules` mutably, and a target may name a type from any
+    // module, not only its own.
+    //
+    // keyed through each module's own type scope rather than the `def` field on
+    // the node, which pass 2 has yet to fill in - and looked up the same way
+    // `type_def_of` will look one up, so the two cannot disagree.
+    let mut type_params: TypeParams<'a> = HashMap::new();
+    for (id, m) in modules.iter().enumerate() {
+        for tl in &m.items {
+            let (TopLevelNode::Struct { name, generics, .. }
+               | TopLevelNode::Enum { name, generics, .. }) = &tl.value else { continue };
+            if let Some(sym) = all_scopes[id].types.get(*name) {
+                type_params.insert(sym.def, generics.clone());
+            }
+        }
+    }
+
+    // pass 1.2: resolve every type alias' body, in the module that declared it.
+    //
+    // Has to happen before anything resolves a type, since a *use* of an alias in
+    // any module expands during pass 2 and needs the body ready. Round-based
+    // rather than recursive: an alias whose body names another can only be
+    // resolved once that one is, so the rounds simply repeat until a round
+    // resolves nothing new. Whatever is left over then is a cycle - `type A = B;
+    // type B = A;` has no expansion, and looping on it would not find one.
+    let mut aliases: Aliases<'a> = HashMap::new();
+    // every alias in the program, and (module, def, generics, body as written,
+    // span) for each one still to resolve.
+    let mut declared: HashSet<DefId> = HashSet::new();
+    let mut pending: Vec<(usize, DefId, Vec<GenericParam<'a>>, Type<'a>, Span)> = Vec::new();
+    for (id, m) in modules.iter().enumerate() {
+        for tl in &m.items {
+            let TopLevelNode::Alias { name, generics, ty, .. } = &tl.value else { continue };
+            let Some(sym) = all_scopes[id].types.get(*name) else { continue };
+            declared.insert(sym.def);
+            pending.push((id, sym.def, generics.clone(), ty.clone(), tl.span.clone()));
+        }
+    }
+    let no_members_yet = MemberTable::new();
+    while !pending.is_empty() {
+        let mut progressed = false;
+        let mut deferred = Vec::new();
+        for (id, def, generics, ty, span) in pending {
+            let scopes = &all_scopes[id];
+            if !alias_deps_ready(&ty, scopes, &declared, &aliases) {
+                deferred.push((id, def, generics, ty, span));
+                continue;
+            }
+            let mut rw = Rewriter {
+                scopes,
+                type_params: &type_params,
+                aliases: &aliases,
+                // resolving a type consults no members, so an empty table is not
+                // a limitation here - see `resolve_extend_target`.
+                members: &no_members_yet,
+                module: modules[id].mid,
+                errs: &mut errs,
+                locals: Vec::new(),
+                span: span.clone(),
+            };
+            let mut body = ty;
+            rw.ty(&mut body, &generic_names(&generics));
+            aliases.insert(def, AliasDef { generics, ty: body, span });
+            progressed = true;
+        }
+        if !progressed {
+            for (_, _, _, ty, span) in deferred {
+                errs.push(Error::new(span.clone(), "type alias is cyclic".to_string())
+                    .with_label(span, format!("expanding it reaches itself through '{}'", ty))
+                    .with_note("an alias is expanded, not defined - it cannot name itself, \
+                                directly or through another alias"));
+            }
+            break;
+        }
+        pending = deferred;
+    }
+
     for (id, m) in modules.iter_mut().enumerate() {
-        let types = &all_scopes[id].types;
-        let known = |n: &str| types.contains_key(n);
+        let scopes = &all_scopes[id];
+        let known = |n: &str| scopes.types.contains_key(n);
+        let decl = |path: &Path<'a>| type_def_of(scopes, path)
+            .and_then(|d| type_params.get(&d))
+            .map(Vec::as_slice);
         // one `where` clause is copied onto every method of its block, so an
         // error in it would otherwise be reported once per method.
         let mut reported: HashSet<(usize, &'a str)> = HashSet::new();
         for rm in m.methods.iter_mut() {
-            rm.generics = impl_generics(&rm.target, &known);
+            rm.generics = impl_generics(&rm.target, &known, &decl);
             apply_where_bounds(
                 &mut rm.generics, &rm.where_bounds, WhereOwner::Extend(&rm.target), &rm.span,
                 &mut reported, &mut errs);
         }
         for ri in m.impls.iter_mut() {
-            ri.generics = impl_generics(&ri.target, &known);
+            ri.generics = impl_generics(&ri.target, &known, &decl);
             apply_where_bounds(
                 &mut ri.generics, &ri.where_bounds, WhereOwner::Extend(&ri.target), &ri.span,
                 &mut reported, &mut errs);
@@ -2820,7 +3195,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // speculative resolution so it isn't reported twice, and skip the
             // member rather than key it on a type that doesn't exist.
             let Some((self_ty, head)) =
-                resolve_extend_target(&rm.target, &rm.generics, scopes, &no_members, m.file)
+                resolve_extend_target(&rm.target, &rm.generics, scopes, &type_params, &aliases,
+                                      &no_members, m.file)
             else { continue };
             // an associated function is only ever reached by naming its type, so
             // one declared on a target no path can name could never be called.
@@ -2861,6 +3237,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         let scopes = &all_scopes[id];
         let mut rw = Rewriter {
             scopes,
+            type_params: &type_params,
+            aliases: &aliases,
             members: defs.members(),
             module: m.mid,
             errs: &mut errs,
@@ -2875,7 +3253,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // has already produced an error through the type/bound paths, so
             // dropping the record here loses no diagnostic.
             let (Some((self_ty, head)), Some(trait_)) = (
-                resolve_extend_target(&imp.target, &imp.generics, scopes, &no_members, m.file),
+                resolve_extend_target(&imp.target, &imp.generics, scopes, &type_params, &aliases,
+                                      &no_members, m.file),
                 scopes.types.get(imp.trait_),
             ) else { continue };
             // resolve each `type Item = Ty` binding's right-hand side with the
@@ -2939,6 +3318,10 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 TopLevelNode::Struct { .. } => { out.push(tl.clone()); continue; }
                 TopLevelNode::Enum { .. } => { out.push(tl.clone()); continue; }
                 TopLevelNode::Trait { .. } => { out.push(tl.clone()); continue; }
+                // every use of an alias has been expanded into what it names, so
+                // the declaration has nothing left to say. Dropping it here is
+                // what keeps `TopLevelNode::Alias` a front-end-only variant.
+                TopLevelNode::Alias { .. } => continue,
                 TopLevelNode::Extend { .. } => unreachable!("extend desugared before merge"),
                 TopLevelNode::Global { name, .. } => {
                     if !seen_globals.insert(*name) {
@@ -2957,7 +3340,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                         (false, params.as_slice(), return_type),
                     TopLevelNode::Extern { params, return_type, .. } =>
                         (true, params.as_slice(), return_type),
-                    TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } | TopLevelNode::Trait { .. } => unreachable!("only callables are recorded"),
+                    TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. }
+                    | TopLevelNode::Trait { .. } | TopLevelNode::Alias { .. } => unreachable!("only callables are recorded"),
                     TopLevelNode::Extend { .. } => unreachable!("extend desugared before merge"),
                     TopLevelNode::Global { .. } => unreachable!("globals are deduped separately"),
                 };

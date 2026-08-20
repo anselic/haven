@@ -1,0 +1,17 @@
+// An alias that reaches itself has no expansion.
+//
+// Aliases are expanded, not defined: `A` stands for whatever `B` stands for, and
+// if that is `A` again there is no type at the bottom of it. Resolution notices
+// because it repeats until a round expands nothing new, and reports what is left
+// rather than looping.
+//@ error: type alias is cyclic
+//@ error: cannot name itself
+
+type A = B;
+type B = A;
+
+@export
+proc main() i32 {
+    let x: A = 0;
+    return 0;
+}

@@ -1,0 +1,50 @@
+// A const parameter inferred from an `extend` target: usable as a value, in an
+// array length, and in the method's own signature.
+//
+// `extend Buf<T, N>` gives the grammar nothing to work with - `T` and `N` are
+// both bare identifiers - so the parameters an `extend` binds are classified
+// against what the *declaration* says each slot is. Before that, `N` came out a
+// type parameter: reading it was "unknown value", and `Buf<T, N>` never matched
+// a `Buf<i32, 4>` receiver, so every method call on one read as a missing field.
+//
+// The declared type comes along with the classification: `const N: u64` must
+// stay a `u64` here, or `N - 1u64` would not typecheck and the method's
+// `[T; N]` would not match the struct's field.
+
+struct Buf<T, const N: u64> {
+    data: [T; N],
+
+    // an inherent method sees the same parameters an out-of-line block infers.
+    proc capacity(*self) u64 { return N; }
+}
+
+extend Buf<T, N> {
+    proc count(*self) u64 { return N; }
+    // the const param in arithmetic, and indexing derived from it
+    proc last(*self) T { return (*self).data[N - 1u64]; }
+    proc half(*self) u64 { return N / 2u64; }
+}
+
+// a plain generic proc forwarding a const param into a struct type - the same
+// symbolic forwarding, reached from a written binder rather than an `extend`.
+proc first_of<T, const N: u64>(b: *Buf<T, N>) T {
+    return (*b).data[0u64];
+}
+
+@export
+proc main() i32 {
+    let b: Buf<i32, 4> = Buf::<i32, 4> { data: [10, 20, 30, 40] };
+    println(b.capacity());  // 4
+    println(b.count());     // 4
+    println(b.last());      // 40
+    println(b.half());      // 2
+    println(first_of::<i32, 4>(&b)); // 10
+
+    // a distinct N makes a distinct instance, with its own baked-in constant.
+    let c: Buf<f32, 2> = Buf::<f32, 2> { data: [1.5f32, 2.5f32] };
+    println(c.count());     // 2
+    println(c.last());      // 2.5
+    println(c.half());      // 1
+
+    return 0;
+}

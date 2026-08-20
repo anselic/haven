@@ -1,0 +1,66 @@
+// `type Name = Type;` - another spelling for a type that already exists.
+//
+// An alias is transparent, not a type of its own: name resolution expands every
+// use into what it names and drops the declaration, so nothing past the front end
+// learns an alias was ever written. That is what makes a method on the aliased
+// type callable through the alias, and `Sample` and `f32` the same type rather
+// than two that happen to be laid out alike.
+
+// the simple case: a scalar under a domain name
+type Sample = f32;
+
+// a compound type, and one built on the alias above
+type Frame = [Sample];
+
+// aliases take parameters, and may fix some of the underlying type's own
+type Buf4<T> = Buf<T, 4>;
+
+// a function type, so a callback's shape can be named once
+type Shaper = proc(Sample) Sample;
+
+struct Buf<T, const N: u64> { data: [T; N] }
+
+struct Env {
+    // in a field...
+    level: Sample,
+}
+
+// ...in a parameter, and in a return type
+proc scale(e: Env, x: Sample) Sample { return e.level * x; }
+
+proc twice(x: Sample) Sample { return x + x; }
+proc run(f: Shaper, x: Sample) Sample { return f(x); }
+
+proc total(f: Frame) Sample {
+    let acc: Sample = 0.0f32;
+    let i: u64 = 0u64;
+    while (i < 3u64) {
+        acc = acc + f[i];
+        i = i + 1u64;
+    }
+    return acc;
+}
+
+// an `extend` block may target an alias: the methods land on what it expands to,
+// so they are reachable through either spelling.
+extend Buf4<T> {
+    proc third(*self) T { return (*self).data[2u64]; }
+}
+
+@export
+proc main() i32 {
+    println(scale(Env { level: 2.0f32 }, 1.25f32));   // 2.5
+    println(total([1.0f32, 2.0f32, 3.0f32]));          // 6
+
+    let f: Shaper = twice;
+    println(run(f, 3.5f32));                           // 7
+
+    // a literal written through the alias, and one written through the struct;
+    // both make the same type, and the method reaches both.
+    let a: Buf4<i32> = Buf4::<i32> { data: [9, 8, 7, 6] };
+    let b: Buf<i32, 4> = Buf::<i32, 4> { data: [1, 2, 3, 4] };
+    println(a.third());                                // 7
+    println(b.third());                                // 3
+
+    return 0;
+}

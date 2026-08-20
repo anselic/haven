@@ -1606,6 +1606,28 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
             fields,
         }, methods));
 
+    // type alias: `[attrs] [pub] type Name[<params>] = Type;`
+    //
+    // `type` is a soft keyword (it is also the leader of a trait's `type Item;`
+    // and an impl's `type Item = ...;`, both of which are parsed inside their own
+    // blocks). Nothing else at top level begins with a bare identifier, so
+    // matching one here commits without stealing another item's opening token.
+    let alias = item_header.clone()
+        .then_ignore(select_ref! { Token::Var(s) if *s == "type" => () })
+        .then(var.map(|s| *s))
+        .then(generics.clone())
+        .then_ignore(just(Token::Assign))
+        .then(parse_type())
+        .then_ignore(just(Token::Semicolon))
+        .map(|((((attributes, is_pub), name), generics), ty)| (TopLevelNode::Alias {
+            name,
+            def: DefId::UNRESOLVED,
+            is_pub,
+            attributes,
+            generics,
+            ty,
+        }, Vec::new()));
+
     // module-level constant: `[attrs] [pub] const NAME: Type = <expr>;`
     let global = item_header.clone()
         .then_ignore(just(Token::Const))
@@ -1789,6 +1811,7 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
         extend_.boxed(),
         trait_.boxed(),
         global.boxed(),
+        alias.boxed(),
     ])
         .map_with(|(node, methods), e| {
             let span = e.span();

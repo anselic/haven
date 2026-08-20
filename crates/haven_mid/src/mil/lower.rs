@@ -615,6 +615,7 @@ fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
         TopLevelNode::Global { .. } => (vec![], None),
         TopLevelNode::Enum { .. } => (vec![], None),
         TopLevelNode::Trait { .. } => unreachable!("traits dropped in monomorphization"),
+        TopLevelNode::Alias { .. } => unreachable!("aliases expanded before lowering"),
         TopLevelNode::Extend { .. } => unreachable!("extend desugared before lowering"),
     }
 }
@@ -754,6 +755,7 @@ pub fn lower<'a>(
                 }
             }
             TopLevelNode::Trait { .. } => unreachable!("traits dropped in monomorphization"),
+            TopLevelNode::Alias { .. } => unreachable!("aliases expanded before lowering"),
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before lowering"),
         }
     }

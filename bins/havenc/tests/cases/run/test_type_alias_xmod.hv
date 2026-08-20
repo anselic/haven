@@ -1,0 +1,26 @@
+// An alias exported from another module means what it meant *there*.
+//
+// `pub type Amp = Gain;` has to expand to `helpers/alias_lib`'s `Gain` in a
+// module that never imported `Gain` - which is only possible because an alias'
+// body is resolved once, in the module that declared it, before any use of it is
+// expanded anywhere.
+
+import helpers/alias_lib { Amp, Level, Sample }
+import helpers/alias_lib
+
+proc apply(a: *Amp, x: Level) Sample {
+    return (*a).tick(x);
+}
+
+@export
+proc main() i32 {
+    let a: Amp = Amp { g: 3.0f32 };
+    println(apply(&a, 2.0f32));       // 6
+
+    // and through the module qualifier, where the alias is a name in the type
+    // namespace like any other.
+    let b: alias_lib::Amp = alias_lib::Amp { g: 0.5f32 };
+    println(b.tick(8.0f32));          // 4
+
+    return 0;
+}

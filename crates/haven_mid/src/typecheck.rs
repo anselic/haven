@@ -370,6 +370,7 @@ fn check_toplevel<'a>(
         // signatures carry no bodies to check here.
         TopLevelNode::Trait { .. } => {}
         // methods were desugared to functions in the module resolver.
+        TopLevelNode::Alias { .. } => unreachable!("aliases expanded before typecheck"),
         TopLevelNode::Extend { .. } => unreachable!("extend desugared before typecheck"),
     }
 
@@ -602,6 +603,7 @@ pub fn typecheck_program<'a>(
             // in the value namespace (variant refs resolve directly). traits are
             // registered in their own pass below.
             TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } | TopLevelNode::Trait { .. } => {}
+            TopLevelNode::Alias { .. } => unreachable!("aliases expanded before typecheck"),
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before typecheck"),
         }
     }
@@ -665,6 +667,7 @@ fn toplevel_def(node: &TopLevelNode) -> Option<DefId> {
         | TopLevelNode::Global { def, .. }
         | TopLevelNode::Enum { def, .. }
         | TopLevelNode::Trait { def, .. } => Some(*def),
+        TopLevelNode::Alias { .. } => None,
         TopLevelNode::Extend { .. } => None,
     }
 }

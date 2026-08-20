@@ -1226,6 +1226,7 @@ pub fn monomorphize<'a>(
             TopLevelNode::Extern { .. } => {}
             // traits emit no code; they're dropped from the monomorphized output.
             TopLevelNode::Trait { .. } => {}
+            TopLevelNode::Alias { .. } => unreachable!("aliases expanded before mono"),
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before mono"),
         }
     }
@@ -1441,6 +1442,7 @@ pub fn monomorphize<'a>(
             TopLevelNode::Extern { .. } => output.push(tl.clone()),
             // traits emit no code and are not carried into the concrete program.
             TopLevelNode::Trait { .. } => {}
+            TopLevelNode::Alias { .. } => unreachable!("aliases expanded before mono"),
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before mono"),
         }
     }
