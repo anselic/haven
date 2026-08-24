@@ -1,0 +1,75 @@
+// A bound is satisfiable by a *composite* type built from the parameters in
+// scope, not only by a concrete type or by forwarding a bare parameter.
+//
+// `Pair<T, U>` is a `Show` only when `T` and `U` are (a conditional impl), so
+// deciding `Pair<A, i32>: Show` inside `wrap<A: Show>` means deciding `A: Show`
+// while `A` is still symbolic. Nothing covers a type parameter - it is not a
+// type yet - so `implements` used to bottom out at "no" there and reject the
+// call, even though `A: Show` is written three tokens away. The bound the caller
+// declared is the answer, because every instantiation of `wrap` is separately
+// checked against it.
+//
+// Without this, a generic helper cannot compose anything generic: it can pass
+// its own parameter along, but the moment it wraps it in a container and hands
+// *that* to something bounded, it is stuck. `fail/test_bound_through_composite_
+// unbounded.hv` is the other half - an undeclared bound is still rejected.
+//@ exit: 0
+
+trait Show {
+    proc show(*self) str;
+}
+
+extend i32: Show { proc show(*self) str { return "i"; } }
+extend bool: Show { proc show(*self) str { return "b"; } }
+
+struct Pair<T, U> { a: T, b: U }
+
+extend Pair<T, U>: Show where T: Show, U: Show {
+    proc show(*self) str {
+        print(self.a.show());
+        return self.b.show();
+    }
+}
+
+// the thing that has to be checked: `render` wants a `Show`, and it is being
+// handed a `Pair` whose conformance depends on a parameter of the caller.
+proc render<T: Show>(x: T) str { return x.show(); }
+
+// one level: `Pair<A, i32>` is a `Show` because `A` is and `i32` is.
+proc wrap<A: Show>(a: A) str {
+    return render::<Pair<A, i32>>(Pair::<A, i32> { a: a, b: 1 });
+}
+
+// two levels, and through a second parameter as well - the recursion has to keep
+// consulting the same scope as it descends.
+proc wrap2<A: Show, B: Show>(a: A, b: B) str {
+    let inner: Pair<A, B> = Pair::<A, B> { a: a, b: b };
+    return render::<Pair<Pair<A, B>, bool>>(
+        Pair::<Pair<A, B>, bool> { a: inner, b: true });
+}
+
+// the bound arriving through an `extend`'s own `where` clause, rather than a
+// free proc's parameter list, on a composite built from that block's parameter.
+struct Boxed<T> { item: T }
+
+extend Boxed<T>: Show where T: Show {
+    proc show(*self) str {
+        return render::<Pair<T, bool>>(Pair::<T, bool> { a: self.item, b: false });
+    }
+}
+
+// a concrete argument still resolves through the impl, not through any scope -
+// the ordinary path must keep working unchanged.
+proc concrete() str {
+    return render::<Pair<i32, bool>>(Pair::<i32, bool> { a: 7, b: true });
+}
+
+@export
+proc main() i32 {
+    println(wrap::<bool>(true));                 // b then i
+    println(wrap2::<i32, bool>(3, false));       // i, b, then b
+    let bx: Boxed<i32> = Boxed::<i32> { item: 5 };
+    println(bx.show());                          // i then b
+    println(concrete());                         // i then b
+    return 0;
+}

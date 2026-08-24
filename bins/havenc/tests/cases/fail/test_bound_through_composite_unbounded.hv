@@ -1,0 +1,36 @@
+// The other half of `run/test_bound_through_composite.hv`: reading a bound off
+// the parameters in scope must not turn into reading one that is not there.
+//
+// `A` carries no bound at all, so `Pair<A, i32>` cannot be a `Show` - the
+// conditional impl's clause asks about `A` and gets nothing back.
+//
+// The message names the type the bound was checked against, `Pair<A, i32>`, and
+// stops there; it does not yet say that `A` is the part that failed.
+//@ error: type `Pair<A, i32>` does not implement trait `Show`
+
+trait Show {
+    proc show(*self) str;
+}
+
+extend i32: Show { proc show(*self) str { return "i"; } }
+
+struct Pair<T, U> { a: T, b: U }
+
+extend Pair<T, U>: Show where T: Show, U: Show {
+    proc show(*self) str {
+        print(self.a.show());
+        return self.b.show();
+    }
+}
+
+proc render<T: Show>(x: T) str { return x.show(); }
+
+proc wrap<A>(a: A) str {
+    return render::<Pair<A, i32>>(Pair::<A, i32> { a: a, b: 1 });
+}
+
+@export
+proc main() i32 {
+    println(wrap::<i32>(3));
+    return 0;
+}

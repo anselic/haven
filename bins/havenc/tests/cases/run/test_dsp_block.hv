@@ -1,0 +1,93 @@
+// The `Mono` block algebra from `dsp/block`: Faust's block-diagram operators as
+// generic combinator types, each `extend`ed with a `where A: Mono` impl.
+//
+// What this pins, beyond "it runs":
+//
+//   * a type conforms to `Mono` through an *inherent* method it already had -
+//     `extend Biquad: Mono {}` is an empty block, and the signature is really
+//     checked (`fail/test_dsp_block_svf.hv` is the other half of that);
+//   * the trait's defaulted `process_block`/`process_into` are reached on every
+//     implementer without any of them writing one;
+//   * combinators nest, including through a `type` alias (`Chain3`), and the
+//     constructor procs infer their type arguments from the values passed;
+//   * the parts stay reachable as fields after wiring, so a chain is retunable;
+//   * an `@alloc(false)` callback can drive a whole nested chain - the property
+//     the whole design exists to preserve.
+//
+// Everything printed is exactly representable, and the filter stages are fed a
+// zero block (a linear filter at rest maps 0 to 0 exactly), so the golden does
+// not depend on the platform's libm.
+//@ dep: dsp=stdlib/dsp
+
+import dsp/block { Mono, Ident, Gain, Serial, Sum, Mix, Feedback, Chain3,
+                   ident, gain, serial, serial3, sum, mix, feedback }
+import dsp/filters { Biquad, OnePole }
+
+// the real-time claim: a nested chain driven from a callback that may not
+// allocate. Resolving this needs safecheck to see through the defaulted trait
+// method into every `process` it inlines.
+@alloc(false)
+proc render(c: *Chain3<Biquad, OnePole, Gain>, block: *[f32]) void {
+    c.process_block(block);
+}
+
+@export
+proc main() i32 {
+    let sr: f32 = 48000.0;
+
+    // --- leaves ---
+    println(ident().process(3.0));            // 3
+    println(gain(2.0).process(3.0));          // 6
+
+    // --- serial: 1 -> *2 -> *3 ---
+    let s: Serial<Gain, Gain> = serial(gain(2.0), gain(3.0));
+    println(s.process(1.0));                  // 6
+
+    // --- sum: both see 1, outputs added ---
+    let p: Sum<Gain, Gain> = sum(gain(2.0), gain(3.0));
+    println(p.process(1.0));                  // 5
+
+    // --- mix: halfway between dry 1 and wet 3 ---
+    let m: Mix<Ident, Gain> = mix(ident(), gain(3.0), 0.5);
+    println(m.process(1.0));                  // 2
+
+    // --- feedback: an impulse into a loop with return gain 0.5 ---
+    let f: Feedback<Ident, Gain> = feedback(ident(), gain(0.5));
+    println(f.process(1.0));                  // 1
+    println(f.process(0.0));                  // 0.5
+    println(f.process(0.0));                  // 0.25
+
+    // --- a defaulted block method on a bare leaf ---
+    let g: Gain = gain(2.0);
+    let buf: [f32; 3] = [1.0f32, 2.0f32, 3.0f32];
+    let sl: [f32] = buf;
+    g.process_block(&sl);
+    println(sl[0u64]);                        // 2
+    println(sl[2u64]);                        // 6
+
+    // --- out of place, stopping at the shorter side ---
+    let src: [f32; 3] = [1.0f32, 2.0f32, 3.0f32];
+    let dst: [f32; 2] = [0.0f32, 0.0f32];
+    let ss: [f32] = src;
+    let dd: [f32] = dst;
+    g.process_into(&dd, &ss);
+    println(dd[1u64]);                        // 4
+    println(ss[2u64]);                        // 3, the source is untouched
+
+    // --- a three-stage chain, filters included, driven from @alloc(false) ---
+    let c: Chain3<Biquad, OnePole, Gain> =
+        serial3(Biquad::lowpass(1000.0, 0.707, sr),
+                OnePole::lowpass(5000.0, sr),
+                gain(0.5));
+    let zeros: [f32; 4] = [0.0f32, 0.0f32, 0.0f32, 0.0f32];
+    let zs: [f32] = zeros;
+    render(&c, &zs);
+    println(zs[3u64]);                        // 0
+
+    // --- the parts are fields, so the chain stays retunable in place ---
+    c.a.b.set_cutoff(2000.0, sr);
+    c.b.k = 4.0;
+    println(c.b.process(2.0));                // 8
+
+    return 0;
+}

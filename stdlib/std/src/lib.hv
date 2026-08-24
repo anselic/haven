@@ -55,7 +55,7 @@ extern strlen(s: str) u64;
 extern rt_puts(s: str) void;
 
 extern rt_abort(msg: str) !;
-extern rt_slice_len<T>(slice: *[T]) u64;
+@alloc(false) extern rt_slice_len<T>(slice: *[T]) u64;
 extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];
 
 /// Print `msg` and terminate the process. Its result type is the bottom type `!`,
@@ -74,4 +74,5 @@ pub proc println<T: Display>(x: T) void {
 }
 
 /// The number of elements in the runtime slice `slice`.
+@alloc(false)
 pub proc slice_len<T>(slice: *[T]) u64 { return rt_slice_len::<T>(slice); }

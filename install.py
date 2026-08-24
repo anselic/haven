@@ -18,18 +18,6 @@ STD_ARTIFACT = "std.hvmeta"
 # stdlib artifacts side by side. `--path` overrides it.
 DEFAULT_DEST = Path.home() / ".haven"
 
-# The other stdlib packages under `stdlib/`. Each builds to `<name>.hvmeta` and is
-# installed alongside the binaries, but unlike `std` none of them is auto-imported:
-# a program opts in by binding the artifact (`--dep dsp=<dir>/dsp.hvmeta`, or a path
-# dependency in its `haven.toml`). `(package-dir, artifact)` pairs.
-LIB_ARTIFACTS = [
-    ("dsp", "dsp.hvmeta"),
-    ("plug", "plug.hvmeta"),
-]
-
-# All the on-disk artifacts an install lays down, for the uninstaller to remove.
-ALL_ARTIFACTS = [STD_ARTIFACT] + [a for _, a in LIB_ARTIFACTS]
-
 # Build one library package under `stdlib/` and copy its `.hvmeta` to the
 # destination directory. `env` is passed through to `haven build` (and thus to
 # `havenc`) - the standalone packages need `HAVEN_STD` pointing at the freshly
@@ -75,9 +63,6 @@ def build_stdlib(source_dir, dest_dir):
         print(f"Skipping {', '.join(a for _, a in LIB_ARTIFACTS)}: {STD_ARTIFACT} "
               f"was not installed, so they cannot resolve `std`.")
         return
-    env = dict(os.environ, HAVEN_STD=str(std_meta))
-    for pkg, artifact in LIB_ARTIFACTS:
-        build_lib(source_dir, dest_dir, pkg, artifact, env)
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
@@ -108,7 +93,7 @@ def main():
         removed_any = False
         for d in dirs_to_check:
             if not d.is_dir(): continue
-            for bin_name in binaries + ALL_ARTIFACTS:
+            for bin_name in binaries + STD_ARTIFACTS:
                 target_file = d / bin_name
                 if target_file.exists():
                     try:

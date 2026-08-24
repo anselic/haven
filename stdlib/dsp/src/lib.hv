@@ -1,8 +1,9 @@
-// dsp — audio DSP building blocks: oscillators, filters, unit conversions.
+// dsp — audio DSP building blocks: signal blocks, oscillators, filters.
 //
 // A standalone `stdlib` package, *not* part of the prelude. Depend on it and
 // import its modules by their `dsp/...` path:
 //
+//     import dsp/block    // Mono, serial, sum, feedback, ...
 //     import dsp/osc      // Osc, Phasor
 //     import dsp/filters  // OnePole, Biquad, Svf
 //     import dsp/utils    // db_to_lin, midi_to_freq, ...
@@ -10,6 +11,7 @@
 // This root exists only so the built `.hvmeta` carries every module: loading
 // starts here, and a module the root cannot reach is absent from the artifact.
 // It binds each as a module-private qualifier and exports nothing of its own.
+import block
 import denormal
 import filters
 import osc

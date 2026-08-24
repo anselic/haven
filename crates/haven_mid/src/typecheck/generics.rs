@@ -266,17 +266,14 @@ pub(crate) fn check_bounds<'a>(
         if bounds.is_empty() { continue; }
         let Some(arg_ty) = bindings.get(pname) else { continue };
         for bound in bounds {
-            let ok = match arg_ty {
-                // a forwarded type param satisfies a bound only by carrying
-                // it; there is no impl to consult until it is substituted.
-                Type::Param(fp) =>
-                    cx.generic_bounds.get(fp).is_some_and(|bs| bs.contains(&bound.def)),
-                // anything with a head can be covered by an impl - which now
-                // includes primitives and structural types, so `[T]` may
-                // satisfy a `Display` bound just as a struct does.
-                concrete => cx.implements(concrete, bound.def),
-            };
-            if !ok {
+            // One question, one answer. A forwarded type param satisfies a bound
+            // only by carrying it and anything with a head can be covered by an
+            // impl - but both of those live inside `implements` now, because a
+            // *composite* argument is both at once: deciding `Serial<A, Gain>`
+            // means consulting an impl whose `where` clause asks about `A`.
+            // Answering the two here and only the second one there is what let a
+            // generic helper be rejected for a bound it plainly had.
+            if !cx.implements(arg_ty, bound.def) {
                 return Err(Error::new(span.clone(), format!(
                     "type `{}` does not implement trait `{}`", cx.show(arg_ty), bound))
                     .with_label(span.clone(), format!("required by `{}`", who))

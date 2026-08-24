@@ -283,10 +283,15 @@ impl<'a> Context<'a> {
     /// clause it satisfies, so one `extend Vec<T>: Delete where T: Delete`
     /// answers yes for `Vec<Res>` and no for `Vec<u8>`. See
     /// [`ast::implements`](haven_common::ast::implements), which mono shares.
+    /// A bound on a type parameter of the function being checked counts: it is
+    /// what every instantiation is separately checked against, so `A: Mono`
+    /// makes `Serial<A, Gain>` a `Mono` under `extend Serial<A, B>: Mono where
+    /// A: Mono, B: Mono` while `A` is still symbolic.
     pub fn implements(&self, ty: &Type<'a>, trait_: DefId) -> bool {
         // conformance is recorded against the template, for the same reason
         // membership is - see `member_for`.
-        haven_common::ast::implements(&self.impls, &deinstance(&self.instances, ty), trait_)
+        haven_common::ast::implements(
+            &self.impls, &self.generic_bounds, &deinstance(&self.instances, ty), trait_)
     }
 
     /// Load the diagnostic name of every definition. Called once per pass.

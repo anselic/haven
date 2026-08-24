@@ -477,8 +477,10 @@ impl<'p, 'a> Mono<'p, 'a> {
             GenericParam::Const(name, _) => *name,
         }).collect();
         let mut u = Unified::default();
+        // no `scope`: this runs after substitution, so every argument is a real
+        // type and there is no parameter left whose bound could answer for it.
         unify(&m.self_ty, &concrete, &params, &mut u)
-            && bounds_hold(self.impls, &m.generics, &u)
+            && bounds_hold(self.impls, &ParamBounds::new(), &m.generics, &u)
     }
 
     /// Mint the destructor for a freshly created generic-type instance.

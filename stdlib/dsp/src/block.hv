@@ -1,0 +1,280 @@
+/// dsp/block: the `Mono` trait and the algebra for wiring blocks together.
+///
+/// A *block* is anything that turns one input sample into one output sample and
+/// keeps whatever state it needs between calls — a filter, a gain, a whole
+/// effects chain. `Mono` is the trait that says so, and the combinators below
+/// are blocks built out of other blocks, so a signal graph is written as a
+/// *type* and composed the way Faust's block diagrams compose:
+///
+///     Faust                      haven
+///     A : B                      serial(a, b)
+///     _ <: (A, B) :> _           sum(a, b)
+///     A ~ B                      feedback(a, b)
+///     _                          ident()
+///     *(k)                       gain(k)
+///
+/// A three-stage chain is then just
+///
+///     let chain: Chain3<Biquad, Biquad, Gain> =
+///         serial3(Biquad::highpass(80.0, 0.707, sr),
+///                 Biquad::peak(2500.0, 1.2, 4.0, sr),
+///                 gain(db_to_lin(-3.0)));
+///
+///     chain.process_block(block);
+///
+/// **This costs nothing.** Every combinator is a struct holding its parts by
+/// value, and every `process` is monomorphized and inlined, so a nested chain
+/// compiles to one flat loop with no calls and no branches — the same code you
+/// would have written by hand, with the wiring checked. Nothing here allocates
+/// or is generic over lifetime, so a chain is usable from an `@alloc(false)`
+/// audio callback.
+///
+/// **Reaching inside a chain.** The parts are ordinary public fields, so a block
+/// stays retunable after it is wired up:
+///
+///     chain.a.b.set(Biquad::peak(freq, q, gain_db, sr));
+///
+/// **Generic over a block.** A proc of your own can be generic the same way the
+/// combinators are, and compose them with the constructors below:
+///
+///     proc padded<A: Mono>(a: A) Serial<Serial<A, Gain>, Gain> {
+///         return serial(serial(a, gain(0.5)), gain(2.0));
+///     }
+///
+/// **One channel only.** `Mono` fixes both ends at `f32`, which is why Faust's
+/// `,` (true parallel, two in and two out) has no entry above: `sum` is the
+/// 1-in-1-out reading of it, splitting the input to both parts and adding their
+/// outputs. A trait general enough for arbitrary channel counts needs to project
+/// an associated type through a type parameter (`A::In`), which the language
+/// does not have yet; stereo will get its own trait rather than waiting for it.
+
+import filters { Biquad, OnePole }
+
+// --- Mono -----------------------------------------------------------------
+
+/// One sample in, one sample out, with state carried between calls.
+///
+/// Implement `process` and the block methods come with it. A type that already
+/// has a `process(*self, x: f32) f32` method conforms with an empty block —
+/// which is how the filters in `dsp/filters` join in, with no forwarding layer:
+///
+///     extend OnePole: Mono {}
+pub trait Mono {
+    /// Process one sample, advancing whatever state the block keeps.
+    proc process(*self, x: f32) f32;
+
+    /// Process a whole block of samples in place, in order.
+    ///
+    /// Defaulted over `process`, so no implementer writes it. Being a loop over
+    /// an inlined `process` is the point: it is where the vectorizer gets a
+    /// straight-line body to work with.
+    proc process_block(*self, block: *[f32]) void {
+        let n: u64 = slice_len::<f32>(block);
+        let xs: [f32] = *block;
+        let i: u64 = 0u64;
+        while (i < n) {
+            xs[i] = self.process(xs[i]);
+            i = i + 1u64;
+        }
+    }
+
+    /// Read `src` and write the results to `dst`, stopping at the shorter of the
+    /// two. The out-of-place form, for when the input must survive the call (a
+    /// dry path, a parallel bus).
+    proc process_into(*self, dst: *[f32], src: *[f32]) void {
+        let n: u64 = slice_len::<f32>(dst);
+        let m: u64 = slice_len::<f32>(src);
+        if (m < n) { n = m; }
+        let d: [f32] = *dst;
+        let s: [f32] = *src;
+        let i: u64 = 0u64;
+        while (i < n) {
+            d[i] = self.process(s[i]);
+            i = i + 1u64;
+        }
+    }
+}
+
+// The filters are already blocks — their per-sample method has exactly this
+// name and shape, so conformance is a statement, not an adapter. `StateVariable`
+// is deliberately absent: it emits four responses at once, so it is not a
+// one-in-one-out block and cannot honestly claim to be one.
+extend OnePole: Mono {}
+extend Biquad: Mono {}
+
+// --- Leaves ---------------------------------------------------------------
+
+/// The identity block: passes its input through untouched. Faust's `_`.
+///
+/// Useful as the dry side of a `mix`, and as the neutral element when a chain is
+/// built up conditionally.
+pub struct Ident {}
+
+extend Ident: Mono {
+    @alloc(false)
+    proc process(*self, x: f32) f32 { return x; }
+}
+
+/// A constant gain. Faust's `*(k)`.
+///
+/// `k` is a plain field, so it can be set per block for a coarse level control;
+/// for a *per-sample* ramp, drive it through `OnePole` instead, or the smoother
+/// this module will grow later — writing to `k` every sample steps the gain and
+/// that steps the signal.
+pub struct Gain {
+    /// Linear amplitude multiplier. Use `dsp/utils::db_to_lin` for decibels.
+    k: f32,
+}
+
+extend Gain: Mono {
+    @alloc(false)
+    proc process(*self, x: f32) f32 { return self.k * x; }
+}
+
+// --- Combinators ----------------------------------------------------------
+
+/// `a` then `b`: the output of one feeds the input of the next. Faust's `:`.
+///
+/// Both parts are held by value, so a `Serial` *is* the whole chain — there is
+/// no indirection to chase and nothing to free.
+pub struct Serial<A, B> {
+    /// The first stage, which sees the input.
+    a: A,
+    /// The second stage, which sees `a`'s output.
+    b: B,
+}
+
+extend Serial<A, B>: Mono where A: Mono, B: Mono {
+    @alloc(false)
+    proc process(*self, x: f32) f32 {
+        return self.b.process(self.a.process(x));
+    }
+}
+
+/// Both parts see the same input; their outputs are added. Faust's
+/// `_ <: (A, B) :> _`.
+///
+/// This is the 1-in-1-out reading of parallel: a split immediately followed by a
+/// merge. Put a `gain` on either side to weight them.
+pub struct Sum<A, B> {
+    a: A,
+    b: B,
+}
+
+extend Sum<A, B>: Mono where A: Mono, B: Mono {
+    @alloc(false)
+    proc process(*self, x: f32) f32 {
+        return self.a.process(x) + self.b.process(x);
+    }
+}
+
+/// A crossfade between two blocks fed the same input: `(1 - wet) * a + wet * b`.
+///
+/// The dry/wet control every effect ends up needing. With `a` an `ident()` this
+/// is the usual "how much of the effect do I hear" knob; with two real blocks it
+/// is a morph between them.
+pub struct Mix<A, B> {
+    /// Heard at `wet == 0`.
+    a: A,
+    /// Heard at `wet == 1`.
+    b: B,
+    /// Blend position, nominally in [0, 1]. Values outside that range are not
+    /// clamped — over- and under-shoot are occasionally what you want.
+    wet: f32,
+}
+
+extend Mix<A, B>: Mono where A: Mono, B: Mono {
+    @alloc(false)
+    proc process(*self, x: f32) f32 {
+        let dry: f32 = self.a.process(x);
+        let wet: f32 = self.b.process(x);
+        return dry + self.wet * (wet - dry);
+    }
+}
+
+/// `a`'s output, delayed one sample and sent back through `b` into `a`'s input.
+/// Faust's `~`.
+///
+/// The one-sample delay is what makes the loop computable rather than circular,
+/// and it is where every recursive structure in audio comes from: `b` is the
+/// loop's return path, so `feedback(a, gain(0.7))` is a simple decaying loop and
+/// `feedback(a, serial(delay, damping))` is a comb.
+///
+/// **Two things to know.** The loop is not checked for stability — a return path
+/// with gain at or above 1 will run away, exactly as it would in Faust. And a
+/// loop decaying towards silence is the classic source of denormals, which are
+/// the FPU's slow path; wrap the callback in `dsp/denormal`'s `Ftz` (the `plug`
+/// framework already does) rather than trying to fix it here.
+pub struct Feedback<A, B> {
+    /// The forward block, which sees input plus the loop's return.
+    a: A,
+    /// The return path, applied to the previous output.
+    b: B,
+    /// The one-sample delay: `a`'s output from the previous call.
+    z1: f32,
+}
+
+extend Feedback<A, B>: Mono where A: Mono, B: Mono {
+    @alloc(false)
+    proc process(*self, x: f32) f32 {
+        let y: f32 = self.a.process(x + self.b.process(self.z1));
+        self.z1 = y;
+        return y;
+    }
+}
+
+// --- Names for the nests --------------------------------------------------
+
+/// A three-stage serial chain, written the way it reads rather than as the
+/// left-nested `Serial<Serial<A, B>, C>` it is.
+pub type Chain3<A, B, C> = Serial<Serial<A, B>, C>;
+
+/// A four-stage serial chain.
+pub type Chain4<A, B, C, D> = Serial<Serial<Serial<A, B>, C>, D>;
+
+// --- Constructors ---------------------------------------------------------
+//
+// Free procs rather than associated functions: the type arguments are inferred
+// from the values passed, so `serial(lp, hp)` needs no turbofish while
+// `Serial::<OnePole, Biquad>::new(lp, hp)` would spell out what the arguments
+// already say. They also read like the operators they stand for.
+
+/// The identity block. Faust's `_`.
+pub proc ident() Ident { return Ident {}; }
+
+/// A constant gain of `k` (linear, not decibels). Faust's `*(k)`.
+pub proc gain(k: f32) Gain { return Gain { k: k }; }
+
+/// `a` then `b`. Faust's `a : b`.
+pub proc serial<A: Mono, B: Mono>(a: A, b: B) Serial<A, B> {
+    return Serial { a: a, b: b };
+}
+
+/// `a` then `b` then `c`.
+pub proc serial3<A: Mono, B: Mono, C: Mono>(a: A, b: B, c: C) Chain3<A, B, C> {
+    return serial(serial(a, b), c);
+}
+
+/// `a` then `b` then `c` then `d`.
+pub proc serial4<A: Mono, B: Mono, C: Mono, D: Mono>(a: A, b: B, c: C, d: D)
+    Chain4<A, B, C, D>
+{
+    return serial(serial3(a, b, c), d);
+}
+
+/// Both fed the same input, outputs added. Faust's `_ <: (a, b) :> _`.
+pub proc sum<A: Mono, B: Mono>(a: A, b: B) Sum<A, B> {
+    return Sum { a: a, b: b };
+}
+
+/// Crossfade from `a` (at `wet == 0`) to `b` (at `wet == 1`), both fed the same
+/// input.
+pub proc mix<A: Mono, B: Mono>(a: A, b: B, wet: f32) Mix<A, B> {
+    return Mix { a: a, b: b, wet: wet };
+}
+
+/// `a` with its output fed back through `b` into its input, one sample later.
+/// Faust's `a ~ b`.
+pub proc feedback<A: Mono, B: Mono>(a: A, b: B) Feedback<A, B> {
+    return Feedback { a: a, b: b, z1: 0.0 };
+}

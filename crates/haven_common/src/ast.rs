@@ -1268,19 +1268,29 @@ pub struct ImplDecl<'a> {
     pub span: Span,
 }
 
+/// The trait bounds carried by the type parameters in scope where a conformance
+/// question is being asked, keyed by parameter name.
+///
+/// A type parameter is not covered by any impl - it is not a type yet - so the
+/// only thing that can make `A: Mono` true while `A` is still symbolic is the
+/// caller having *declared* it. That declaration lives here. After
+/// monomorphization there are no parameters left and the right value is empty.
+pub type ParamBounds<'a> = std::collections::HashMap<&'a str, Vec<DefId>>;
+
 /// Whether the bounds on `generics` hold under the bindings `u`, given every
-/// impl in the program.
+/// impl in the program and the bounds on the parameters in scope.
 ///
 /// A parameter `u` did not bind is treated as satisfied: unification would only
 /// leave one unbound for a malformed impl, which is reported on its own.
 pub fn bounds_hold<'a>(
     impls: &[ImplDecl<'a>],
+    scope: &ParamBounds<'a>,
     generics: &[GenericParam<'a>],
     u: &Unified<'a>,
 ) -> bool {
     generics.iter().all(|g| match g {
         GenericParam::Type { name, bounds } => match u.types.get(name) {
-            Some(arg) => bounds.iter().all(|b| implements(impls, arg, b.def)),
+            Some(arg) => bounds.iter().all(|b| implements(impls, scope, arg, b.def)),
             None => true,
         },
         GenericParam::Const(_, _) => true,
@@ -1301,7 +1311,24 @@ pub fn bounds_hold<'a>(
 /// answer in both directions: it would give `Vec<u8>` a destructor whose body
 /// calls `u8::delete`, and would let `Pair<f64>` satisfy a `Display` bound its
 /// impl cannot actually provide.
-pub fn implements<'a>(impls: &[ImplDecl<'a>], ty: &Type<'a>, trait_: DefId) -> bool {
+///
+/// A still-symbolic type parameter is answered from `scope` instead: no impl
+/// covers a parameter, so without this the recursion bottoms out at "no" the
+/// moment a conditional impl's argument is itself a parameter - and a generic
+/// function could not pass its own parameter on to anything asking for the very
+/// bound it already declared.
+pub fn implements<'a>(
+    impls: &[ImplDecl<'a>],
+    scope: &ParamBounds<'a>,
+    ty: &Type<'a>,
+    trait_: DefId,
+) -> bool {
+    // checked before the head lookup because a parameter *has* no head, and
+    // because a declared bound is the stronger statement: it is what every
+    // instantiation of the enclosing item is separately checked against.
+    if let Type::Param(p) = ty {
+        return scope.get(p).is_some_and(|bs| bs.contains(&trait_));
+    }
     let Some(head) = TyHead::of(ty) else { return false };
     impls.iter().any(|i| {
         if i.trait_ != trait_ || i.head != head { return false; }
@@ -1310,7 +1337,9 @@ pub fn implements<'a>(impls: &[ImplDecl<'a>], ty: &Type<'a>, trait_: DefId) -> b
             GenericParam::Const(name, _) => *name,
         }).collect();
         let mut u = Unified::default();
-        unify(&i.self_ty, ty, &params, &mut u) && bounds_hold(impls, &i.generics, &u)
+        // `u` binds the impl's parameters to types written in *the caller's*
+        // parameter space, so the same `scope` keeps applying as this recurses.
+        unify(&i.self_ty, ty, &params, &mut u) && bounds_hold(impls, scope, &i.generics, &u)
     })
 }
 
