@@ -1,0 +1,24 @@
+// Defaults are inherited across a module boundary.
+//
+// This is why the copy happens where it does: `extend Gain: Mono` says only
+// "Mono", and deciding which `Mono` that is - and so which default bodies to
+// take - needs a resolved type scope, which does not exist while `extend` blocks
+// are being desugared.
+
+import helpers/default_lib { Mono }
+
+struct Gain { g: f32 }
+
+extend Gain: Mono {
+    proc tick(*self, x: f32) f32 { return x * (*self).g; }
+    // tick2 inherited; tick3 inherited and calls the inherited tick2
+}
+
+@export
+proc main() i32 {
+    let g: Gain = Gain { g: 2.0f32 };
+    println(g.tick(1.0f32));    // 2
+    println(g.tick2(1.0f32));   // 4
+    println(g.tick3(1.0f32));   // 8
+    return 0;
+}

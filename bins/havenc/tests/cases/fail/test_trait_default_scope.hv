@@ -1,0 +1,23 @@
+// A default body is resolved where the *impl* is written, not where the trait
+// is - the same rule the `for`-loop desugar follows for the `Option` it mentions.
+//
+// So a default that reaches for a name only its own module has does not travel.
+// The span lands in the trait's module, where `boost` plainly is defined, which
+// on its own reads as a compiler bug; the note is what makes it a rule.
+//@ error: unknown function 'boost'
+//@ error: default body of trait 'Mono'
+
+import helpers/default_scope_lib { Mono }
+
+struct Gain { g: f32 }
+
+extend Gain: Mono {
+    proc tick(*self, x: f32) f32 { return x * (*self).g; }
+    // `scaled` is not written here, so its default is copied in - and its body
+    // names `boost`, which is private to the trait's module.
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

@@ -389,9 +389,11 @@ pub fn typecheck_program<'a>(
     // reconstructing names. cheap to clone: one entry per declared method, and
     // both typecheck passes need it.
     cx.members = defs.members().clone();
-    // instance -> template, for matching a template-named pattern against an
-    // instance-typed scrutinee. Empty until mono has run.
-    cx.instances = defs.instances().iter().map(|(&m, i)| (m, i.template)).collect();
+    // every monomorphized instance: for matching a template-named pattern
+    // against an instance-typed scrutinee, and for putting an instance-typed
+    // receiver back into the template form every type-keyed table uses. Empty
+    // until mono has run.
+    cx.instances = defs.instances().clone();
     // the synthetic payload struct of each data variant, minted at resolution
     // (and by `mono` for each instance), so nothing here has to build one.
     cx.payloads = defs.payloads().clone();

@@ -1486,22 +1486,32 @@ fn parse_method<'tks, 'src: 'tks>() -> P<'tks, 'src, Method<'src>> {
         .boxed()
 }
 
-/// One required method signature inside a `trait` declaration:
-/// `proc name(receiver?, params...) [RetType];` - a method header terminated by
-/// `;` instead of a `{ body }`. Mirrors `parse_method`'s receiver/param shapes
-/// but omits attributes, `pub`, generics and the body (a trait states signatures
-/// only; conformance and default methods are the typechecker's / a later stage's
-/// concern).
+/// One method inside a `trait` declaration:
+/// `proc name(receiver?, params...) [RetType];` for a required one, or the same
+/// header followed by `{ body }` for one with a default. Mirrors `parse_method`'s
+/// receiver/param shapes but omits attributes, `pub` and generics (a trait method
+/// is public with the trait, and declares no parameters of its own).
 fn parse_trait_method<'tks, 'src: 'tks>() -> P<'tks, 'src, TraitMethod<'src>> {
     let var = select_ref! { Token::Var(ident) => ident };
+
+    // `;` or a body, in that order: a required method is the common case, and
+    // `{` cannot start a statement, so the two never compete for a token.
+    let tail = choice((
+        just(Token::Semicolon).to(None),
+        parse_stmt()
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map(Some),
+    ));
 
     just(Token::Proc)
         .ignore_then(var.map(|s| *s))
         .then(parse_params())
         .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
-        .then_ignore(just(Token::Semicolon))
-        .map(|((name, (receiver, params)), return_type)|
-            TraitMethod { receiver, name, params, return_type })
+        .then(tail)
+        .map(|(((name, (receiver, params)), return_type), body)|
+            TraitMethod { receiver, name, params, return_type, body })
         .boxed()
 }
 

@@ -1,0 +1,54 @@
+// `Delete` through a concrete `extend` on an instantiation of a generic type.
+//
+// The second half of the same identity problem. The ownership pass looks each
+// destructor up by the type in hand, which after monomorphization names an
+// instance - and mono registers a destructor against every instance it mints,
+// but only for a *generic* impl, whose `delete` is a template needing a body
+// specialized per instance. A concrete impl's `delete` is an ordinary function
+// that survives mono under its own name, so nothing minted an instance-keyed
+// entry for it and the pass found no destructor at all. It compiled, it ran,
+// and it silently leaked.
+//
+// `Holder` is the case that must not change: a conditional impl deliberately
+// leaves `Holder<i32>` without a destructor - which is what keeps it `Copy`, so
+// the copy below is legal - and an instance must not acquire one just because
+// its template appears in the conformance list.
+
+struct Res<T> { k: T }
+struct Holder<T> { item: T, tag: i32 }
+
+extend Res<i32>: Delete {
+    proc delete(*self) { print("delete Res "); println((*self).k); }
+}
+
+extend Holder<T>: Delete where T: Delete {
+    proc delete(*self) { println("delete Holder"); }
+}
+
+proc consume(r: Res<i32>) {
+    println("consumed");
+}
+
+@export
+proc main() i32 {
+    let a: Res<i32> = Res::<i32> { k: 1 };
+    println("made a");
+
+    // the instance owns something, so this is a move: `a` is dead afterwards
+    // and its `delete` runs at the end of `consume`, not at the end of main.
+    consume(a);
+
+    // no destructor for this one, so it is still `Copy` and this is not a move.
+    let plain: Holder<i32> = Holder::<i32> { item: 7, tag: 3 };
+    let copied: Holder<i32> = plain;
+    println(copied.tag);
+
+    // the conditional impl does cover this one, because the bound `T: Delete`
+    // is satisfied by the concrete impl above.
+    let held: Holder<Res<i32>> = Holder::<Res<i32>> { item: Res::<i32> { k: 9 }, tag: 4 };
+    println(held.tag);
+
+    let b: Res<i32> = Res::<i32> { k: 2 };
+    println("made b");
+    return 0;
+}

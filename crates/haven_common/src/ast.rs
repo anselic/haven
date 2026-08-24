@@ -123,6 +123,18 @@ impl<T> Metadata<T> {
         let id = GLOBAL_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Self { value, id, span }
     }
+
+    /// Give this node a fresh identity, as if it had just been parsed.
+    ///
+    /// A node id keys the typechecker's per-node tables (`node_types`,
+    /// `method_calls`, `inferred_type_args`) and a local's storage slot, so two
+    /// nodes sharing an id is not cosmetic: the second write wins and the first
+    /// node is silently typed as the second. `Clone` copies the id, so any AST
+    /// subtree that is *duplicated* rather than moved has to be renumbered -
+    /// which is what copying a trait's default body into each impl does.
+    pub fn refresh_id(&mut self) {
+        self.id = GLOBAL_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// A resolved value binding: which specific declaration a `Var` use refers to.
@@ -1210,17 +1222,24 @@ pub struct MethodNode<'a> {
 
 pub type Method<'a> = Metadata<MethodNode<'a>>;
 
-/// One required method signature in a `trait` declaration: a method header with
-/// no body, terminated by `;`. `params` excludes the receiver (recorded in
-/// `receiver`). A `Self` in a param/return type refers to the implementing type;
-/// the typechecker substitutes it (with the concrete type when checking
-/// conformance, with the bounded type param when resolving a bounded call).
+/// One method a `trait` declaration states: a header terminated by `;`, or one
+/// followed by a `{ body }` that impls may inherit instead of writing their own.
+/// `params` excludes the receiver (recorded in `receiver`). A `Self` in a
+/// param/return type refers to the implementing type; the typechecker
+/// substitutes it (with the concrete type when checking conformance, with the
+/// bounded type param when resolving a bounded call).
 #[derive(Clone, Debug)]
 pub struct TraitMethod<'a> {
     pub receiver: Receiver,
     pub name: &'a str,
     pub params: Vec<(&'a str, Type<'a>)>,
     pub return_type: Type<'a>,
+    /// The default body, if the trait wrote one. `haven_front::module` copies it
+    /// into every conforming impl that did not define the method itself, as an
+    /// ordinary method of that impl - so the trait is still a set of signatures
+    /// by the time anything typechecks, and a default is indistinguishable from
+    /// a hand-written method. `None` for a required method.
+    pub body: Option<Vec<Stmt<'a>>>,
 }
 
 /// A recorded `extend Target: Trait` conformance obligation, produced by the
@@ -1584,7 +1603,14 @@ impl<'a> Display for TopLevelNode<'a> {
                     let sep = if !recv.is_empty() && !m.params.is_empty() { ", " } else { "" };
                     let params_str = m.params.iter()
                         .map(|(n, ty)| format!("{}: {}", n, ty)).collect::<Vec<_>>().join(", ");
-                    format!("    proc {}({}{}{}) {};\n", m.name, recv, sep, params_str, m.return_type)
+                    let tail = match &m.body {
+                        // a default body is shown as `{ ... }`: its statements are
+                        // not what a reader of the trait's shape is looking for.
+                        Some(_) => " { ... }".to_string(),
+                        None => ";".to_string(),
+                    };
+                    format!("    proc {}({}{}{}) {}{}\n",
+                        m.name, recv, sep, params_str, m.return_type, tail)
                 }).collect::<String>();
                 write!(f, "{}trait {} {{\n{}{}}}", pub_str, name, assoc_str, methods_str)
             },

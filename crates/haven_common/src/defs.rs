@@ -52,7 +52,7 @@ use std::path::Path;
 
 use bumpalo::Bump;
 
-use crate::ast::{FileId, GenericParam, Receiver, Span, Type};
+use crate::ast::{FileId, GenericArg, GenericParam, Receiver, Span, Type};
 
 /// Every lang item name, as written in `@lang(...)`.
 ///
@@ -325,16 +325,58 @@ pub type MemberTable<'a> = HashMap<(TyHead, &'a str), Member<'a>>;
 /// has no type information with which to rewrite a bare pattern; and diagnostics
 /// want to say `alloc::<Vec2>` rather than `std.alloc$alloc$Vec2`.
 #[derive(Clone, Debug)]
-pub struct Instance {
+pub struct Instance<'a> {
     /// The generic template this specializes.
     pub template: DefId,
     /// How the instance reads back to a human: `alloc::<Vec2>`. Diagnostics only;
     /// never fed back into the compiler.
     pub display: String,
+    /// The arguments it was specialized with, in the template's parameter order.
+    ///
+    /// Unlike `display` these *are* fed back into the compiler: they are what
+    /// [`deinstance`] needs to put a flat instance type back into template form,
+    /// and dispatch keys on template form. `mono` kept its own copy of this for
+    /// its internal use long before `Defs` did; the map lives here now because
+    /// the passes that run *after* mono need it too and mono is gone by then.
+    pub args: Vec<GenericArg<'a>>,
 }
 
 /// Every monomorphized instance in the program, keyed by its own identity.
-pub type Instances = HashMap<DefId, Instance>;
+pub type Instances<'a> = HashMap<DefId, Instance<'a>>;
+
+/// Put a monomorphized instance type back into template form: the flat `Named`
+/// `Vec$i32` (no args) becomes `Vec<i32>` (`Def(Vec)` + `[i32]`).
+///
+/// Every table that answers a question *about a type* - the member table, the
+/// conformance list - is keyed on the template, because that is what the source
+/// declared: one `extend Vec<T>` covers every `Vec<i32>` there will ever be. But
+/// a type in hand after monomorphization names an instance. This is the bridge,
+/// and every such lookup has to cross it or it misses.
+///
+/// A non-generic struct is a `Named` with no args too, but is absent from
+/// `instances`, so it passes through unchanged - as does a type that is already
+/// in template form, though its *arguments* are still visited, since a nested
+/// one can be an instance (`Buf<Vec$i32>`).
+pub fn deinstance<'a>(instances: &Instances<'a>, ty: &Type<'a>) -> Type<'a> {
+    let go = |t: &Type<'a>| deinstance(instances, t);
+    let arg = |a: &GenericArg<'a>| match a {
+        GenericArg::Type(t) => GenericArg::Type(go(t)),
+        other => other.clone(),
+    };
+    match ty {
+        Type::Named { def, args } if args.is_empty() => match instances.get(def) {
+            Some(i) => Type::Named { def: i.template, args: i.args.iter().map(arg).collect() },
+            None => ty.clone(),
+        },
+        Type::Named { def, args } =>
+            Type::Named { def: *def, args: args.iter().map(arg).collect() },
+        Type::Pointer(inner) => Type::Pointer(Box::new(go(inner))),
+        Type::Slice(inner) => Type::Slice(Box::new(go(inner))),
+        Type::Array(inner, n) => Type::Array(Box::new(go(inner)), n.clone()),
+        Type::Simd(inner, n) => Type::Simd(Box::new(go(inner)), n.clone()),
+        other => other.clone(),
+    }
+}
 
 /// Where a module's source came from.
 ///
@@ -375,7 +417,7 @@ pub struct Defs<'a> {
     /// slugs already handed out, so two modules never share one.
     slugs: HashMap<String, ModId>,
     members: MemberTable<'a>,
-    instances: Instances,
+    instances: Instances<'a>,
     /// `(enum, variant name) -> the synthetic struct holding that variant's
     /// payload fields`. Minted at resolution for declared enums and by `mono`
     /// for each instance it creates, so the mid end can look a payload struct up
@@ -475,11 +517,15 @@ impl<'a> Defs<'a> {
 
     /// Record that `inst` is `template` specialized to some arguments.
     /// Called by `mono` for every function, struct and enum instance it mints.
-    pub fn add_instance(&mut self, inst: DefId, template: DefId, display: String) {
-        self.instances.insert(inst, Instance { template, display });
+    pub fn add_instance(&mut self, inst: DefId, template: DefId, display: String,
+                        args: Vec<GenericArg<'a>>) {
+        self.instances.insert(inst, Instance { template, display, args });
     }
 
-    pub fn instances(&self) -> &Instances { &self.instances }
+    pub fn instances(&self) -> &Instances<'a> { &self.instances }
+
+    /// [`deinstance`] against this program's instances.
+    pub fn deinstance(&self, ty: &Type<'a>) -> Type<'a> { deinstance(&self.instances, ty) }
 
     /// The template `id` specializes, if it is a monomorphized instance.
     ///

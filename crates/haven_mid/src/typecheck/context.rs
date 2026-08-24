@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use haven_common::ast::*;
-use haven_common::defs::{DefId, Defs, Member, MemberTable, ModId, TyHead};
+use haven_common::defs::{deinstance, DefId, Defs, Instances, Member, MemberTable, ModId,
+                         TyHead};
 use haven_common::layout::TypeTable;
 
 /// The bare names of a generic parameter list, which is the form [`unify`] wants
@@ -180,11 +181,15 @@ pub struct Context<'a> {
     /// in a different module is an error; this is the module the comparison is
     /// against. Set before walking each top-level item's body.
     pub current_module: ModId,
-    /// Monomorphized instance -> the template it specializes. Recorded by
-    /// `mono`; empty on the pre-mono pass, where no instance exists yet. Lets a
-    /// match pattern, which always names the template, be matched against a
-    /// scrutinee whose type is the instance.
-    pub instances: HashMap<DefId, DefId>,
+    /// Every monomorphized instance, by its own identity. Recorded by `mono`;
+    /// empty on the pre-mono pass, where no instance exists yet.
+    ///
+    /// Two things need it. A match pattern always names the template, so
+    /// matching it against a scrutinee whose type is the instance goes through
+    /// `template`. And every table keyed on a type - members, conformances - is
+    /// keyed on the template too, so a post-mono lookup has to put the instance
+    /// back into template form first, which needs `args`.
+    pub instances: Instances<'a>,
     /// `(enum, variant) -> the synthetic struct holding that variant's payload`.
     /// Minted at name resolution and by `mono`, so the payload struct is a real
     /// identity rather than a name this stage rebuilds - which matters because
@@ -243,7 +248,7 @@ impl<'a> Context<'a> {
             members: MemberTable::new(),
             // overwritten before any body is walked; a placeholder until then.
             current_module: ModId(u32::MAX),
-            instances: HashMap::new(),
+            instances: Instances::new(),
             payloads: HashMap::new(),
             names: HashMap::new(),
         }
@@ -261,10 +266,15 @@ impl<'a> Context<'a> {
     pub fn member_for<'s>(&'s self, ty: &Type<'a>, name: &'s str)
         -> Option<(&'s Member<'a>, Unified<'a>)>
     {
-        let m = self.members.get(&(TyHead::of(ty)?, name))?;
+        // after mono the receiver names an instance (`Scale$f32`) while the
+        // impl is registered against the template it came from (`Scale<f32>`),
+        // so both the head lookup and the unification want template form. Before
+        // mono, and for anything that is not an instance, this is the identity.
+        let ty = deinstance(&self.instances, ty);
+        let m = self.members.get(&(TyHead::of(&ty)?, name))?;
         let params = param_names(&m.generics);
         let mut u = Unified::default();
-        unify(&m.self_ty, ty, &params, &mut u).then_some((m, u))
+        unify(&m.self_ty, &ty, &params, &mut u).then_some((m, u))
     }
 
     /// Whether `ty` implements `trait_`, by some `extend ...: Trait` block.
@@ -274,7 +284,9 @@ impl<'a> Context<'a> {
     /// answers yes for `Vec<Res>` and no for `Vec<u8>`. See
     /// [`ast::implements`](haven_common::ast::implements), which mono shares.
     pub fn implements(&self, ty: &Type<'a>, trait_: DefId) -> bool {
-        haven_common::ast::implements(&self.impls, ty, trait_)
+        // conformance is recorded against the template, for the same reason
+        // membership is - see `member_for`.
+        haven_common::ast::implements(&self.impls, &deinstance(&self.instances, ty), trait_)
     }
 
     /// Load the diagnostic name of every definition. Called once per pass.

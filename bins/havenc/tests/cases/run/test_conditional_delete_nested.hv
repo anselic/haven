@@ -1,0 +1,50 @@
+// A conditional `Delete` impl whose argument is *itself* a generic instance.
+//
+// `extend Holder<T>: Delete where T: Delete` is checked when mono mints the
+// instance, by asking the conformance list whether the argument implements
+// `Delete`. The argument in hand at that moment is in instance form
+// (`Box$Res`), and the conformance list is keyed on templates - so the answer
+// came back "no", no destructor was minted for `Holder<Box<Res>>`, and the
+// ownership pass fell through to dropping the *field* instead. The observable
+// difference is which destructor runs: a type that implements `Delete` owns its
+// fields' destruction, so `Holder`'s runs and `Box`'s does not.
+//
+// `Holder<i32>` is the other side of the same check: the bound genuinely does
+// not hold, no destructor, and so it stays `Copy`.
+
+struct Res { id: i32 }
+struct Box<T> { v: T }
+struct Holder<T> { item: T, tag: i32 }
+
+extend Res: Delete {
+    proc delete(*self) { println("delete Res"); }
+}
+
+extend Box<T>: Delete where T: Delete {
+    proc delete(*self) { println("delete Box"); }
+}
+
+extend Holder<T>: Delete where T: Delete {
+    proc delete(*self) { println("delete Holder"); }
+}
+
+@export
+proc main() i32 {
+    let h: Holder<Box<Res>> = Holder::<Box<Res>> {
+        item: Box::<Res> { v: Res { id: 1 } },
+        tag: 7,
+    };
+    println(h.tag);
+
+    // the bound does not hold, so this one is still `Copy` and this is a copy
+    // rather than a move.
+    let plain: Holder<i32> = Holder::<i32> { item: 3, tag: 8 };
+    let copied: Holder<i32> = plain;
+    println(copied.tag);
+
+    // a `Box<Res>` on its own is covered, and destroys itself rather than its
+    // field, for the same reason.
+    let b: Box<Res> = Box::<Res> { v: Res { id: 2 } };
+    println(9);
+    return 0;
+}

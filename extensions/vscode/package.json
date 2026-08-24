@@ -30,5 +30,8 @@
         "path": "./syntaxes/haven.tmLanguage.json"
       }
     ]
+  },
+  "scripts": {
+    "package": "npx vsce package"
   }
 }

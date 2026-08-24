@@ -1,5 +1,5 @@
 use haven_common::ast::*;
-use haven_common::defs::{Defs, MemberTable};
+use haven_common::defs::{Defs, Instances, MemberTable};
 use crate::intrinsics::Intrinsic;
 use crate::mono::concrete_method_name;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -35,6 +35,10 @@ const INDIRECT_CALLEE: &str = "<indirect call>";
 struct Resolve<'p, 'a> {
     node_types: &'p HashMap<usize, Type<'a>>,
     members: &'p MemberTable<'a>,
+    /// So a receiver typed as a monomorphized instance still finds the impl it
+    /// dispatches to: this pass runs *after* mono, and the member table is keyed
+    /// on templates.
+    instances: &'p Instances<'a>,
 }
 
 /// What the callee position of a `Call` resolves to for the call graph.
@@ -60,7 +64,7 @@ fn classify_callee<'a>(func: &Expr<'a>, locals: &[&'a str], r: &Resolve<'_, 'a>)
         ExprNode::Path(_) => Callee::None,
         ExprNode::Access { base, field } => {
             match r.node_types.get(&base.id)
-                .and_then(|ty| concrete_method_name(r.members, ty, field))
+                .and_then(|ty| concrete_method_name(r.members, r.instances, ty, field))
             {
                 Some(callee) => Callee::Named(callee),
                 None => Callee::Indirect,
@@ -339,7 +343,7 @@ pub fn alloc_check_program<'a>(
     defs: &Defs<'a>,
     node_types: &HashMap<usize, Type<'a>>,
 ) -> Result<(), Vec<Error>> {
-    let r = Resolve { node_types, members: defs.members() };
+    let r = Resolve { node_types, members: defs.members(), instances: defs.instances() };
     let (clean, calls) = compute_clean(program, &r);
 
     // mono rewrites generic calls to their mangled instance name; prefer the

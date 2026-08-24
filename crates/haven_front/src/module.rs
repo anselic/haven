@@ -381,6 +381,11 @@ struct RawMethod<'a> {
     /// method implements a trait (a trait-impl method's reachability follows the
     /// trait, not an explicit marker). See [`Member::is_pub`].
     is_pub: bool,
+    /// The trait this was inherited from, when it is a copied default body rather
+    /// than a method anyone wrote here. Only a diagnostic needs it: a duplicate
+    /// otherwise points at an `extend` block in which the offending method does
+    /// not appear.
+    default_of: Option<&'a str>,
     span: Span,
 }
 
@@ -395,6 +400,9 @@ struct RawImpl<'a> {
     /// `type Item = Ty;` bindings, still unresolved: resolved in `load_and_merge`
     /// through the module's scopes with the impl's inferred parameters in scope.
     assoc_bindings: Vec<(&'a str, Type<'a>)>,
+    /// The names this block defined itself. What a trait's *default* bodies are
+    /// checked against: a default is copied in only where the impl was silent.
+    defined: Vec<&'a str>,
     span: Span,
 }
 
@@ -745,6 +753,7 @@ fn resolve_extend_target<'a>(
     let mut errs = Vec::new();
     let mut rw = Rewriter {
         scopes, type_params, aliases, members,
+        in_default_of: None,
         // this rewriter only resolves a type, which never consults the member
         // table, so the module never gates anything here.
         module: ModId(u32::MAX),
@@ -795,30 +804,41 @@ fn target_key(ty: &Type<'_>) -> String {
 /// expression path); it is `None` when the target is not a nominal path (a
 /// primitive, slice, or pointer), for which an expression-position `Self` is
 /// meaningless anyway — type positions are still substituted with the full type.
-fn self_subst_type<'a>(ty: &mut Type<'a>, target: &Type<'a>) {
+fn self_subst_type<'a>(ty: &mut Type<'a>, target: &Type<'a>, assoc: &[(&'a str, Type<'a>)]) {
     match ty {
         Type::Path { path, args } => {
             if path.segments.as_slice() == ["Self"] {
                 *ty = target.clone();
                 return;
             }
+            // `Self::Item` - an associated type, which has a concrete answer only
+            // once an impl has bound it. That is exactly the situation a trait's
+            // *default body* is copied into, so `assoc` carries the impl's
+            // bindings; it is empty for an ordinary method, where nothing has
+            // written a projection the resolver could not already handle.
+            if path.segments.len() == 2 && path.segments[0] == "Self" {
+                if let Some((_, bound)) = assoc.iter().find(|(n, _)| *n == path.segments[1]) {
+                    *ty = bound.clone();
+                    return;
+                }
+            }
             for a in args {
-                if let GenericArg::Type(t) = a { self_subst_type(t, target); }
+                if let GenericArg::Type(t) = a { self_subst_type(t, target, assoc); }
             }
         }
-        Type::Pointer(inner) | Type::Slice(inner) => self_subst_type(inner, target),
-        Type::Array(inner, _) | Type::Simd(inner, _) => self_subst_type(inner, target),
+        Type::Pointer(inner) | Type::Slice(inner) => self_subst_type(inner, target, assoc),
+        Type::Array(inner, _) | Type::Simd(inner, _) => self_subst_type(inner, target, assoc),
         Type::Function { params, return_type } => {
-            for p in params { self_subst_type(p, target); }
-            self_subst_type(return_type, target);
+            for p in params { self_subst_type(p, target, assoc); }
+            self_subst_type(return_type, target, assoc);
         }
         _ => {}
     }
 }
 
-fn self_subst_args<'a>(args: &mut [GenericArg<'a>], target: &Type<'a>) {
+fn self_subst_args<'a>(args: &mut [GenericArg<'a>], target: &Type<'a>, assoc: &[(&'a str, Type<'a>)]) {
     for a in args {
-        if let GenericArg::Type(t) = a { self_subst_type(t, target); }
+        if let GenericArg::Type(t) = a { self_subst_type(t, target, assoc); }
     }
 }
 
@@ -836,33 +856,33 @@ fn self_subst_head<'a>(path: &mut Path<'a>, head: Option<&Path<'a>>) {
     }
 }
 
-fn self_subst_expr<'a>(e: &mut Expr<'a>, target: &Type<'a>, head: Option<&Path<'a>>) {
+fn self_subst_expr<'a>(e: &mut Expr<'a>, target: &Type<'a>, head: Option<&Path<'a>>, assoc: &[(&'a str, Type<'a>)]) {
     match &mut e.value {
         ExprNode::Path(nr) => self_subst_head(&mut nr.path, head),
         ExprNode::Struct { name, type_args, fields } => {
             self_subst_head(&mut name.path, head);
-            self_subst_args(type_args, target);
-            for (_, v) in fields { self_subst_expr(v, target, head); }
+            self_subst_args(type_args, target, assoc);
+            for (_, v) in fields { self_subst_expr(v, target, head, assoc); }
         }
         ExprNode::FnRef { name, type_args } => {
             self_subst_head(&mut name.path, head);
-            self_subst_args(type_args, target);
+            self_subst_args(type_args, target, assoc);
         }
         ExprNode::Call { func, type_args, args } => {
-            self_subst_expr(func, target, head);
-            self_subst_args(type_args, target);
-            for a in args { self_subst_expr(a, target, head); }
+            self_subst_expr(func, target, head, assoc);
+            self_subst_args(type_args, target, assoc);
+            for a in args { self_subst_expr(a, target, head, assoc); }
         }
-        ExprNode::Slice(elems) => for el in elems { self_subst_expr(el, target, head); },
-        ExprNode::Access { base, .. } => self_subst_expr(base, target, head),
+        ExprNode::Slice(elems) => for el in elems { self_subst_expr(el, target, head, assoc); },
+        ExprNode::Access { base, .. } => self_subst_expr(base, target, head, assoc),
         ExprNode::Index { slice, index } => {
-            self_subst_expr(slice, target, head);
-            self_subst_expr(index, target, head);
+            self_subst_expr(slice, target, head, assoc);
+            self_subst_expr(index, target, head, assoc);
         }
-        ExprNode::Unary { operand, .. } => self_subst_expr(operand, target, head),
+        ExprNode::Unary { operand, .. } => self_subst_expr(operand, target, head, assoc),
         ExprNode::Binary { left, right, .. } => {
-            self_subst_expr(left, target, head);
-            self_subst_expr(right, target, head);
+            self_subst_expr(left, target, head, assoc);
+            self_subst_expr(right, target, head, assoc);
         }
         _ => {}
     }
@@ -883,36 +903,108 @@ fn self_subst_pat<'a>(p: &mut Pattern<'a>, head: Option<&Path<'a>>) {
     }
 }
 
-fn self_subst_stmt<'a>(s: &mut Stmt<'a>, target: &Type<'a>, head: Option<&Path<'a>>) {
+fn self_subst_stmt<'a>(s: &mut Stmt<'a>, target: &Type<'a>, head: Option<&Path<'a>>, assoc: &[(&'a str, Type<'a>)]) {
     match &mut s.value {
-        StmtNode::Expr(e) => self_subst_expr(e, target, head),
-        StmtNode::Block(stmts) => for st in stmts { self_subst_stmt(st, target, head); },
+        StmtNode::Expr(e) => self_subst_expr(e, target, head, assoc),
+        StmtNode::Block(stmts) => for st in stmts { self_subst_stmt(st, target, head, assoc); },
         StmtNode::Declare { ty, value, .. } => {
-            if let Some(ty) = ty { self_subst_type(ty, target); }
-            self_subst_expr(value, target, head);
+            if let Some(ty) = ty { self_subst_type(ty, target, assoc); }
+            self_subst_expr(value, target, head, assoc);
         }
         StmtNode::Assign { left, value } => {
-            self_subst_expr(left, target, head);
-            self_subst_expr(value, target, head);
+            self_subst_expr(left, target, head, assoc);
+            self_subst_expr(value, target, head, assoc);
         }
         StmtNode::If { condition, then_branch, else_branch } => {
-            self_subst_expr(condition, target, head);
-            self_subst_stmt(then_branch, target, head);
-            if let Some(e) = else_branch { self_subst_stmt(e, target, head); }
+            self_subst_expr(condition, target, head, assoc);
+            self_subst_stmt(then_branch, target, head, assoc);
+            if let Some(e) = else_branch { self_subst_stmt(e, target, head, assoc); }
         }
         StmtNode::While { condition, body } => {
-            self_subst_expr(condition, target, head);
-            self_subst_stmt(body, target, head);
+            self_subst_expr(condition, target, head, assoc);
+            self_subst_stmt(body, target, head, assoc);
         }
         StmtNode::Match { scrutinee, arms } => {
-            self_subst_expr(scrutinee, target, head);
+            self_subst_expr(scrutinee, target, head, assoc);
             for (pat, body) in arms {
                 self_subst_pat(pat, head);
-                self_subst_stmt(body, target, head);
+                self_subst_stmt(body, target, head, assoc);
             }
         }
-        StmtNode::Return(Some(e)) => self_subst_expr(e, target, head),
+        StmtNode::Return(Some(e)) => self_subst_expr(e, target, head, assoc),
         StmtNode::Return(None) | StmtNode::Continue | StmtNode::Break => {}
+    }
+}
+
+/// Renumber every node in a duplicated statement, so the copy is a distinct
+/// piece of AST rather than an alias of the original.
+///
+/// Only a trait's default body needs this: it is the one construct copied into
+/// more than one place. Without it the second impl's `self` type overwrites the
+/// first's in `node_types`, and the first impl's method typechecks against the
+/// *other* impl's receiver - which reads as a wildly confusing mismatch pointing
+/// at the trait declaration. Mirrors `self_subst_stmt`'s traversal exactly; the
+/// two must stay in step.
+fn refresh_ids_stmt(s: &mut Stmt<'_>) {
+    s.refresh_id();
+    match &mut s.value {
+        StmtNode::Expr(e) => refresh_ids_expr(e),
+        StmtNode::Block(stmts) => for st in stmts { refresh_ids_stmt(st); },
+        StmtNode::Declare { value, .. } => refresh_ids_expr(value),
+        StmtNode::Assign { left, value } => {
+            refresh_ids_expr(left);
+            refresh_ids_expr(value);
+        }
+        StmtNode::If { condition, then_branch, else_branch } => {
+            refresh_ids_expr(condition);
+            refresh_ids_stmt(then_branch);
+            if let Some(e) = else_branch { refresh_ids_stmt(e); }
+        }
+        StmtNode::While { condition, body } => {
+            refresh_ids_expr(condition);
+            refresh_ids_stmt(body);
+        }
+        StmtNode::Match { scrutinee, arms } => {
+            refresh_ids_expr(scrutinee);
+            for (pat, body) in arms {
+                refresh_ids_pat(pat);
+                refresh_ids_stmt(body);
+            }
+        }
+        StmtNode::Return(Some(e)) => refresh_ids_expr(e),
+        StmtNode::Return(None) | StmtNode::Continue | StmtNode::Break => {}
+    }
+}
+
+fn refresh_ids_expr(e: &mut Expr<'_>) {
+    e.refresh_id();
+    match &mut e.value {
+        ExprNode::Struct { fields, .. } => for (_, v) in fields { refresh_ids_expr(v); },
+        ExprNode::Call { func, args, .. } => {
+            refresh_ids_expr(func);
+            for a in args { refresh_ids_expr(a); }
+        }
+        ExprNode::Slice(elems) => for el in elems { refresh_ids_expr(el); },
+        ExprNode::Access { base, .. } => refresh_ids_expr(base),
+        ExprNode::Index { slice, index } => {
+            refresh_ids_expr(slice);
+            refresh_ids_expr(index);
+        }
+        ExprNode::Unary { operand, .. } => refresh_ids_expr(operand),
+        ExprNode::Binary { left, right, .. } => {
+            refresh_ids_expr(left);
+            refresh_ids_expr(right);
+        }
+        _ => {}
+    }
+}
+
+fn refresh_ids_pat(p: &mut Pattern<'_>) {
+    p.refresh_id();
+    match &mut p.value {
+        PatternNode::Variant { fields, .. } => for f in fields { refresh_ids_pat(f); },
+        PatternNode::StructVariant { fields, .. } => for (_, f) in fields { refresh_ids_pat(f); },
+        _ => {}
     }
 }
 
@@ -951,6 +1043,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 where_bounds: where_bounds.clone(),
                 trait_: tr,
                 assoc_bindings: assoc_bindings.clone(),
+                defined: methods.iter().map(|m| m.value.name).collect(),
                 span: tl.span.clone(),
             });
         }
@@ -978,11 +1071,11 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 Type::Path { path, .. } => Some(path),
                 _ => None,
             };
-            for (_, pty) in params.iter_mut() { self_subst_type(pty, target); }
+            for (_, pty) in params.iter_mut() { self_subst_type(pty, target, &[]); }
             let mut return_type = mnode.return_type.clone();
-            self_subst_type(&mut return_type, target);
+            self_subst_type(&mut return_type, target, &[]);
             let mut body = mnode.body.clone();
-            for st in body.iter_mut() { self_subst_stmt(st, target, head); }
+            for st in body.iter_mut() { self_subst_stmt(st, target, head, &[]); }
             // the synthesized name only has to be unique within the module - it is
             // never reconstructed by a consumer, since the member record below is
             // what makes this method findable.
@@ -1004,6 +1097,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 // its reachability follows the trait. An inherent method is
                 // private unless marked `pub`.
                 is_pub: mnode.is_pub || trait_.is_some(),
+                default_of: None,
                 span: tl.span.clone(),
             });
             synthesized.push(Metadata::new(
@@ -1236,23 +1330,36 @@ struct Rewriter<'x, 'a> {
     /// bare names carry no span of their own, so unresolved-name errors point at
     /// whatever encloses them - which is as precise as the AST allows.
     span: Span,
+    /// Set while walking a method copied out of a trait's default body: the
+    /// trait's name. Every error raised in there gets a note saying so, because
+    /// the span points into the *trait's* module while the names were resolved in
+    /// the impl's - so "is it defined and imported into this module?" is asking
+    /// about a module the reader is not looking at.
+    in_default_of: Option<&'a str>,
 }
 
 impl<'x, 'a> Rewriter<'x, 'a> {
     fn error(&mut self, span: &Span, msg: String) {
-        self.errs.push(Error::new(span.clone(), msg));
+        let err = Error::new(span.clone(), msg);
+        self.push(err);
     }
 
     /// Record an error the caller has already given its labels and note.
     fn push(&mut self, err: Error) {
-        self.errs.push(err);
+        self.errs.push(match self.in_default_of {
+            Some(tr) => err.with_note(format!(
+                "this is the default body of trait '{}', copied into the impl - \
+                 it is resolved where the impl is written, so every name it uses \
+                 has to be in scope there too", tr)),
+            None => err,
+        });
     }
 
     /// Record an error against the innermost span being walked. For names that
     /// have no span of their own (types, and the leaves inside them).
     fn error_here(&mut self, msg: String) {
         let span = self.span.clone();
-        self.errs.push(Error::new(span, msg));
+        self.push(Error::new(span, msg));
     }
 
     fn is_local(&self, name: &str) -> bool {
@@ -3049,6 +3156,149 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         }
     }
 
+    // pass 1.15: give every trait impl the default bodies it did not override.
+    //
+    // A default is *copied into the impl* as an ordinary method - the same shape
+    // `lower_methods` produces for one written by hand - rather than dispatched to
+    // at the call site. So conformance, member lookup, monomorphization and
+    // codegen all see a perfectly normal method, and a trait is still nothing but
+    // a set of signatures by the time anything typechecks.
+    //
+    // It runs here because this is the first point at which a trait declared in
+    // one module can be found from another: `extend Gain: Mono` says only "Mono",
+    // and deciding *which* `Mono` takes a resolved type scope. It must also
+    // precede pass 1.25, which is what fills in the generics of every method that
+    // desugared into a function.
+    //
+    // The copied body resolves in the **impl's** module, not the trait's - the
+    // same rule the `for`-loop desugar already follows for the `Option` it
+    // mentions. A default that names anything beyond the trait's own methods on
+    // `self` is therefore only portable if that name is in scope where the impl is
+    // written; `pub` re-exports from the trait's module are the way to guarantee
+    // it.
+    let mut trait_defaults: HashMap<DefId, Vec<TraitMethod<'a>>> = HashMap::new();
+    let mut inherited: HashMap<&'a str, &'a str> = HashMap::new();
+    for (id, m) in modules.iter().enumerate() {
+        for tl in &m.items {
+            let TopLevelNode::Trait { name, methods, .. } = &tl.value else { continue };
+            let with_body: Vec<TraitMethod<'a>> =
+                methods.iter().filter(|tm| tm.body.is_some()).cloned().collect();
+            if with_body.is_empty() { continue }
+            if let Some(sym) = all_scopes[id].types.get(*name) {
+                trait_defaults.insert(sym.def, with_body);
+            }
+        }
+    }
+    for id in 0..modules.len() {
+        if trait_defaults.is_empty() { break }
+        // built first, then installed: the collection loop holds a shared borrow
+        // of this module's impls and of its type scope, and installing needs a
+        // mutable one of its items and its call scope.
+        //
+        // `inherited` is only for diagnostics - pass 2 reads it to explain a span
+        // that lands in the trait's module.
+        let mut synthesized: Vec<(&'a str, TopLevel<'a>, RawMethod<'a>)> = Vec::new();
+        let mut used: HashSet<String> = HashSet::new();
+        for ri in &modules[id].impls {
+            let Some(sym) = all_scopes[id].types.get(ri.trait_) else { continue };
+            let Some(defaults) = trait_defaults.get(&sym.def) else { continue };
+            for tm in defaults {
+                if ri.defined.contains(&tm.name) { continue }
+                let mut params: Vec<(&'a str, Type<'a>)> =
+                    Vec::with_capacity(tm.params.len() + 1);
+                let self_ty = ri.target.clone();
+                match tm.receiver {
+                    Receiver::Associated => {}
+                    Receiver::Value => params.push(("self", self_ty)),
+                    Receiver::Pointer => params.push(("self", Type::Pointer(Box::new(self_ty)))),
+                }
+                params.extend(tm.params.iter().cloned());
+                let head = match &ri.target {
+                    Type::Path { path, .. } => Some(path),
+                    _ => None,
+                };
+                let assoc = ri.assoc_bindings.as_slice();
+                for (_, pty) in params.iter_mut() {
+                    self_subst_type(pty, &ri.target, assoc);
+                }
+                let mut return_type = tm.return_type.clone();
+                self_subst_type(&mut return_type, &ri.target, assoc);
+                let mut body = tm.body.clone().expect("only defaulted methods are collected");
+                for st in body.iter_mut() {
+                    // the *only* place an AST subtree is duplicated: one trait
+                    // body becomes a method of every impl that inherited it.
+                    refresh_ids_stmt(st);
+                    self_subst_stmt(st, &ri.target, head, assoc);
+                }
+
+                // `$default` keeps these out of the way of `lower_methods`' own
+                // naming, so an inherent method of the same name collides as a
+                // duplicate *member* in pass 1.5 - which says so - rather than as
+                // two functions sharing one symbol, which says something else.
+                let key = target_key(&ri.target);
+                let mut base = format!("{}${}$default", key, tm.name);
+                for i in 1.. {
+                    if used.insert(base.clone()) { break }
+                    base = format!("{}${}$default${}", key, tm.name, i);
+                }
+                let fname: &'a str = arena.alloc_str(&base);
+                synthesized.push((
+                    fname,
+                    Metadata::new(
+                        TopLevelNode::Function {
+                            name: fname,
+                            def: DefId::UNRESOLVED,
+                            // as for a hand-written trait-impl method: the
+                            // *function* is private, the *member* is not.
+                            is_pub: false,
+                            attributes: Vec::new(),
+                            // a trait method declares no parameters of its own;
+                            // the impl's are prepended by pass 1.25.
+                            generics: Vec::new(),
+                            where_bounds: Vec::new(),
+                            params,
+                            return_type,
+                            body,
+                        },
+                        ri.span.clone(),
+                    ),
+                    RawMethod {
+                        target: ri.target.clone(),
+                        generics: Vec::new(),
+                        where_bounds: ri.where_bounds.clone(),
+                        name: tm.name,
+                        fn_name: fname,
+                        receiver: tm.receiver,
+                        // a trait-impl method's reachability follows the trait.
+                        is_pub: true,
+                        default_of: Some(ri.trait_),
+                        span: ri.span.clone(),
+                    },
+                ));
+            }
+        }
+        for (fname, item, rm) in synthesized {
+            // minted here rather than in `build_symtab`, which ran before this
+            // function existed. Only the *declaring* module needs to see the
+            // name: every other module reaches the method through the member
+            // table, which pass 1.5 fills in from the `RawMethod`.
+            let did = defs.alloc(Def {
+                module: modules[id].mid,
+                kind: DefKind::Fn,
+                source_name: fname,
+                is_pub: false,
+                linkage: linkage_of(fname, &[], false),
+                span: item.span,
+            });
+            let sym = Sym { name: defs.symbol(did, arena), def: did, is_pub: false };
+            all_scopes[id].calls.insert(fname, sym);
+            symtabs[id].fns.insert(fname, sym);
+            inherited.insert(fname, rm.default_of.expect("synthesized from a default"));
+            modules[id].items.push(item);
+            modules[id].methods.push(rm);
+        }
+    }
+
     // pass 1.2: resolve every type alias' body, in the module that declared it.
     //
     // Has to happen before anything resolves a type, since a *use* of an alias in
@@ -3084,6 +3334,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 scopes,
                 type_params: &type_params,
                 aliases: &aliases,
+                in_default_of: None,
                 // resolving a type consults no members, so an empty table is not
                 // a limitation here - see `resolve_extend_target`.
                 members: &no_members_yet,
@@ -3223,11 +3474,24 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // blocks reaching the same slot are ambiguous at every call site, so
             // this is an error rather than a silent last-one-wins.
             if prev.is_some() {
-                errs.push(Error::new(rm.span.clone(), format!(
-                    "method '{}' is already defined for this type", rm.name))
-                    .with_label(rm.span.clone(), "second definition")
-                    .with_note("a second `extend` block cannot add or specialize a method \
-                                (`extend [T]` and `extend [i32]` both claim every slice)"));
+                // a default body is not written in the block it lands in, so
+                // "second definition" pointing at that block would send the
+                // reader looking for a method that is not there.
+                let err = match rm.default_of {
+                    Some(tr) => Error::new(rm.span.clone(), format!(
+                        "method '{}' is already defined for this type", rm.name))
+                        .with_label(rm.span.clone(), format!(
+                            "this impl inherits '{}' as a default from trait '{}'",
+                            rm.name, tr))
+                        .with_note("define it in this block to override the default, \
+                                    or rename the other one"),
+                    None => Error::new(rm.span.clone(), format!(
+                        "method '{}' is already defined for this type", rm.name))
+                        .with_label(rm.span.clone(), "second definition")
+                        .with_note("a second `extend` block cannot add or specialize a method \
+                                    (`extend [T]` and `extend [i32]` both claim every slice)"),
+                };
+                errs.push(err);
             }
         }
     }
@@ -3239,6 +3503,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             scopes,
             type_params: &type_params,
             aliases: &aliases,
+            in_default_of: None,
             members: defs.members(),
             module: m.mid,
             errs: &mut errs,
@@ -3246,8 +3511,13 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             span: Span::new(m.file, 0, 0),
         };
         for tl in &mut m.items {
+            rw.in_default_of = match &tl.value {
+                TopLevelNode::Function { name, .. } => inherited.get(*name).copied(),
+                _ => None,
+            };
             rw.toplevel(tl);
         }
+        rw.in_default_of = None;
         for imp in &m.impls {
             // as above: an `extend T: Trait` naming an unknown `T` or `Trait`
             // has already produced an error through the type/bound paths, so

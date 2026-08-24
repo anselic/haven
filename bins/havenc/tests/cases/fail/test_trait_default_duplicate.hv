@@ -1,0 +1,24 @@
+// A default lands on a target that already has a method of that name.
+//
+// The block it lands in did not write `opt`, so labelling it "second definition"
+// would send the reader looking for a method that is not there. Saying where the
+// method came from is the difference between a puzzling error and an obvious one.
+//@ error: method 'opt' is already defined for this type
+//@ error: inherits 'opt' as a default from trait 'T3'
+
+trait T3 {
+    proc opt(*self) i32 { return 1; }
+}
+
+struct S { x: i32 }
+
+extend S: T3 {}
+
+extend S {
+    proc opt(*self) i32 { return 2; }
+}
+
+@export
+proc main() i32 {
+    return 0;
+}

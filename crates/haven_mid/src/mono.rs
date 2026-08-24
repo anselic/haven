@@ -15,7 +15,8 @@ use std::collections::{HashMap, VecDeque};
 use bumpalo::Bump;
 
 use haven_common::ast::*;
-use haven_common::defs::{Def, DefId, Defs, Linkage, Member, MemberTable, TyHead};
+use haven_common::defs::{deinstance, Def, DefId, Defs, Instances, Linkage, Member,
+                         MemberTable, TyHead};
 
 /// The one method a `Delete` impl provides. Mirrors `own::DELETE_METHOD`, which
 /// is where the lang item is actually interpreted; mono only needs to recognize
@@ -144,11 +145,6 @@ struct Mono<'p, 'a> {
     /// [`Self::impl_applies`]. Only destructors consult this: they are the one
     /// thing mono creates without a call site asking for it.
     impls: &'p [ImplDecl<'a>],
-    /// Each minted instance's template and concrete arguments, keyed by the
-    /// instance's own identity. `add_instance` on `Defs` records the template but
-    /// only a display *string* for the arguments; dispatch needs them as real
-    /// types, to turn `Vec$i32` back into `Vec<i32>` (see [`Self::deinstance`]).
-    instance_args: HashMap<DefId, (DefId, Vec<ConcreteArg<'a>>)>,
 }
 
 /// A bound const generic parameter: its concrete value plus declared type, so a
@@ -329,22 +325,27 @@ fn display_name<'a>(defs: &Defs<'a>, base: DefId, args: &[ConcreteArg<'a>]) -> S
 /// found directly on a `*T` receiver (an `extend *T` blanket) has `self: **T`, so
 /// the receiver must be address-taken, whereas the same method found by derefing
 /// (an `extend T` reached through a `*T`) has `self: *T` and passes as-is.
-fn member_of<'a>(members: &MemberTable<'a>, ty: &Type<'a>, name: &str)
+fn member_of<'a>(members: &MemberTable<'a>, instances: &Instances<'a>, ty: &Type<'a>, name: &str)
     -> Option<(Member<'a>, Unified<'a>, bool)>
 {
-    fn direct<'a>(members: &MemberTable<'a>, ty: &Type<'a>, name: &str)
+    fn direct<'a>(members: &MemberTable<'a>, instances: &Instances<'a>, ty: &Type<'a>, name: &str)
         -> Option<(Member<'a>, Unified<'a>)>
     {
-        let m = members.get(&(TyHead::of(ty)?, name))?;
+        // both the head and the unification want template form: the head
+        // because `Vec$i32` was never registered against anything, and the
+        // unification because that is the form the impl was written in.
+        let ty = deinstance(instances, ty);
+        let m = members.get(&(TyHead::of(&ty)?, name))?;
         let params: Vec<&'a str> = m.generics.iter().map(|g| match g {
             GenericParam::Type { name, .. } => *name,
             GenericParam::Const(name, _) => *name,
         }).collect();
         let mut u = Unified::default();
-        unify(&m.self_ty, ty, &params, &mut u).then(|| (m.clone(), u))
+        unify(&m.self_ty, &ty, &params, &mut u).then(|| (m.clone(), u))
     }
-    match (direct(members, ty, name), ty) {
-        (None, Type::Pointer(inner)) => direct(members, inner, name).map(|(m, u)| (m, u, true)),
+    match (direct(members, instances, ty, name), ty) {
+        (None, Type::Pointer(inner)) =>
+            direct(members, instances, inner, name).map(|(m, u)| (m, u, true)),
         (found, _) => found.map(|(m, u)| (m, u, false)),
     }
 }
@@ -364,10 +365,11 @@ fn member_of<'a>(members: &MemberTable<'a>, ty: &Type<'a>, name: &str)
 /// real call-graph edge instead of an opaque indirect call.
 pub(crate) fn concrete_method_name<'a>(
     members: &MemberTable<'a>,
+    instances: &Instances<'a>,
     ty: &Type<'a>,
     field: &'a str,
 ) -> Option<&'a str> {
-    let (m, _, _) = member_of(members, ty, field)?;
+    let (m, _, _) = member_of(members, instances, ty, field)?;
     // an associated fn has no receiver to dispatch on, and a template's name is
     // a base that has no clean-status of its own; neither is a concrete edge.
     if m.receiver == Receiver::Associated || !m.generics.is_empty() {
@@ -413,49 +415,21 @@ impl<'p, 'a> Mono<'p, 'a> {
         let def = self.defs.alloc(Def {
             module, kind, source_name, is_pub, linkage: Linkage::Fixed(mangled), span,
         });
-        self.defs.add_instance(def, base, display);
-        self.instance_args.insert(def, (base, args.to_vec()));
+        self.defs.add_instance(def, base, display, args.iter().map(|a| match a {
+            ConcreteArg::Type(t) => GenericArg::Type(t.clone()),
+            ConcreteArg::Const(n) => GenericArg::Const(ConstVal::Lit(*n)),
+        }).collect());
         (def, mangled)
     }
 
-    /// Put a monomorphized instance type back into template form: the flat
-    /// `Named` `Vec$i32` (no args) becomes `Vec<i32>` (`Def(Vec)` + `[i32]`).
-    ///
-    /// Dispatch keys on the *template* head and recovers an impl's parameters by
-    /// unifying against the arguments, so a receiver whose type is an instance -
-    /// which is what happens when a generic function's type parameter was bound to
-    /// a generic instance, `foo::<Vec<i32>>` reaching `x.display()` on `x: *T` -
-    /// has to be de-instanced first, or `member_of` keys on `Def(Vec$i32)`, which
-    /// no `extend Vec<T>` was registered against, and finds nothing. A
-    /// non-generic struct is a `Named` with no args too, but is absent from
-    /// `instance_args`, so it passes through unchanged.
+    /// Put a monomorphized instance type back into template form, so head
+    /// dispatch can find the impl it was declared against. See
+    /// [`haven_common::defs::deinstance`], which every post-mono lookup shares:
+    /// mono needs it because a generic function's type parameter can be bound to
+    /// a generic *instance* (`foo::<Vec<i32>>` reaching `x.display()` on `x: *T`),
+    /// and the passes after it because by then every generic type is an instance.
     fn deinstance(&self, ty: &Type<'a>) -> Type<'a> {
-        match ty {
-            Type::Named { def, args } if args.is_empty() => match self.instance_args.get(def) {
-                Some((base, cargs)) => Type::Named {
-                    def: *base,
-                    args: cargs.iter().map(|a| match a {
-                        ConcreteArg::Type(t) => GenericArg::Type(self.deinstance(t)),
-                        ConcreteArg::Const(n) => GenericArg::Const(ConstVal::Lit(*n)),
-                    }).collect(),
-                },
-                None => ty.clone(),
-            },
-            // a `Named` that still carries args is already template-form; recurse
-            // in case one of the args is itself an instance.
-            Type::Named { def, args } => Type::Named {
-                def: *def,
-                args: args.iter().map(|a| match a {
-                    GenericArg::Type(t) => GenericArg::Type(self.deinstance(t)),
-                    other => other.clone(),
-                }).collect(),
-            },
-            Type::Pointer(inner) => Type::Pointer(Box::new(self.deinstance(inner))),
-            Type::Slice(inner)   => Type::Slice(Box::new(self.deinstance(inner))),
-            Type::Array(inner, n) => Type::Array(Box::new(self.deinstance(inner)), n.clone()),
-            Type::Simd(inner, n)  => Type::Simd(Box::new(self.deinstance(inner)), n.clone()),
-            other => other.clone(),
-        }
+        haven_common::defs::deinstance(self.defs.instances(), ty)
     }
 
     /// Record a generic-struct instantiation request, return its mangled name
@@ -486,10 +460,15 @@ impl<'p, 'a> Mono<'p, 'a> {
             GenericParam::Type { bounds, .. } if !bounds.is_empty())) {
             return true;
         }
+        // the arguments are in instance form (`Vec$i32`), and the `where` clause
+        // this is about to check asks whether one of them implements a trait -
+        // a question the conformance list answers in template form only. Without
+        // the round trip a conditional impl silently never applies as soon as its
+        // argument is itself generic, and the instance goes undestroyed.
         let concrete = Type::Named {
             def: base,
             args: args.iter().map(|a| match a {
-                ConcreteArg::Type(t) => GenericArg::Type(t.clone()),
+                ConcreteArg::Type(t) => GenericArg::Type(self.deinstance(t)),
                 ConcreteArg::Const(n) => GenericArg::Const(ConstVal::Lit(*n)),
             }).collect(),
         };
@@ -693,7 +672,7 @@ impl<'p, 'a> Mono<'p, 'a> {
 
         // dispatch by head, then through one pointer level - the same two-step
         // the typechecker uses, so both agree on which impl a receiver picks.
-        let (m, u, via_deref) = member_of(&self.members, &recv_ty, field)?;
+        let (m, u, via_deref) = member_of(&self.members, self.defs.instances(), &recv_ty, field)?;
         if m.receiver == Receiver::Associated { return None; }
         // not a template: a method of a concrete `extend` that declares no
         // generics of its own needs no instance, and the post-mono typecheck
@@ -814,7 +793,8 @@ impl<'p, 'a> Mono<'p, 'a> {
                         // already validated it dispatches through `P`'s bound.
                         let subst = self.subst_ty(&Type::Param(path.path.segments[0]), b);
                         let concrete = self.deinstance(&subst);
-                        let (m, u, _) = member_of(&self.members, &concrete, path.path.segments[1])
+                        let (m, u, _) = member_of(&self.members, self.defs.instances(),
+                                                  &concrete, path.path.segments[1])
                             .expect("bounded associated fn resolves after substitution");
                         // an associated fn on a *generic* impl is itself a template
                         // (its instance carries the impl's bound params); a concrete
@@ -1181,7 +1161,6 @@ pub fn monomorphize<'a>(
         node_types,
         inferred_type_args,
         impls,
-        instance_args: HashMap::new(),
     };
     let empty = Bindings::empty();
 

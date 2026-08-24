@@ -1,0 +1,13 @@
+// A trait whose defaults are inherited by an impl in another module, for
+// `test_trait_default_xmod`.
+
+pub trait Mono {
+    proc tick(*self, x: f32) f32;
+
+    // written in terms of the required method, so it needs nothing from this
+    // module to be resolvable where the impl is written - the rule a portable
+    // default has to follow, since the copy resolves in the impl's scope.
+    proc tick2(*self, x: f32) f32 { return (*self).tick((*self).tick(x)); }
+
+    proc tick3(*self, x: f32) f32 { return (*self).tick((*self).tick2(x)); }
+}

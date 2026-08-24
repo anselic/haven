@@ -1,0 +1,68 @@
+// A trait method may carry a body, which every impl that stays silent inherits.
+//
+// The default is *copied into* each impl as an ordinary method - the same shape
+// `extend` produces for one written by hand - rather than dispatched to at the
+// call site. So conformance, member lookup and monomorphization all see a normal
+// method, and a trait is still nothing but a set of signatures by the time
+// anything typechecks.
+
+trait Mono {
+    // required: every impl must write this one
+    proc tick(*self, x: f32) f32;
+
+    // defaulted in terms of the required one
+    proc tick2(*self, x: f32) f32 { return (*self).tick((*self).tick(x)); }
+
+    // a default with no receiver at all, reached as `Type::kind()`
+    proc kind() i32 { return 1; }
+}
+
+struct Gain { g: f32 }
+
+extend Gain: Mono {
+    proc tick(*self, x: f32) f32 { return x * (*self).g; }
+    // tick2 and kind inherited
+}
+
+struct Offset { d: f32 }
+
+extend Offset: Mono {
+    proc tick(*self, x: f32) f32 { return x + (*self).d; }
+    // ...and overridden here, which suppresses the copy
+    proc kind() i32 { return 7; }
+}
+
+// a default is reachable through a bound like any other trait method: the
+// generic body resolves it on `M`, and the concrete instance calls the copy that
+// landed on the impl.
+proc twice<M>(m: *M, x: f32) f32 where M: Mono {
+    return (*m).tick2(x);
+}
+
+// a generic impl, so the copied default becomes a generic function too and is
+// specialized per instance.
+struct Cell<T> { tag: T, g: f32 }
+
+extend Cell<T>: Mono {
+    proc tick(*self, x: f32) f32 { return x * (*self).g; }
+}
+
+@export
+proc main() i32 {
+    let g: Gain = Gain { g: 2.0f32 };
+    println(g.tick(1.0f32));       // 2
+    println(g.tick2(1.0f32));      // 4
+    println(Gain::kind());         // 1
+    println(twice::<Gain>(&g, 1.0f32));  // 4
+
+    let o: Offset = Offset { d: 1.0f32 };
+    println(o.tick2(1.0f32));      // 3
+    println(Offset::kind());       // 7
+
+    let c: Cell<i32> = Cell::<i32> { tag: 0, g: 3.0f32 };
+    println(c.tick2(1.0f32));      // 9
+    let d: Cell<bool> = Cell::<bool> { tag: true, g: 4.0f32 };
+    println(d.tick2(1.0f32));      // 16
+
+    return 0;
+}

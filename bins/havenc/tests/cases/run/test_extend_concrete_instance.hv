@@ -1,0 +1,74 @@
+// A concrete `extend` on an *instantiation* of a generic type.
+//
+// The impl is registered against the template (`Def(Scale)`), the way every
+// impl is - but monomorphization rewrites the receiver's type into the flat
+// instance it mints, `Scale$f32`, a fresh identity carrying no arguments. So
+// the post-mono typecheck has to put that back into template form before it can
+// find the impl, or it keys the member table on something no impl was ever
+// registered against and reports "has no field".
+//
+// A *generic* `extend` never had this problem: mono rewrites every call to one
+// into a direct call on the instance it mints, so the member table is not
+// consulted again. This one desugars to an ordinary non-generic function, so
+// mono leaves the call alone - which is what makes the round trip observable.
+
+struct Scale<T> { k: T }
+struct Pair<A, B> { a: A, b: B }
+enum Tag<T> { Some(T), None }
+
+trait Mono { proc tick(*self, x: f32) f32; }
+
+extend Scale<f32>: Mono {
+    proc tick(*self, x: f32) f32 { return x * (*self).k; }
+}
+
+extend Scale<f32> {
+    // an associated function is reached by naming the *template*: the impl
+    // declares no parameters, so there is nothing for a turbofish to bind.
+    proc unit() Scale<f32> { return Scale::<f32> { k: 1.0f32 }; }
+}
+
+// more than one argument, so the unification that recovers them is doing real
+// work rather than degenerating to a single-slot comparison.
+extend Pair<f32, i32> {
+    proc second(*self) i32 { return (*self).b; }
+}
+
+// enums instantiate through the same path as structs.
+extend Tag<i32> {
+    proc or_zero(*self) i32 {
+        match (*self) {
+            Tag::Some(v) -> { return v; }
+            Tag::None -> { return 0; }
+        }
+    }
+}
+
+// a generic impl on the same program, so both dispatch paths are exercised at
+// once: this one is a template mono specializes, the ones above are not.
+struct Cell<T> { v: T }
+extend Cell<T> {
+    proc get(*self) T { return (*self).v; }
+}
+
+@export
+proc main() i32 {
+    let s: Scale<f32> = Scale::<f32> { k: 3.0f32 };
+    println(s.tick(2.0f32));                    // 6
+
+    let u: Scale<f32> = Scale::unit();
+    println(u.tick(5.0f32));                    // 5
+
+    let p: Pair<f32, i32> = Pair::<f32, i32> { a: 1.0f32, b: 7 };
+    println(p.second());                        // 7
+
+    let t: Tag<i32> = Tag::Some::<i32>(9);
+    println(t.or_zero());                       // 9
+
+    let n: Tag<i32> = Tag::None::<i32>();
+    println(n.or_zero());                       // 0
+
+    let c: Cell<i32> = Cell::<i32> { v: 4 };
+    println(c.get());                           // 4
+    return 0;
+}

@@ -1138,10 +1138,31 @@ pub fn ownership_check<'a>(
         if *name != DELETE_METHOD { continue; }
         let TyHead::Def(d) = head else { continue };
         let owner = owning.contains(d)
-            || cx.instances.get(d).is_some_and(|t| owning.contains(t));
+            || cx.instances.get(d).is_some_and(|i| owning.contains(&i.template));
         // a missing `delete` was already reported by conformance checking.
         if owner { deletes.insert(*d, m.name); }
     }
+
+    // a *concrete* impl on an instantiation of a generic type - `extend Res<i32>:
+    // Delete` - is registered against the template like every impl is, but unlike
+    // a generic one it desugars to an ordinary non-generic `delete` that survives
+    // mono under its own name. So the instance can share the template's entry.
+    //
+    // The guard is what keeps that from being wrong in the generic case. A
+    // generic impl's instances already have their own entry, minted by mono's
+    // `instantiate_destructor` and naming the body specialized for them, so they
+    // never reach here; but an instance a *conditional* impl does not cover
+    // (`Vec<u8>` under `extend Vec<T>: Delete where T: Delete`) has none, and
+    // deliberately so - handing it the template's name would call a destructor
+    // that was never instantiated. Only a concrete impl has a name to share.
+    for (inst, i) in cx.instances.iter() {
+        if deletes.contains_key(inst) { continue; }
+        let Some(&name) = deletes.get(&i.template) else { continue };
+        let concrete_impl = cx.members.get(&(TyHead::Def(i.template), DELETE_METHOD))
+            .is_some_and(|m| m.generics.is_empty());
+        if concrete_impl { deletes.insert(*inst, name); }
+    }
+
     if deletes.is_empty() { return Ok(()); }
 
     let model = Model {

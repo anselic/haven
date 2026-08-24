@@ -1,0 +1,12 @@
+// A trait whose default body reaches for a name private to this module, for
+// `test_trait_default_scope`.
+
+pub trait Mono {
+    proc tick(*self, x: f32) f32;
+
+    // `boost` is in scope here and nowhere else, so this default only resolves
+    // for an impl written in this module.
+    proc scaled(*self, x: f32) f32 { return (*self).tick(x) * boost(); }
+}
+
+proc boost() f32 { return 10.0f32; }
