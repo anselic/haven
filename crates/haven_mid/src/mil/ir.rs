@@ -106,7 +106,7 @@ pub enum Inst<'a> {
         // when the callee returns a struct, the result is passed back through
         // this caller-allocated slot (sret) instead of a return value, and the
         // call itself returns void. Some((slot, struct_name))
-        sret: Option<(Register, DefId)>,
+        sret: Option<(Register, Type<'a>)>,
     },
 
     // %dst = getelemptr %slice, %index (for slice indexing)
@@ -219,9 +219,11 @@ pub struct Function<'a> {
     pub params: Vec<(Register, Type<'a>)>,
     pub return_type: Type<'a>,
     pub blocks: Vec<BasicBlock<'a>>, // blocks[0] is always the entry
-    // for struct-returning functions: the hidden sret out-pointer parameter
-    // (its register and the struct name). The function returns void in LLVM
-    pub sret: Option<(Register, DefId)>,
+    // for aggregate-returning functions: the hidden sret out-pointer parameter
+    // (its register and the type returned). The function returns void in LLVM.
+    // Named by the *type* rather than a definition: a fixed-size array is an
+    // aggregate too, and has no `DefId` to name it by.
+    pub sret: Option<(Register, Type<'a>)>,
 }
 
 /// The constant value initializing a module-level global. A restricted subset of

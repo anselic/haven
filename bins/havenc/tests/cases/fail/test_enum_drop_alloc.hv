@@ -1,0 +1,31 @@
+// The enum drop `match` is visible to the alloc check.
+//
+// `hold` writes no call at all - it declares an enum and returns. The `match`
+// that destroys the live variant's payload is synthesized by the ownership pass,
+// and its one real arm calls `Res`'s destructor, which allocates.
+//
+// Same reasoning as `test_array_drop_alloc.hv`: the glue is built as ordinary
+// AST, so the alloc check - which runs afterwards and reads the call graph off
+// the AST - sees a real edge and names the real callee.
+//@ error: is marked as @alloc(false) but may allocate
+
+import std/vec { Vec }
+
+struct Res { id: i32 }
+
+extend Res: Delete {
+    proc delete(*self) {
+        let scratch: Vec<u8> = Vec::<u8>::with_capacity(8u64);
+    }
+}
+
+enum Maybe { None, Some(Res) }
+
+@alloc(false)
+proc hold() i32 {
+    let m: Maybe = Maybe::Some(Res { id: 1i32 });
+    return 0i32;
+}
+
+@export
+proc main() i32 { return hold(); }

@@ -3,7 +3,7 @@ use crate::intrinsics::Intrinsic;
 use crate::typecheck::RecvAdjust;
 use super::ir::*;
 use haven_common::defs::DefId;
-use super::ctx::{LowerCtx, coerce, aggregate_def, enum_const, lit_const, ta_type, ta_const};
+use super::ctx::{LowerCtx, coerce, aggregate_def, is_aggregate_ty, enum_const, lit_const, ta_type, ta_const};
 
 fn lower_intrinsic<'a>(
     cx: &mut LowerCtx<'a>,
@@ -80,13 +80,14 @@ fn lower_intrinsic<'a>(
             let val = lower_expr(cx, &args[1]);
             let ptr = as_register(cx, dst, &Type::Pointer(Box::new(ty.clone())));
             // an aggregate is held by pointer on both sides, so this is the same
-            // field-by-field copy `Assign` does; a plain `Store` would write the
-            // source pointer into the first field.
-            if let Some(def) = aggregate_def(&ty, &cx.enums) {
+            // copy `Assign` does; a plain `Store` would write the source pointer
+            // into the first field. An array element type is an aggregate here
+            // too - `Vec<[Res; 2]>` reaches this with `T = [Res; 2]`.
+            if is_aggregate_ty(&ty, &cx.enums) {
                 let Value::Reg(src) = val else {
                     unreachable!("an aggregate value is always a pointer register")
                 };
-                copy_struct(cx, def, src, ptr);
+                copy_aggregate(cx, &ty, src, ptr);
                 return Value::Const(Const::Undef);
             }
             let value_ty = cx.node_types[&args[1].id].clone();
@@ -272,11 +273,10 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             // the exact binding for this use, so shadowing is already decided.
             if let Some((reg, ty)) = cx.resolved.get(&expr.id).and_then(|b| cx.env.get(b)).cloned() {
                 match ty {
-                    // fixed arrays are stored in env as the alloca register itself, not a pointer
-                    // to one, so loading would yield the array value - we want the pointer
-                    Type::Array(_, _) => Value::Reg(reg),
-                    // a struct or data-enum aggregate is held by pointer: hand it back.
-                    _ if aggregate_def(&ty, &cx.enums).is_some() => Value::Reg(reg),
+                    // an aggregate - struct, data enum or fixed array - is held by
+                    // pointer, and that pointer *is* the value. Loading would
+                    // yield the record itself where a handle is expected.
+                    _ if is_aggregate_ty(&ty, &cx.enums) => Value::Reg(reg),
                     _ => {
                         let dst = cx.fresh_reg();
                         cx.emit(Inst::Load { dst, ptr: reg, ty, align: None });
@@ -291,8 +291,7 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 let addr = cx.fresh_reg();
                 cx.emit(Inst::GlobalPtr { dst: addr, name });
                 match ty {
-                    Type::Array(_, _) => Value::Reg(addr),
-                    _ if aggregate_def(&ty, &cx.enums).is_some() => Value::Reg(addr),
+                    _ if is_aggregate_ty(&ty, &cx.enums) => Value::Reg(addr),
                     _ => {
                         let dst = cx.fresh_reg();
                         cx.emit(Inst::Load { dst, ptr: addr, ty, align: None });
@@ -385,9 +384,7 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                             Value::Reg(r) => r,
                             _ => unreachable!(),
                         };
-                        let loaded = cx.fresh_reg();
-                        cx.emit(Inst::Load { dst: loaded, ptr: src, ty: field_ty.clone(), align: None });
-                        cx.emit(Inst::Store { ptr: field_ptr, val: Value::Reg(loaded), ty: field_ty, align: None });
+                        copy_aggregate(cx, &field_ty, src, field_ptr);
                     }
                     _ => {
                         cx.emit(Inst::Store {
@@ -429,8 +426,7 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 // a struct- or array-typed field is inlined aggregate storage: its
                 // value is its address (indexing/copying use the pointer), so hand
                 // back the field pointer instead of loading it
-                _ if matches!(field_ty, Type::Array(..))
-                    || aggregate_def(&field_ty, &cx.enums).is_some() => Value::Reg(field_ptr),
+                _ if is_aggregate_ty(&field_ty, &cx.enums) => Value::Reg(field_ptr),
                 _ => {
                     let dst = cx.fresh_reg();
                     cx.emit(Inst::Load { dst, ptr: field_ptr, ty: field_ty, align: None });
@@ -480,14 +476,16 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
 
                 let elem_val = lower_expr(cx, element);
                 // an aggregate element lands in inline storage: the slot *is* the
-                // element, so copy the produced struct into it field by field. A
-                // plain `Store` would write the source pointer as one machine word
-                // (the old boxed `[N x ptr]` layout). Scalars store directly.
-                if let Some(def) = aggregate_def(&ty, &cx.enums) {
+                // element, so copy the produced aggregate into it rather than
+                // storing its pointer as one machine word (the old boxed
+                // `[N x ptr]` layout). A nested array is an aggregate too, which
+                // is why this asks about the type and not about a definition.
+                // Scalars store directly.
+                if is_aggregate_ty(&ty, &cx.enums) {
                     let Value::Reg(src) = elem_val else {
                         unreachable!("an aggregate value is always a pointer register")
                     };
-                    copy_struct(cx, def, src, ptr);
+                    copy_aggregate(cx, &ty, src, ptr);
                 } else {
                     cx.emit(Inst::Store { ptr, val: elem_val, ty: ty.clone(), align: None });
                 }
@@ -532,10 +530,11 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 Type::Pointer(inner) | Type::Slice(inner) => *inner,
                 _ => unreachable!(),
             };
-            // dereferencing to a struct keeps it in memory
-            // the pointer already points at the struct's storage, so it is the
-            // struct value
-            if aggregate_def(&ty, &cx.enums).is_some() {
+            // dereferencing to an aggregate keeps it in memory: the pointer
+            // already points at its storage, so it *is* the value. This used to
+            // ask `aggregate_def`, which does not speak for `[T; N]`, so a
+            // `*p` on a `*[T; N]` tried to load the whole array as a scalar.
+            if is_aggregate_ty(&ty, &cx.enums) {
                 return Value::Reg(ptr_reg);
             }
             let dst = cx.fresh_reg();
@@ -665,12 +664,11 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 cx.terminate(Terminator::Unreachable);
                 return Value::Const(Const::Undef);
             }
-            if let Some(sname) = aggregate_def(&return_type, &cx.enums) {
-                let slot = cx.fresh_reg();
-                cx.emit(Inst::AllocaStruct { dst: slot, def: sname, align: None });
+            if is_aggregate_ty(&return_type, &cx.enums) {
+                let slot = alloca_aggregate(cx, &return_type);
                 cx.emit(Inst::Call {
                     dst: None, callee, args: lowered_args,
-                    return_type: Type::Void, sret: Some((slot, sname)),
+                    return_type: Type::Void, sret: Some((slot, return_type.clone())),
                 });
                 Value::Reg(slot)
             } else if return_type == Type::Void {
@@ -734,18 +732,16 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 cx.terminate(Terminator::Unreachable);
                 return Value::Const(Const::Undef);
             }
-            let struct_ret = aggregate_def(&return_type, &cx.enums);
-            if let Some(sname) = struct_ret {
+            if is_aggregate_ty(&return_type, &cx.enums) {
                 // if sret, allocate the result slot here and hand the callee a
                 // pointer to it. The call returns void & the slot is the value
-                let slot = cx.fresh_reg();
-                cx.emit(Inst::AllocaStruct { dst: slot, def: sname, align: None });
+                let slot = alloca_aggregate(cx, &return_type);
                 cx.emit(Inst::Call {
                     dst: None,
                     callee,
                     args: lowered_args,
                     return_type: Type::Void,
-                    sret: Some((slot, sname)),
+                    sret: Some((slot, return_type.clone())),
                 });
                 Value::Reg(slot)
             } else if return_type == Type::Void {
@@ -790,9 +786,7 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             // its address (the same convention `Access` and `Deref` follow), so
             // the element pointer is the value - loading it would read the first
             // word of the struct as if it were a handle. Only a scalar is loaded.
-            if aggregate_def(&element_ty, &cx.enums).is_some()
-                || matches!(element_ty, Type::Array(_, _))
-            {
+            if is_aggregate_ty(&element_ty, &cx.enums) {
                 return Value::Reg(elem_ptr);
             }
 
@@ -859,7 +853,7 @@ fn lower_receiver<'a>(cx: &mut LowerCtx<'a>, base: &Expr<'a>) -> Register {
 fn spill_temporary<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Register {
     let ty = cx.node_types[&expr.id].clone();
     let val = lower_expr(cx, expr);
-    if aggregate_def(&ty, &cx.enums).is_some() || matches!(ty, Type::Array(_, _)) {
+    if is_aggregate_ty(&ty, &cx.enums) {
         let Value::Reg(r) = val else {
             unreachable!("an aggregate lowers to the register holding its storage")
         };
@@ -977,6 +971,37 @@ pub(crate) fn lower_lvalue<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Regist
 // fields so the whole tree is deep-copied (value semantics).
 // TODO: switch to an `llvm.memcpy` intrinsic for large structs instead of
 // emitting a load/store per scalar field.
+/// Stack storage for one aggregate of type `ty`, yielding a pointer to it.
+///
+/// `AllocaStruct` names a definition, so it cannot serve a `[T; N]`; the generic
+/// `Alloca` can, now that an array renders as `[N x <element storage>]`.
+pub(crate) fn alloca_aggregate<'a>(cx: &mut LowerCtx<'a>, ty: &Type<'a>) -> Register {
+    let dst = cx.fresh_reg();
+    match aggregate_def(ty, &cx.enums) {
+        Some(def) => cx.emit(Inst::AllocaStruct { dst, def, align: None }),
+        None => cx.emit(Inst::Alloca { dst, ty: ty.clone(), align: None }),
+    }
+    dst
+}
+
+/// Copy an aggregate of type `ty` from `src` into `dst`, both pointers to
+/// storage of that type.
+///
+/// A struct is copied field by field (`copy_struct`); a fixed-size array is one
+/// contiguous value, so a whole-array load/store does it. Anything else is a
+/// scalar and stores directly. Callers that know they hold an aggregate get the
+/// right copy without asking which kind it is.
+pub(crate) fn copy_aggregate<'a>(cx: &mut LowerCtx<'a>, ty: &Type<'a>, src: Register, dst: Register) {
+    match aggregate_def(ty, &cx.enums) {
+        Some(def) => copy_struct(cx, def, src, dst),
+        None => {
+            let loaded = cx.fresh_reg();
+            cx.emit(Inst::Load { dst: loaded, ptr: src, ty: ty.clone(), align: None });
+            cx.emit(Inst::Store { ptr: dst, val: Value::Reg(loaded), ty: ty.clone(), align: None });
+        }
+    }
+}
+
 pub(crate) fn copy_struct<'a>(cx: &mut LowerCtx<'a>, struct_def: DefId, src: Register, dst: Register) {
     let fields = cx.types[&struct_def].fields.clone();
     for (i, (_fname, fty)) in fields.iter().enumerate() {

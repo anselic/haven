@@ -1,0 +1,30 @@
+// The same rule reached through a struct field: matching on `b.m` and taking the
+// payload is a partial move of `b`, which is exactly what moving one field out
+// of an owning value already is - so it gets the same error, naming `b`.
+//
+// Without this the payload would be moved into the return value *and* destroyed
+// again by `b`'s own drop glue when `take_field` returns.
+//@ error: cannot move a 'Res' out of a field of 'b'
+
+struct Res { id: i32 }
+
+extend Res: Delete {
+    proc delete(*self) { print("drop "); println(self.id); }
+}
+
+enum Maybe { None, Some(Res) }
+struct Box { m: Maybe }
+
+proc take_field(b: Box) Res {
+    match (b.m) {
+        Maybe::Some(v) -> { return v; }
+        Maybe::None -> { return Res { id: 0i32 }; }
+    }
+}
+
+@export
+proc main() i32 {
+    let b: Box = Box { m: Maybe::Some(Res { id: 1i32 }) };
+    let r: Res = take_field(b);
+    return r.id;
+}

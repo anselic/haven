@@ -1,0 +1,59 @@
+-- some --
+make 1
+drop 1
+-- none --
+none
+-- two --
+make 2
+make 3
+drop 2
+drop 3
+-- one --
+make 4
+drop 4
+-- named --
+make 5
+drop 5
+-- in struct --
+make 6
+drop 6
+-- in array --
+make 7
+make 8
+drop 7
+drop 8
+-- arr payload --
+make 9
+make 10
+drop 9
+drop 10
+-- deep --
+make 11
+drop 11
+-- deep none --
+deep none
+-- generic --
+make 12
+drop 12
+-- heap --
+make 13
+make 14
+3
+drop 13
+drop 14
+-- custom --
+make 15
+custom delete
+-- temp --
+make 16
+drop 16
+16
+-- moved out --
+make 17
+took
+drop 17
+-- from temp --
+make 18
+took temp
+drop 18
+-- end --

@@ -1,0 +1,70 @@
+// An inline array of aggregates held as a *struct field*, copied in by a struct
+// literal and read back.
+//
+// A sequence is contiguous inline storage - `[N x %Name]`, what `size_of` and
+// `alloc` lay out and what indexing strides by. `emit_type` used to render it as
+// `[N x ptr]` instead, a leftover of the boxed representation that Stage 8
+// replaced everywhere *except* the generic `load`/`store` path. A struct-literal
+// field assignment is exactly a load/store pair, so it copied `N*8` bytes
+// between two objects laid out inline:
+//
+//   * element under 8 bytes - overruns both source and destination. The
+//     out-of-bounds store is UB, so at -O3 the result was not merely a clobber:
+//     `[G1; 3]` of one f32 each read back `nan`.
+//   * element exactly 8 bytes - accidentally correct, which is how this survived.
+//   * element over 8 bytes - under-copies, so later elements are never written
+//     and read back as zero.
+//
+// Hence the size ladder below: 4, 8, 12 and 16-byte elements, each at two
+// lengths, so neither an over- nor an under-copy can pass. `[f32; N]` pins the
+// scalar case that was always fine.
+//@ exit: 0
+
+struct A4  { a: f32 }                            // 4 bytes
+struct A8  { a: f32, b: f32 }                    // 8 - the size that hid the bug
+struct A12 { a: f32, b: f32, c: f32 }            // 12
+struct A16 { a: f64, b: f64 }                    // 16
+
+struct H4  { s: [A4; 3] }
+struct H8  { s: [A8; 3] }
+struct H12 { s: [A12; 3] }
+struct H16 { s: [A16; 3] }
+struct HS  { s: [f32; 3] }
+
+// a second field after the array catches an over-copy that runs off the end of
+// the first one: it must still read back what it was given.
+struct Guarded { s: [A4; 2], tail: i32 }
+
+@export
+proc main() i32 {
+    let h4: H4 = H4 { s: [A4 { a: 1.0 }, A4 { a: 2.0 }, A4 { a: 3.0 }] };
+    println(h4.s[0u64].a + h4.s[1u64].a + h4.s[2u64].a);          // 6
+
+    let h8: H8 = H8 { s: [A8 { a: 1.0, b: 10.0 }, A8 { a: 2.0, b: 20.0 },
+                          A8 { a: 3.0, b: 30.0 }] };
+    println(h8.s[0u64].a + h8.s[1u64].b + h8.s[2u64].a);          // 24
+
+    let h12: H12 = H12 { s: [A12 { a: 1.0, b: 0.0, c: 4.0 },
+                             A12 { a: 2.0, b: 0.0, c: 5.0 },
+                             A12 { a: 3.0, b: 0.0, c: 6.0 }] };
+    println(h12.s[0u64].a + h12.s[2u64].c);                       // 7
+
+    let h16: H16 = H16 { s: [A16 { a: 1.0, b: 0.0 }, A16 { a: 2.0, b: 0.0 },
+                             A16 { a: 3.0, b: 9.0 }] };
+    println(h16.s[2u64].a + h16.s[2u64].b);                       // 12
+
+    let hs: HS = HS { s: [1.0f32, 2.0f32, 3.0f32] };
+    println(hs.s[0u64] + hs.s[2u64]);                             // 4
+
+    // the neighbouring field must survive the array copy
+    let g: Guarded = Guarded { s: [A4 { a: 7.0 }, A4 { a: 8.0 }], tail: 42 };
+    println(g.s[1u64].a);                                         // 8
+    println(g.tail);                                              // 42
+
+    // writing an element after construction still lands in the right slot
+    g.s[0u64].a = 5.0;
+    println(g.s[0u64].a + g.s[1u64].a);                           // 13
+    println(g.tail);                                              // 42
+
+    return 0;
+}

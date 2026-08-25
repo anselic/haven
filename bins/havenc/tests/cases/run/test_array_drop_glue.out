@@ -1,0 +1,61 @@
+-- plain --
+make 1
+make 2
+1
+drop 1
+drop 2
+-- field --
+make 3
+make 4
+drop 3
+drop 4
+-- wrappers --
+make 5
+make 6
+drop 5
+drop 6
+-- two each --
+make 7
+make 8
+make 9
+make 10
+drop 7
+drop 9
+drop 8
+drop 10
+-- nested --
+make 11
+make 12
+make 13
+make 14
+drop 11
+drop 12
+drop 13
+drop 14
+-- early --
+make 15
+make 16
+drop 15
+drop 16
+-- returned --
+make 17
+make 18
+drop 17
+drop 18
+-- moved --
+make 19
+make 20
+drop 19
+drop 20
+39
+-- heap --
+make 21
+make 22
+make 23
+make 24
+2
+drop 21
+drop 22
+drop 23
+drop 24
+-- end --

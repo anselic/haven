@@ -1,0 +1,34 @@
+// A match arm's payload binding is a *view* into the scrutinee's storage, so
+// whether it may be moved out is a question about the scrutinee, not about the
+// binding. Here the scrutinee is behind a pointer: the caller still owns the
+// enum and would destroy it, so taking the payload leaves two owners of one
+// resource.
+//
+// This used to be accepted, because a payload binding resolves to an ordinary
+// local and `root` therefore called it a whole move. That was invisible while
+// enums had no drop glue - the caller's enum leaked rather than double-freeing -
+// and became a real double free the moment payloads started being destroyed.
+// `run/test_enum_drop_glue.hv` is the side of it that works.
+//@ error: cannot move a 'Res' out of a pointer or an element
+
+struct Res { id: i32 }
+
+extend Res: Delete {
+    proc delete(*self) { print("drop "); println(self.id); }
+}
+
+enum Maybe { None, Some(Res) }
+
+proc steal(p: *Maybe) Res {
+    match (*p) {
+        Maybe::Some(v) -> { return v; }
+        Maybe::None -> { return Res { id: 0i32 }; }
+    }
+}
+
+@export
+proc main() i32 {
+    let m: Maybe = Maybe::Some(Res { id: 1i32 });
+    let r: Res = steal(&m);
+    return r.id;
+}

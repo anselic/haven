@@ -36,10 +36,11 @@
 //!     clean error at the point the drop would be emitted.
 //!   * **partial moves.** Moving one field out of an owning value is rejected;
 //!     only whole locals move.
-//!   * **enum payloads and array elements** are never dropped automatically
-//!     (that needs a tag switch and a loop respectively). Such a type is still
-//!     correctly non-`Copy`, so it moves rather than aliases - it just leaks
-//!     unless its enclosing type implements `Delete` itself.
+//!
+//! Enum payloads and array elements *are* dropped: a drop path is not only a
+//! chain of field names but may also step through every element of an array or
+//! into the live variant of an enum, emitting a loop or a `match` that the rest
+//! of the path continues inside. See [`Step`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -72,16 +73,58 @@ const SPILL_TEMP: &str = "$tmp";
 const DIP_BASE: &str = "$dip_base";
 const DIP_COUNT: &str = "$dip_count";
 const DIP_INDEX: &str = "$dip_i";
+/// Loop index of an array drop. Not shared with `$dip_i`: a `drop_in_place` over
+/// an element type that is itself an array nests one inside the other, and
+/// keeping the names apart keeps the emitted AST readable.
+const DROP_INDEX: &str = "$drop_i";
+/// Name bound to the payload field an enum drop path goes through. Like
+/// `$drop_i` it may repeat across nested expansions; the `Bind` pattern's node
+/// id is the identity, not the name.
+const DROP_PAYLOAD: &str = "$drop_p";
 
 /// One `delete` call needed to destroy a value in place: the chain of fields to
 /// walk from the owner (empty when the owner implements `Delete` itself), and
 /// the function to call on the address of what that chain reaches.
 #[derive(Clone, Debug)]
 struct DropPath<'a> {
-    /// `(field name, type of the access)`, outermost first.
-    steps: Vec<(&'a str, Type<'a>)>,
+    /// How to walk from the owner to the value being destroyed, outermost first.
+    steps: Vec<Step<'a>>,
     /// Emitted name of the `delete` to call.
     target: &'a str,
+}
+
+/// One hop from a place towards something that needs destroying.
+#[derive(Clone, Debug)]
+enum Step<'a> {
+    /// `.name`, yielding a value of the given type.
+    Field(&'a str, Type<'a>),
+    /// `[i]` for every `i` in `0..count`, yielding the element type.
+    ///
+    /// Unlike a field, this is not one access but a whole loop, which is why a
+    /// step cannot simply be a name: the walk stops being a chain of `Access`
+    /// nodes and becomes nested `while`s. Everything after this step happens
+    /// once per element.
+    Elems(Type<'a>, usize),
+    /// One payload field of one variant, reached only when the tag says so.
+    ///
+    /// An enum's own fields are a tag and an opaque byte blob, so a payload is
+    /// not addressable by name the way a struct field is - which is why this
+    /// emits a `match` rather than an `Access`. The arm binds the field, the
+    /// rest of the path continues from that binding, and a `_` arm covers every
+    /// other variant (including the ones that own nothing).
+    Payload {
+        /// The enum being matched, for the arm's variant constant.
+        enum_def: DefId,
+        /// Which variant this path goes through.
+        variant: &'a str,
+        /// Index of the payload field within that variant.
+        index: usize,
+        /// How many payload fields the variant has, so the pattern has one
+        /// sub-pattern per field - all `_` except `index`.
+        arity: usize,
+        /// The bound field's type.
+        field_ty: Type<'a>,
+    },
 }
 
 /// Which types own something, and how to destroy them.
@@ -125,18 +168,50 @@ impl<'a> Model<'a> {
     /// The `delete` calls that destroy a value of `ty` held at `steps` so far.
     /// A type implementing `Delete` is destroyed by its own `delete`, and its
     /// fields are that method's business, so the walk stops there.
-    fn drop_paths(&self, ty: &Type<'a>, steps: &mut Vec<(&'a str, Type<'a>)>, out: &mut Vec<DropPath<'a>>) {
+    fn drop_paths(&self, ty: &Type<'a>, steps: &mut Vec<Step<'a>>, out: &mut Vec<DropPath<'a>>) {
+        // an array is inline storage for `count` values, so whatever destroys
+        // one of them destroys every one - the same paths, walked under a loop.
+        // `is_copy` has always looked through arrays, so a `[Res; 2]` was
+        // correctly non-`Copy` and correctly move-checked; only the destruction
+        // was missing, which made it a silent leak rather than a diagnostic.
+        if let Type::Array(inner, count) = ty {
+            steps.push(Step::Elems((**inner).clone(), count.expect_lit()));
+            self.drop_paths(inner, steps, out);
+            steps.pop();
+            return;
+        }
         let Type::Named { def, .. } = ty else { return };
         if let Some(target) = self.deletes.get(def) {
             out.push(DropPath { steps: steps.clone(), target });
             return;
         }
-        // an enum's fields are its tag and an opaque payload blob; destroying
-        // the live variant would need a switch on the tag (see module docs).
-        if self.enums.contains_key(def) { return; }
+        // an enum owns through the payload of whichever variant is live, so
+        // there is one path per (variant, owning payload field). Its own
+        // `$tag`/`$payload` fields are deliberately not walked: the blob is
+        // opaque bytes and would look like it owns nothing.
+        if let Some(e) = self.enums.get(def) {
+            // sorted so the emitted `match`es are in a stable order rather than
+            // whatever the hash map happens to yield
+            let mut variants: Vec<_> = e.payloads.iter().collect();
+            variants.sort_by_key(|(name, _)| *name);
+            for (variant, fields) in variants {
+                for (index, (_, fty)) in fields.iter().enumerate() {
+                    steps.push(Step::Payload {
+                        enum_def: *def,
+                        variant,
+                        index,
+                        arity: fields.len(),
+                        field_ty: fty.clone(),
+                    });
+                    self.drop_paths(fty, steps, out);
+                    steps.pop();
+                }
+            }
+            return;
+        }
         let Some(info) = self.types.get(def) else { return };
         for (fname, fty) in info.fields.clone() {
-            steps.push((fname, fty.clone()));
+            steps.push(Step::Field(fname, fty.clone()));
             self.drop_paths(&fty, steps, out);
             steps.pop();
         }
@@ -177,6 +252,7 @@ struct Slot<'a> {
 }
 
 /// Where a place expression lives, for deciding whether consuming it is a move.
+#[derive(Clone, Copy)]
 enum Root<'a> {
     /// The whole of a local or parameter: moving it is allowed.
     Whole(Binding<'a>),
@@ -203,10 +279,19 @@ struct Checker<'a, 'c> {
     ret_ty: Type<'a>,
     /// The source name of every `Local` binding, for diagnostics. A `Slot` also
     /// carries a name, but only droppable values get a slot: a value moved out of
-    /// an enum payload, or an owning enum local (an enum has no drop glue), has
-    /// none, and its move errors would otherwise read `<local>`. Keyed for every
-    /// `Declare` and every match payload binding, whether or not it is droppable.
+    /// an enum payload has none, and its move errors would otherwise read
+    /// `<local>`. Keyed for every `Declare` and every match payload binding,
+    /// whether or not it is droppable.
     names: HashMap<Binding<'a>, &'a str>,
+    /// For a match payload binding, where the enum it is a view into lives.
+    ///
+    /// A payload binding is not storage of its own - it is a window onto the
+    /// scrutinee - so moving it out is really a move of *that*, and whether it
+    /// is allowed is a question about the scrutinee, not about the window. This
+    /// is what stops `match (*p) { Some(v) -> return v }` from moving out of
+    /// borrowed storage, and what marks the enum consumed when the move is legal
+    /// so its own destructor does not then run over the hole.
+    payload_src: HashMap<Binding<'a>, Root<'a>>,
 }
 
 impl<'a, 'c> Checker<'a, 'c> {
@@ -400,7 +485,17 @@ impl<'a, 'c> Checker<'a, 'c> {
                 self.hoist_temps(value, decls);
             }
             StmtNode::If { condition, .. } => self.hoist_temps(condition, decls),
-            StmtNode::While { .. } | StmtNode::Match { .. } | StmtNode::Block(_)
+            // a match arm's payload bindings are *views* into the scrutinee's
+            // storage, so a match borrows its scrutinee exactly as `&` does - and
+            // an owning temporary borrowed that way has no binding, so nothing
+            // would ever destroy it. Spilling gives it one, and the enum is then
+            // dropped at the end of the statement (or moved, if an arm takes its
+            // payload, which `payload_src` now attributes to the spill local).
+            StmtNode::Match { scrutinee, .. } => {
+                self.hoist_temps(scrutinee, decls);
+                self.spill(scrutinee, decls);
+            }
+            StmtNode::While { .. } | StmtNode::Block(_)
             | StmtNode::Return(None) | StmtNode::Break | StmtNode::Continue => {}
         }
     }
@@ -481,7 +576,21 @@ impl<'a, 'c> Checker<'a, 'c> {
         self.visit(e);
         let Some(ty) = self.ty_of(e) else { return };
         if self.model.is_copy(&ty) { return; }
-        match self.root(e) {
+        // a payload binding stands in for the enum it views, so resolve it to
+        // where that enum actually lives before deciding anything.
+        let mut root = self.root(e);
+        while let Root::Whole(b) = root {
+            match self.payload_src.get(&b) {
+                // moving the payload consumes the enum too: mark the window
+                // moved, then ask the same question of what it looks onto.
+                Some(src) => {
+                    self.moved.insert(b, State::Moved(e.span));
+                    root = *src;
+                }
+                None => break,
+            }
+        }
+        match root {
             Root::Whole(b) => { self.moved.insert(b, State::Moved(e.span)); }
             Root::Field(b) => {
                 let name = self.binding_name(b);
@@ -557,14 +666,17 @@ impl<'a, 'c> Checker<'a, 'c> {
     /// of one (`Some(v) -> return v`) names `v` rather than `<local>`. The binding
     /// identity is the sub-pattern's node id, matching what name resolution wired
     /// every use of it to.
-    fn note_pattern_binds(&mut self, pat: &Pattern<'a>) {
+    fn note_pattern_binds(&mut self, pat: &Pattern<'a>, src: Root<'a>) {
         match &pat.value {
-            PatternNode::Bind(name) => { self.names.insert(Binding::Local(pat.id), name); }
+            PatternNode::Bind(name) => {
+                self.names.insert(Binding::Local(pat.id), name);
+                self.payload_src.insert(Binding::Local(pat.id), src);
+            }
             PatternNode::Variant { fields, .. } => {
-                for f in fields { self.note_pattern_binds(f); }
+                for f in fields { self.note_pattern_binds(f, src); }
             }
             PatternNode::StructVariant { fields, .. } => {
-                for (_, f) in fields { self.note_pattern_binds(f); }
+                for (_, f) in fields { self.note_pattern_binds(f, src); }
             }
             _ => {}
         }
@@ -674,26 +786,115 @@ impl<'a, 'c> Checker<'a, 'c> {
 
     /// `delete(&place.field...)` for an arbitrary place expression. Split out of
     /// `delete_call` because the `drop_in_place` expansion destroys `base[i]`
-    /// rather than a named binding, but walks the same field chain to get there.
+    /// rather than a named binding, but walks the same chain to get there.
     fn delete_at(&mut self, place: Expr<'a>, ty: Type<'a>, path: &DropPath<'a>, span: Span)
         -> Stmt<'a>
     {
-        let mut place = place;
-        let mut place_ty = ty;
-        for (field, fty) in path.steps.iter() {
-            place = self.expr(
-                ExprNode::Access { base: Box::new(place), field: *field },
-                fty.clone(), span);
-            place_ty = fty.clone();
-        }
+        self.delete_steps(place, ty, &path.steps, path.target, span)
+    }
 
+    /// Walk `steps` from `place` and destroy what is at the end.
+    ///
+    /// Recursive rather than a loop because a [`Step::Elems`] is not an access
+    /// but a `while` that the remaining steps happen *inside*: destroying a
+    /// `[[Res; 2]; 3]` is two nested loops, and a `[S; 4]` whose `S` owns two
+    /// fields is one loop containing two `delete`s.
+    ///
+    /// The index local is named the same in every loop; that is fine, and is why
+    /// [`Self::declare_stmt`] identifies a local by its `Declare`'s node id
+    /// rather than by name - two nested loops get two distinct bindings, and
+    /// each `Var` is wired to the one it means.
+    fn delete_steps(&mut self, place: Expr<'a>, ty: Type<'a>, steps: &[Step<'a>],
+                    target: &'a str, span: Span) -> Stmt<'a>
+    {
+        match steps.first() {
+            Some(Step::Field(field, fty)) => {
+                let inner = self.expr(
+                    ExprNode::Access { base: Box::new(place), field: *field },
+                    fty.clone(), span);
+                self.delete_steps(inner, fty.clone(), &steps[1..], target, span)
+            }
+            Some(Step::Elems(elem_ty, count)) => {
+                let idx_ty = Type::Uint64;
+                let (Some(zero), Some(one), Some(n)) = (
+                    self.int_lit(&idx_ty, 0, span),
+                    self.int_lit(&idx_ty, 1, span),
+                    self.int_lit(&idx_ty, *count as u64, span),
+                ) else {
+                    unreachable!("u64 is an integer type, so `int_lit` always yields one")
+                };
+                let (index_decl, index) = self.declare_stmt(DROP_INDEX, idx_ty.clone(), zero, span);
+
+                let i_read = self.var(DROP_INDEX, &idx_ty, index, span);
+                let cond = self.binary(BinaryOp::Lt, i_read, n, Type::Bool, span);
+
+                let i_read = self.var(DROP_INDEX, &idx_ty, index, span);
+                let elem = self.expr(
+                    ExprNode::Index { slice: Box::new(place), index: Box::new(i_read) },
+                    elem_ty.clone(), span);
+                let inner = self.delete_steps(
+                    elem, elem_ty.clone(), &steps[1..], target, span);
+
+                let i_read = self.var(DROP_INDEX, &idx_ty, index, span);
+                let next = self.binary(BinaryOp::Add, i_read, one, idx_ty.clone(), span);
+                let i_write = self.var(DROP_INDEX, &idx_ty, index, span);
+                let bump = Metadata::new(StmtNode::Assign { left: i_write, value: next }, span);
+
+                let body = Metadata::new(StmtNode::Block(vec![inner, bump]), span);
+                let while_ = Metadata::new(
+                    StmtNode::While { condition: cond, body: Box::new(body) }, span);
+                // one block, so the index is scoped to this loop
+                Metadata::new(StmtNode::Block(vec![index_decl, while_]), span)
+            }
+            Some(Step::Payload { enum_def, variant, index, arity, field_ty }) => {
+                // one sub-pattern per payload field: `_` everywhere but the one
+                // this path goes through.
+                let fields: Vec<Pattern<'a>> = (0..*arity)
+                    .map(|i| Metadata::new(
+                        if i == *index { PatternNode::Bind(DROP_PAYLOAD) }
+                        else { PatternNode::Wildcard },
+                        span))
+                    .collect();
+                // the pattern's binding identity is its node id, exactly as for a
+                // hand-written `match` arm - MIL keys the payload view on it.
+                let bind = Binding::Local(fields[*index].id);
+
+                // a single segment is enough: everything downstream reads the
+                // variant off `path.last()`, and the enum itself comes from the
+                // scrutinee's type, never from the pattern's qualifier.
+                let name = NameRef { def: *enum_def, path: Path::single(variant) };
+                let pat = Metadata::new(
+                    PatternNode::Variant { path: name, fields }, span);
+
+                let bound = self.var(DROP_PAYLOAD, field_ty, bind, span);
+                let inner = self.delete_steps(
+                    bound, field_ty.clone(), &steps[1..], target, span);
+                let arm = Box::new(Metadata::new(StmtNode::Block(vec![inner]), span));
+
+                // every other variant, including those that own nothing
+                let rest = Metadata::new(PatternNode::Wildcard, span);
+                let empty = Box::new(Metadata::new(StmtNode::Block(Vec::new()), span));
+
+                Metadata::new(StmtNode::Match {
+                    scrutinee: place,
+                    arms: vec![(pat, arm), (rest, empty)],
+                }, span)
+            }
+            None => self.delete_here(place, ty, target, span),
+        }
+    }
+
+    /// `delete(&place)`, the leaf of every drop path.
+    fn delete_here(&mut self, place: Expr<'a>, place_ty: Type<'a>, target: &'a str, span: Span)
+        -> Stmt<'a>
+    {
         let ptr_ty = Type::Pointer(Box::new(place_ty));
         let addr = self.expr(
             ExprNode::Unary { op: UnaryOp::AddrOf, operand: Box::new(place) },
             ptr_ty.clone(), span);
         // the callee's type is what MIL reads to coerce the argument; a
         // destructor is always `proc(*T) void`.
-        let func = self.expr(ExprNode::Var(path.target), Type::Function {
+        let func = self.expr(ExprNode::Var(target), Type::Function {
             params: vec![ptr_ty],
             return_type: Box::new(Type::Void),
         }, span);
@@ -946,14 +1147,16 @@ impl<'a, 'c> Checker<'a, 'c> {
                 // payload bindings are views into the scrutinee's storage rather
                 // than copies, so an arm borrows rather than takes.
                 self.visit(&scrutinee);
+                let scrutinee_root = self.root(&scrutinee);
                 let entry = self.moved.clone();
                 let mut merged: Option<(Flow<'a>, bool)> = None;
                 let mut new_arms = Vec::with_capacity(arms.len());
                 for (pat, body) in arms {
                     self.moved = entry.clone();
                     // a payload binding is a view into the scrutinee's storage;
-                    // moving it out is a move of that binding, so name it.
-                    self.note_pattern_binds(&pat);
+                    // moving it out is a move of *that*, so record both the name
+                    // (for diagnostics) and where the storage lives.
+                    self.note_pattern_binds(&pat, scrutinee_root);
                     let (body, div) = self.branch(body);
                     let state = std::mem::take(&mut self.moved);
                     merged = Some(match merged {
@@ -1190,6 +1393,7 @@ pub fn ownership_check<'a>(
             moved: Flow::new(),
             ret_ty: return_type.clone(),
             names: HashMap::new(),
+            payload_src: HashMap::new(),
         };
         // a by-value parameter of an owning type was moved into this call, so
         // this function destroys it. That is what makes passing one a transfer

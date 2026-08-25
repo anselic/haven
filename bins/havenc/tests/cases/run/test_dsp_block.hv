@@ -10,6 +10,9 @@
 //     implementer without any of them writing one;
 //   * combinators nest, including through a `type` alias (`Chain3`), and the
 //     constructor procs infer their type arguments from the values passed;
+//   * `Cascade<B, N>` runs N stages of one type from an inline array, both
+//     parameters inferred - from a struct literal, and from `cascade`'s
+//     by-value `[B; N]` argument;
 //   * the parts stay reachable as fields after wiring, so a chain is retunable;
 //   * an `@alloc(false)` callback can drive a whole nested chain - the property
 //     the whole design exists to preserve.
@@ -19,8 +22,8 @@
 // not depend on the platform's libm.
 //@ dep: dsp=stdlib/dsp
 
-import dsp/block { Mono, Ident, Gain, Serial, Sum, Mix, Feedback, Chain3,
-                   ident, gain, serial, serial3, sum, mix, feedback }
+import dsp/block { Mono, Ident, Gain, Serial, Sum, Mix, Feedback, Cascade, Chain3,
+                   ident, gain, serial, serial3, sum, mix, feedback, cascade }
 import dsp/filters { Biquad, OnePole }
 
 // the real-time claim: a nested chain driven from a callback that may not
@@ -73,6 +76,20 @@ proc main() i32 {
     g.process_into(&dd, &ss);
     println(dd[1u64]);                        // 4
     println(ss[2u64]);                        // 3, the source is untouched
+
+    // --- N of one type, from an inline array of aggregates ---
+    let cas: Cascade<Gain, 3> = cascade([gain(2.0), gain(3.0), gain(4.0)]);
+    println(cas.process(1.0));                // 24
+    cas.stages[1u64].k = 1.0;                 // a stage is a field, retunable
+    println(cas.process(1.0));                // 8
+    let cbuf: [f32; 2] = [1.0f32, 2.0f32];
+    let cs: [f32] = cbuf;
+    cas.process_block(&cs);                   // the defaulted method, on a Cascade
+    println(cs[1u64]);                        // 16
+
+    // the struct-literal form infers the same two parameters
+    let cas2: Cascade<Gain, 2> = Cascade { stages: [gain(3.0), gain(5.0)] };
+    println(cas2.process(1.0));               // 15
 
     // --- a three-stage chain, filters included, driven from @alloc(false) ---
     let c: Chain3<Biquad, OnePole, Gain> =

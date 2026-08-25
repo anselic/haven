@@ -1,0 +1,113 @@
+// Destroying the elements of an inline array.
+//
+// `is_copy` has always looked through arrays, so `[Res; 2]` was correctly
+// non-`Copy` and correctly move-checked from the start - it just never had its
+// elements destroyed, because `drop_paths` walked *field names* and an element
+// is not reachable by one. That made an owning array a silent leak: the one
+// failure mode the ownership pass exists to prevent, in the one place it did
+// not look.
+//
+// The fix gives a drop path two kinds of step, a field and "every element", and
+// the second emits a loop that everything after it happens inside. So the shapes
+// below are all the same mechanism at different depths: an array of owners, an
+// array behind a field, an array of structs that own, two owners per element
+// (two loops, one per path), and an array of arrays (two nested loops).
+//
+// The golden IS the trace: every `make N` must be matched by exactly one
+// `drop N`, and nothing may be dropped that was moved away.
+//@ exit: 0
+
+import std/vec { Vec }
+
+struct Res { id: i32 }
+
+proc note(what: str, id: i32) void { print(what); print(" "); println(id); }
+
+extend Res {
+    proc make(id: i32) Self { note("make", id); return Self { id: id }; }
+}
+extend Res: Delete {
+    proc delete(*self) { note("drop", self.id); }
+}
+
+struct Holder { xs: [Res; 2], tag: i32 }
+struct Wrap { r: Res, n: i32 }
+struct Two { a: Res, b: Res }
+
+/// the plain case: a local array of owners
+proc plain() void {
+    let xs: [Res; 2] = [Res::make(1), Res::make(2)];
+    println(xs[0u64].id);
+}
+
+/// reached through a field, so the path is [field, elements]
+proc field() void {
+    let h: Holder = Holder { xs: [Res::make(3), Res::make(4)], tag: 0 };
+}
+
+/// the element owns through a field, so the path is [elements, field]
+proc wrappers() void {
+    let w: [Wrap; 2] = [Wrap { r: Res::make(5), n: 0 }, Wrap { r: Res::make(6), n: 0 }];
+}
+
+/// two owning fields per element: two drop paths, hence two loops. Both run over
+/// the whole array, which is why the order is a-of-each then b-of-each.
+proc two_each() void {
+    let t: [Two; 2] = [Two { a: Res::make(7), b: Res::make(8) },
+                       Two { a: Res::make(9), b: Res::make(10) }];
+}
+
+/// an array of arrays: one loop nested inside another
+proc nested() void {
+    let n: [[Res; 2]; 2] = [[Res::make(11), Res::make(12)],
+                            [Res::make(13), Res::make(14)]];
+}
+
+/// destruction still happens on an early return, not only at the closing brace
+proc early(bail: bool) void {
+    let c: [Res; 2] = [Res::make(15), Res::make(16)];
+    if (bail) { return; }
+    println("not reached");
+}
+
+proc mk() [Res; 2] { return [Res::make(17), Res::make(18)]; }
+
+/// returned by value, then destroyed by whoever received it - exactly once
+proc returned() void {
+    let r: [Res; 2] = mk();
+}
+
+/// passed by value: the callee owns its copy and destroys it, and the caller
+/// must not also destroy the array it moved away
+proc consume(a: [Res; 2]) i32 { return a[0u64].id + a[1u64].id; }
+
+proc moved() void {
+    let m: [Res; 2] = [Res::make(19), Res::make(20)];
+    println(consume(m));
+}
+
+/// the two loop mechanisms composed: `Vec`'s destructor calls
+/// `drop_in_place::<[Res; 2]>` over its heap buffer, whose expansion destroys
+/// each element - and destroying one element is itself a loop. A runtime count
+/// on the outside, a compile-time one on the inside.
+proc heap() void {
+    let v: Vec<[Res; 2]> = Vec::<[Res; 2]>::new();
+    v.push([Res::make(21), Res::make(22)]);
+    v.push([Res::make(23), Res::make(24)]);
+    println(v.len());
+}
+
+@export
+proc main() i32 {
+    println("-- plain --");    plain();
+    println("-- field --");    field();
+    println("-- wrappers --"); wrappers();
+    println("-- two each --"); two_each();
+    println("-- nested --");   nested();
+    println("-- early --");    early(true);
+    println("-- returned --"); returned();
+    println("-- moved --");    moved();
+    println("-- heap --");     heap();
+    println("-- end --");
+    return 0;
+}

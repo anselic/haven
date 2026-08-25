@@ -3,8 +3,8 @@ use haven_common::ast::*;
 use crate::typecheck::EnumDef;
 use super::ir::*;
 use haven_common::defs::DefId;
-use super::ctx::{LowerCtx, LoopTargets, int_const, lit_const, pattern_variant_const, aggregate_def, coerce, enum_const};
-use super::expr::{lower_expr, lower_lvalue, copy_struct};
+use super::ctx::{LowerCtx, LoopTargets, int_const, lit_const, pattern_variant_const, aggregate_def, is_aggregate_ty, coerce, enum_const};
+use super::expr::{lower_expr, lower_lvalue, copy_struct, copy_aggregate, alloca_aggregate};
 
 fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
     // a preceding statement may have diverged (`abort(...)`), terminating this
@@ -35,7 +35,7 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             // (collect_locals pre-allocated it into env); point the literal at that
             // slot so it fills it in place instead of alloca'ing at the literal
             // site - which, inside a loop, would grow the stack every iteration.
-            if (matches!(ty, Type::Array(_, _)) || aggregate_def(ty, &cx.enums).is_some())
+            if is_aggregate_ty(ty, &cx.enums)
                 && matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_))
             {
                 let (slot, _) = cx.env[&binding]; // pre-allocated in the entry block
@@ -318,15 +318,14 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             }
             let value_ty = cx.node_types[&expr.id].clone();
             let ret_ty = cx.current_return_type.clone();
-            let struct_ret = aggregate_def(&ret_ty, &cx.enums);
-            if let Some(name) = struct_ret {
+            if is_aggregate_ty(&ret_ty, &cx.enums) {
                 // copy the aggregate into the caller-provided sret slot, ret void
                 let src = match val {
                     Value::Reg(r) => r,
                     _ => unreachable!(),
                 };
-                let dst = cx.sret_param.expect("struct-returning function has no sret slot");
-                copy_struct(cx, name, src, dst);
+                let dst = cx.sret_param.expect("aggregate-returning function has no sret slot");
+                copy_aggregate(cx, &ret_ty, src, dst);
                 cx.terminate(Terminator::Return(None));
             } else {
                 let val = coerce(cx, val, &value_ty, &ret_ty);
@@ -359,12 +358,7 @@ fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<DefId, EnumDef<'a>>, out:
                 // aggregate declares (a call, incl. a data-enum constructor, or a
                 // var copy) still adopt or copy in lower_stmt and are not
                 // pre-allocated here.
-                Type::Array(_, _) => {
-                    if matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_)) {
-                        out.push((stmt.id, name, ty));
-                    }
-                }
-                _ if aggregate_def(&ty, enums).is_some() => {
+                _ if is_aggregate_ty(&ty, enums) => {
                     if matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_)) {
                         out.push((stmt.id, name, ty));
                     }
@@ -473,19 +467,20 @@ fn lower_const_init<'a>(
 }
 
 fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
--> (Vec<(Register, Type<'a>)>, Option<(Register, DefId)>) {
+-> (Vec<(Register, Type<'a>)>, Option<(Register, Type<'a>)>) {
     match &func.value {
         TopLevelNode::Function { attributes, params, return_type, body, .. } => {
             let entry = cx.fresh_block();
             cx.current_block = entry;
             cx.current_return_type = return_type.clone();
 
-            // struct / data-enum returns are lowered with an sret out-pointer;
-            // allocate its register up front so `return` can copy into it.
-            let sret = if let Some(name) = aggregate_def(return_type, &cx.enums) {
+            // aggregate returns - struct, data enum, or fixed-size array - are
+            // lowered with an sret out-pointer; allocate its register up front so
+            // `return` can copy into it.
+            let sret = if is_aggregate_ty(return_type, &cx.enums) {
                 let r = cx.fresh_reg();
                 cx.sret_param = Some(r);
-                Some((r, name))
+                Some((r, return_type.clone()))
             } else {
                 cx.sret_param = None;
                 None
@@ -533,19 +528,18 @@ fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
                     // push BOTH as incoming params
                     param_regs.push((ptr_reg, Type::Pointer(Box::new(inner_ty.clone()))));
                     param_regs.push((len_reg, Type::Int32));
-                } else if let Some(struct_name) = aggregate_def(ty, &cx.enums) {
-                    // pass-by-value (struct or data enum): caller still hands us a
-                    // `ptr` to its aggregate, but we copy into our own local slot on
-                    // entry so mutations don't leak back. For pass-by-reference the
-                    // user writes `*Stereo` explicitly - that falls through to the
-                    // `_` arm and stays a plain pointer.
+                } else if is_aggregate_ty(ty, &cx.enums) {
+                    // pass-by-value (struct, data enum, or `[T; N]`): caller still
+                    // hands us a `ptr` to its aggregate, but we copy into our own
+                    // local slot on entry so mutations don't leak back. For
+                    // pass-by-reference the user writes `*Stereo` explicitly - that
+                    // falls through to the `_` arm and stays a plain pointer.
                     let param_reg = cx.fresh_reg();
                     cx.emit(Inst::Comment(format!("params {}: {} (by value, copied on entry)", name, ty)));
                     param_regs.push((param_reg, ty.clone()));
 
-                    let local_reg = cx.fresh_reg();
-                    cx.emit(Inst::AllocaStruct { dst: local_reg, def: struct_name, align: None });
-                    copy_struct(cx, struct_name, param_reg, local_reg);
+                    let local_reg = alloca_aggregate(cx, ty);
+                    copy_aggregate(cx, ty, param_reg, local_reg);
                     cx.env.insert(Binding::Param(name), (local_reg, ty.clone()));
                 } else {
                     // actual register for the parameter value

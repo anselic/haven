@@ -13,6 +13,10 @@
 ///     _                          ident()
 ///     *(k)                       gain(k)
 ///
+/// `Serial` chains two blocks of different types. For `N` of *one* type - which
+/// is what a filter cascade is - there is `Cascade<B, N>`, holding its stages in
+/// an inline array rather than a nest.
+///
 /// A three-stage chain is then just
 ///
 ///     let chain: Chain3<Biquad, Biquad, Gain> =
@@ -223,6 +227,41 @@ extend Feedback<A, B>: Mono where A: Mono, B: Mono {
     }
 }
 
+// --- N of a kind ----------------------------------------------------------
+
+/// `N` stages of one block type in series, held in an inline array.
+///
+/// The array form of `Serial`, for when the stages are all the same type: a
+/// 4th-order Linkwitz-Riley is two matched biquads, a diffuser is a run of
+/// allpasses, an EQ bank is a row of peaking sections. Nesting `Serial` would
+/// work but names a different type per length and spells the count in the type's
+/// shape; this names the count and keeps one type.
+///
+/// `N` is a const parameter, so the loop has a compile-time trip count and no
+/// more survives to the object code than the equivalent nest does.
+///
+///     let lr4: Cascade<Biquad, 2> =
+///         cascade([Biquad::lowpass(f, 0.707, sr),
+///                  Biquad::lowpass(f, 0.707, sr)]);
+pub struct Cascade<B, const N: u64> {
+    /// The stages, applied in index order. Reachable as a field like any other
+    /// part, so `c.stages[0].set(...)` retunes one in place.
+    stages: [B; N],
+}
+
+extend Cascade<B, N>: Mono where B: Mono {
+    @alloc(false)
+    proc process(*self, x: f32) f32 {
+        let y: f32 = x;
+        let i: u64 = 0u64;
+        while (i < N) {
+            y = self.stages[i].process(y);
+            i = i + 1u64;
+        }
+        return y;
+    }
+}
+
 // --- Names for the nests --------------------------------------------------
 
 /// A three-stage serial chain, written the way it reads rather than as the
@@ -277,4 +316,13 @@ pub proc mix<A: Mono, B: Mono>(a: A, b: B, wet: f32) Mix<A, B> {
 /// Faust's `a ~ b`.
 pub proc feedback<A: Mono, B: Mono>(a: A, b: B) Feedback<A, B> {
     return Feedback { a: a, b: b, z1: 0.0 };
+}
+
+/// `N` stages of one block type in series, applied in index order.
+///
+/// Both parameters come from the array, so neither is written twice. The array
+/// is passed by value and copied into the `Cascade` - a construction-time cost
+/// that does not touch the per-sample path.
+pub proc cascade<B: Mono, const N: u64>(stages: [B; N]) Cascade<B, N> {
+    return Cascade { stages: stages };
 }

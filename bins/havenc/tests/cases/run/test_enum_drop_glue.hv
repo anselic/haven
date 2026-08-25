@@ -1,0 +1,149 @@
+// Destroying the payload of whichever enum variant is live.
+//
+// An enum's own fields are a tag and an opaque byte blob, so a payload is not
+// addressable by name the way a struct field is - which is why this was the last
+// automatic-destruction hole, and why closing it needed a third kind of drop
+// step. `Payload` emits a `match` whose one real arm binds the field the path
+// goes through and whose `_` arm covers every other variant; the rest of the
+// path continues inside that arm.
+//
+// It composes with the other two steps in both directions: an enum inside an
+// array is a loop containing a match, an array inside a payload is a match
+// containing a loop, and an enum inside an enum is a match inside a match. All
+// of those are below, along with the cases where nothing should happen at all -
+// a unit variant owns nothing, and an enum with its own `Delete` impl is that
+// method's business, exactly like a struct's fields.
+//
+// The golden IS the trace: every `make N` matched by exactly one `drop N`.
+//@ exit: 0
+
+import std/option { Option }
+import std/vec { Vec }
+
+struct Res { id: i32 }
+
+proc note(what: str, id: i32) void { print(what); print(" "); println(id); }
+
+extend Res {
+    proc make(id: i32) Self { note("make", id); return Self { id: id }; }
+}
+extend Res: Delete {
+    proc delete(*self) { note("drop", self.id); }
+}
+
+enum Maybe { None, Some(Res) }
+enum Pair { Empty, One(Res), Two(Res, Res) }
+enum Named { Empty, At { r: Res, k: i32 } }   // struct-style variant
+enum Arr { Nil, Cells([Res; 2]) }             // an array inside a payload
+enum Deep { Zero, Wrap(Maybe) }               // an enum inside an enum
+
+struct Holds { m: Maybe, tag: i32 }
+
+/// the live variant owns, so its payload is destroyed
+proc some() void { let m: Maybe = Maybe::Some(Res::make(1)); }
+
+/// the live variant owns nothing: the match falls to `_` and nothing runs
+proc none() void { let m: Maybe = Maybe::None; println("none"); }
+
+/// two payload fields in one variant: one path each, so two matches
+proc two() void { let p: Pair = Pair::Two(Res::make(2), Res::make(3)); }
+
+/// a variant of the same enum that owns less still works
+proc one() void { let p: Pair = Pair::One(Res::make(4)); }
+
+/// a struct-style variant destructures by position all the same - the payload
+/// struct's fields are in declaration order either way
+proc named() void { let n: Named = Named::At { r: Res::make(5), k: 7i32 }; }
+
+/// reached through a struct field: the path is [field, payload]
+proc in_struct() void { let h: Holds = Holds { m: Maybe::Some(Res::make(6)), tag: 0 }; }
+
+/// an array of enums: a loop whose body is a match, and only the live variants
+/// of each element are destroyed
+proc in_array() void {
+    let a: [Maybe; 3] = [Maybe::Some(Res::make(7)), Maybe::None, Maybe::Some(Res::make(8))];
+}
+
+/// an array inside a payload: a match whose body is a loop
+proc arr_payload() void { let a: Arr = Arr::Cells([Res::make(9), Res::make(10)]); }
+
+/// an enum inside an enum: nested matches
+proc deep() void { let d: Deep = Deep::Wrap(Maybe::Some(Res::make(11))); }
+
+/// ... and the inner variant being empty stops the walk at the inner match
+proc deep_none() void { let d: Deep = Deep::Wrap(Maybe::None); println("deep none"); }
+
+/// the generic enum this was all really for, after monomorphization
+proc generic() void { let o: Option<Res> = Option::Some::<Res>(Res::make(12)); }
+
+/// `Vec`'s runtime `drop_in_place` loop, with a match inside it
+proc heap() void {
+    let v: Vec<Maybe> = Vec::<Maybe>::new();
+    v.push(Maybe::Some(Res::make(13)));
+    v.push(Maybe::None);
+    v.push(Maybe::Some(Res::make(14)));
+    println(v.len());
+}
+
+enum Custom { Nil, Held(Res) }
+
+/// an enum with its own `Delete` is destroyed by it and the payload walk stops -
+/// the same rule a struct follows. Nothing here drops the `Res`, deliberately.
+extend Custom: Delete {
+    proc delete(*self) { println("custom delete"); }
+}
+proc custom() void { let c: Custom = Custom::Held(Res::make(15)); }
+
+proc mk(id: i32) Maybe { return Maybe::Some(Res::make(id)); }
+
+/// an owning temporary as the scrutinee. A match borrows its scrutinee - the
+/// payload bindings are views into its storage - so an owning temporary is
+/// spilled into a `let` and destroyed at the end of the statement, exactly as
+/// one borrowed by `&` is. Without that it had no binding and nothing to drop it.
+proc temp_scrutinee() i32 {
+    match (mk(16)) {
+        Maybe::Some(v) -> { return v.id; }
+        Maybe::None -> { return 0i32; }
+    }
+}
+
+/// taking the payload out consumes the enum, so only the caller destroys it
+proc take(m: Maybe) Res {
+    match (m) {
+        Maybe::Some(v) -> { return v; }
+        Maybe::None -> { return Res::make(99); }
+    }
+}
+proc moved_out() void {
+    let m: Maybe = Maybe::Some(Res::make(17));
+    let r: Res = take(m);
+    println("took");
+}
+
+/// ... and the same from a spilled temporary
+proc moved_from_temp() void {
+    let r: Res = take(mk(18));
+    println("took temp");
+}
+
+@export
+proc main() i32 {
+    println("-- some --");        some();
+    println("-- none --");        none();
+    println("-- two --");         two();
+    println("-- one --");         one();
+    println("-- named --");       named();
+    println("-- in struct --");   in_struct();
+    println("-- in array --");    in_array();
+    println("-- arr payload --"); arr_payload();
+    println("-- deep --");        deep();
+    println("-- deep none --");   deep_none();
+    println("-- generic --");     generic();
+    println("-- heap --");        heap();
+    println("-- custom --");      custom();
+    println("-- temp --");        println(temp_scrutinee());
+    println("-- moved out --");   moved_out();
+    println("-- from temp --");   moved_from_temp();
+    println("-- end --");
+    return 0;
+}

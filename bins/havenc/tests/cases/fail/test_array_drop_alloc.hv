@@ -1,0 +1,36 @@
+// The array drop loop is visible to the alloc check.
+//
+// `hold` writes no call at all - it declares an array and returns. The loop that
+// destroys its elements is synthesized by the ownership pass, and each iteration
+// calls `Res`'s destructor, which allocates. `@alloc(false)` has to see that.
+//
+// It does, and only because the loop is built as ordinary AST rather than
+// emitted in MIL: the alloc check runs after the ownership pass and reads the
+// call graph off the AST, so a synthesized destructor call is an edge like any
+// other. Emitting the loop later would have made `@alloc(false)` quietly wrong
+// for exactly the code that most needs it to be right. The same reasoning is why
+// `drop_in_place` expands where it does.
+//
+// The blame chain names the real callee, not "an indirect call".
+//@ error: is marked as @alloc(false) but may allocate
+
+import std/vec { Vec }
+
+struct Res { id: i32 }
+
+extend Res: Delete {
+    proc delete(*self) {
+        // allocating in a destructor is unusual but perfectly legal, and it is
+        // what makes this array un-droppable from a real-time context
+        let scratch: Vec<u8> = Vec::<u8>::with_capacity(8u64);
+    }
+}
+
+@alloc(false)
+proc hold() i32 {
+    let xs: [Res; 2] = [Res { id: 1i32 }, Res { id: 2i32 }];
+    return xs[0u64].id;
+}
+
+@export
+proc main() i32 { return hold(); }

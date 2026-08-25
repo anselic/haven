@@ -88,6 +88,18 @@ pub fn aggregate_def<'a>(ty: &Type<'a>, enums: &HashMap<DefId, EnumDef<'a>>) -> 
     }
 }
 
+/// Whether a value of this type lives in memory and is handed around by
+/// pointer: a struct, a data-carrying enum, or a fixed-size array.
+///
+/// [`aggregate_def`] answers the same question but can only speak for types that
+/// *have* a definition, so it says `None` for `[T; N]` - which is structural,
+/// but inline storage all the same. Ask this wherever the question is "is this
+/// an aggregate", and `aggregate_def` only where a `DefId` is actually needed:
+/// to walk a struct's fields, or to name its LLVM type.
+pub fn is_aggregate_ty<'a>(ty: &Type<'a>, enums: &HashMap<DefId, EnumDef<'a>>) -> bool {
+    matches!(ty, Type::Array(..)) || aggregate_def(ty, enums).is_some()
+}
+
 #[derive(Clone, Debug)]
 pub struct LoopTargets {
     pub continue_block: BlockId, // where to jump for `continue`
