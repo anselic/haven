@@ -966,11 +966,6 @@ pub(crate) fn lower_lvalue<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Regist
     }
 }
 
-// Field-by-field copy from one struct pointer to another. Both `src` and `dst`
-// must be pointers to a struct of the given name. Recurses on nested struct
-// fields so the whole tree is deep-copied (value semantics).
-// TODO: switch to an `llvm.memcpy` intrinsic for large structs instead of
-// emitting a load/store per scalar field.
 /// Stack storage for one aggregate of type `ty`, yielding a pointer to it.
 ///
 /// `AllocaStruct` names a definition, so it cannot serve a `[T; N]`; the generic
@@ -1002,6 +997,9 @@ pub(crate) fn copy_aggregate<'a>(cx: &mut LowerCtx<'a>, ty: &Type<'a>, src: Regi
     }
 }
 
+/// Deep-copy a struct from `src` to `dst`, both pointers to a struct of
+/// `struct_def`. Recurses into nested struct fields (value semantics).
+// TODO: use `llvm.memcpy` for large structs instead of a load/store per field.
 pub(crate) fn copy_struct<'a>(cx: &mut LowerCtx<'a>, struct_def: DefId, src: Register, dst: Register) {
     let fields = cx.types[&struct_def].fields.clone();
     for (i, (_fname, fty)) in fields.iter().enumerate() {

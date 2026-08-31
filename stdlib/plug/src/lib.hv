@@ -21,7 +21,7 @@
 //
 //     havenc my_plugin.hv -o MyPlugin --shared    # then rename MyPlugin.dll -> .clap
 //
-// See examples/example_gain for a complete worked plugin.
+// See examples/example_plugin for a complete worked plugin.
 
 import clap/version { ClapVersion }
 import clap/process { ClapProcess, ClapProcessStatus, ClapAudioBuffer }

@@ -84,10 +84,10 @@ pub proc simd_concat<T, const N: u64, const M: u64>(lo: simd<T, N>, hi: simd<T, 
     return __simd_concat::<T, M>(lo, hi);
 }
 
-// Two const params are needed because the grammar can't spell `N/2` in a type
-// position yet so we pass the input width `N` and the (narrower) output width `M`
 /// Extract the low half of a vector: the first `M` lanes of an `N`-wide input,
-/// where `M < N`. Both must be even (preferably M = N/2).
+/// where `M < N`. Both must be even (preferably M = N/2). Two const params
+/// because the grammar can't spell `N/2` in a type position yet: pass the input
+/// width `N` and the narrower output width `M`.
 ///
 /// `simd_low::<f32, 4, 2>(v)` -> `simd<f32, 2>` = `(v0, v1)`.
 pub proc simd_low<T, const N: u64, const M: u64>(value: simd<T, N>) simd<T, M> {

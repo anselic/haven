@@ -347,17 +347,6 @@ fn resolve_within_dep<'a>(meta: &HavenMeta, pkg: &str, segs: &[&str], arena: &'a
     Err(format!("package '{}' has no module '{}'", pkg, rel))
 }
 
-/// Desugar every `extend` block (and the synthesized ones from inherent struct/
-/// enum method bodies) into ordinary top-level functions, in place. A method on
-/// `T` becomes a function named `T$method` with a `self` param prepended for a
-/// value/pointer receiver (`self: T` / `self: *T`); associated functions get no
-/// receiver param. After this runs the module has no `Extend` nodes, so every
-/// later stage - name resolution, typecheck, mono, codegen - sees only functions.
-///
-/// A receiver-call site `recv.method()` can't be rewritten here (it needs the
-/// receiver's type); that resolution happens in the typechecker. An associated
-/// call `T::method()` is rewritten by name resolution (see `call_name`), keyed on
-/// the same `T$method` name minted here.
 /// A raw (pre-mangling) method record, collected while desugaring an `extend`
 /// block. `target`/`name` are as written; `fn_name` is the function
 /// `lower_methods` synthesized for it. `load_and_merge` maps all three to final
@@ -406,26 +395,6 @@ struct RawImpl<'a> {
     span: Span,
 }
 
-/// The type parameters an `extend` target introduces, in first-appearance order.
-///
-/// Haven has no binder for them — the user writes `extend [T]`, not
-/// `extend<T> [T]` — so they are recovered from the target itself. A name is a
-/// parameter when it is all three of:
-///
-///   * a single-segment, argument-less path (`T`, never `geo::Point` or
-///     `Vec<T>`),
-///   * a *proper subterm* of the target, and
-///   * not a type in scope, per `known`.
-///
-/// The last two are each load-bearing. Without "proper subterm", a typo'd
-/// `extend Poitn { ... }` becomes a blanket impl over a parameter named `Poitn`
-/// rather than the unknown-type error it should be — so a bare `extend T` is
-/// always a named type, and blanket impls simply do not exist yet. Without
-/// `known`, `extend *Point` would read its own element type as a parameter.
-///
-/// A `ConstVal::Param` in an array or SIMD length is a const parameter by the
-/// same reasoning; there is no scope to check it against, since a length is
-/// never a type name.
 /// Resolve the trait names in an impl's generic parameters, for the copy of them
 /// stored in the member table.
 ///
@@ -633,8 +602,24 @@ fn alias_deps_ready<'a>(
     }
 }
 
-/// The type and const parameters an `extend` target binds implicitly, in the
-/// order they appear in it.
+/// The type and const parameters an `extend` target binds implicitly, in
+/// first-appearance order.
+///
+/// Haven has no binder for them - the user writes `extend [T]`, not
+/// `extend<T> [T]` - so they are recovered from the target itself. A name is a
+/// parameter when it is all three of:
+///
+///   * a single-segment, argument-less path (`T`, never `geo::Point` or
+///     `Vec<T>`),
+///   * a *proper subterm* of the target, and
+///   * not a type in scope, per `known`.
+///
+/// The last two each matter. Without "proper subterm", a typo'd `extend Poitn`
+/// would become a blanket impl over a parameter `Poitn` instead of the
+/// unknown-type error it should be - so a bare `extend T` is always a named
+/// type, and blanket impls do not exist yet. Without `known`, `extend *Point`
+/// would read its own element type as a parameter. A `ConstVal::Param` in an
+/// array or SIMD length is a const parameter by the same reasoning.
 ///
 /// `decl` yields the declared parameters of a type path's head, and is what
 /// makes a `const` argument recognisable - see [`TypeParams`]. It may answer
@@ -1008,6 +993,17 @@ fn refresh_ids_pat(p: &mut Pattern<'_>) {
     }
 }
 
+/// Desugar every `extend` block (and the synthesized ones from inherent struct/
+/// enum method bodies) into ordinary top-level functions, in place. A method on
+/// `T` becomes a function named `T$method` with a `self` param prepended for a
+/// value/pointer receiver (`self: T` / `self: *T`); associated functions get no
+/// receiver param. After this runs the module has no `Extend` nodes, so every
+/// later stage - name resolution, typecheck, mono, codegen - sees only functions.
+///
+/// A receiver-call site `recv.method()` can't be rewritten here (it needs the
+/// receiver's type); that resolution happens in the typechecker. An associated
+/// call `T::method()` is rewritten by name resolution (see `call_name`), keyed on
+/// the same `T$method` name minted here.
 fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
     -> (Vec<Error>, Vec<RawImpl<'a>>, Vec<RawMethod<'a>>)
 {
@@ -1687,19 +1683,20 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         TypeHead::Param(path.last())
     }
 
-    /// Resolve a name in call position to its final emitted name. A bare name
-    /// that resolves to nothing is an error, with three deliberate exceptions,
-    /// each an explicit branch below rather than a fallthrough: a local shadowing
-    /// a top-level callable, a compiler intrinsic (in no module's symbol table),
-    /// and a type-qualified `T::sym` that isn't a known method (left for
-    /// typecheck's enum-constructor path).
-    /// Resolve a written path used as a value or as a callee.
+    /// Resolve a written path used as a value or a callee, to its final emitted
+    /// name.
     ///
     /// `Some(name)` means it denotes a single symbol and the caller should replace
     /// the node with `ExprNode::Var(name)`. `None` means it stays an
     /// `ExprNode::Path` - the one shape that survives resolution is an enum
     /// variant, whose head segment has been rewritten to the enum's final name in
     /// place.
+    ///
+    /// A bare name that resolves to nothing is an error, with three deliberate
+    /// exceptions, each an explicit branch below: a local shadowing a top-level
+    /// callable, a compiler intrinsic (in no module's symbol table), and a
+    /// type-qualified `T::sym` that isn't a known method (left for typecheck's
+    /// enum-constructor path).
     fn value_path(&mut self, r: &mut NameRef<'a>, span: &Span, in_call: bool, gparams: &HashSet<&str>) -> Option<&'a str> {
         let path = &mut r.path;
         if let Some(one) = path.as_single() {
@@ -3130,9 +3127,6 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         all_scopes.push(scopes);
     }
 
-    // pass 2: rewrite each module's items in place using its scopes. Also remap
-    // each `extend T: Trait` conformance record to final (mangled) names through
-    // the same scopes, so the typechecker matches them against the merged program.
     // pass 1.25: work out each `extend` target's inferred type parameters and
     // push them onto the functions its methods desugared into. This could not
     // happen at desugaring time: telling the `T` of `extend [T]` from the
@@ -3496,6 +3490,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         }
     }
 
+    // pass 2: rewrite each module's items in place using its scopes. Also remap
+    // each `extend T: Trait` conformance record to final (mangled) names through
+    // the same scopes, so the typechecker matches them against the merged program.
     let mut impls: Vec<ImplDecl<'a>> = Vec::new();
     for (id, m) in modules.iter_mut().enumerate() {
         let scopes = &all_scopes[id];

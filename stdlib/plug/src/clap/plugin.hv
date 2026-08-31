@@ -3,7 +3,7 @@
 // This module carries the core ABI: the descriptor, the host handle, the plugin
 // instance vtable, the factory, and the entry point. A `.clap` shared library
 // must export exactly one symbol, `clap_entry`, a `ClapPluginEntry` const — see
-// the worked example in examples/3_clap.hv.
+// the worked example in examples/example_plugin.
 
 import version { ClapVersion }
 import process { ClapProcess, ClapProcessStatus }

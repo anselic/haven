@@ -26,8 +26,8 @@
 ///         run_my_dsp(block);
 ///     }
 
-// backing symbols from crt/rt.c, which is where the per-architecture control
-// word (x86 MXCSR, aarch64 FPCR) is actually poked.
+// backing symbols from dsp/c/denormal.c, which is where the per-architecture
+// control word (x86 MXCSR, aarch64 FPCR) is actually poked.
 extern rt_denormals_disable() u64;
 extern rt_denormals_restore(saved: u64) void;
 

@@ -50,7 +50,7 @@ pub trait Delete {
     proc delete(*self);
 }
 
-// backing symbols from crt/rt.c (always linked in)
+// backing symbols from std/c/rt.c (always linked in)
 extern strlen(s: str) u64;
 extern rt_puts(s: str) void;
 

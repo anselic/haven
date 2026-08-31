@@ -140,9 +140,8 @@ fn const_param_name<'a>(ty: &Type<'a>) -> Option<&'a str> {
 /// compound types. inverse of `resolve_type`: used when a generic sig (which
 /// holds `Param`s) is specialized at a call site.
 // TODO: this, resolve_type, and mono.rs::subst_ty are three near-identical walks
-// over the same compound-type arms, so maybe in the future it could be generalized
-// into a single `Type::walk_mut` or `Type::map` function that takes a closure to
-// apply to each leaf type
+// over the same compound-type arms. Generalize into one `Type::map` that takes a
+// per-leaf closure.
 pub(crate) fn subst_param_type<'a>(
     types: &HashMap<&'a str, Type<'a>>,
     consts: &HashMap<&'a str, ConstVal<'a>>,

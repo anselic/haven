@@ -230,14 +230,12 @@ fn classify_into<'a>(ty: &Type<'a>, offset: usize, types: &TypeTable<'a>, unions
         Type::Named { def, .. } if is_aggregate(ty, types) => {
             let fields = &layout::fields_of(*def, types).to_vec();
             if let Some(variants) = unions.get(def) {
-                // A data-enum aggregate: field 0 is the tag (an ordinary integer
-                // leaf), field 1 is the `$payload` blob - not literal bytes, but a
-                // union of the variant payload structs. Classify the tag normally,
-                // then classify every variant at the payload's own offset and let
-                // `merge` combine them (SysV union rule: a union's class per
-                // eightbyte is the merge of every member's class there). This is
-                // what lets e.g. an all-float variant land in an SSE register
-                // instead of being forced INTEGER by `$payload`'s placeholder type.
+                // a data-enum aggregate: field 0 is the tag, field 1 the
+                // `$payload` blob - a union of the variant payload structs, not
+                // literal bytes. classify the tag, then every variant at the
+                // payload's offset, and let `merge` combine them (the SysV union
+                // rule). this lets an all-float variant land in an SSE register
+                // instead of being forced INTEGER by `$payload`'s placeholder.
                 let (_, tag_ty) = &fields[0];
                 classify_into(tag_ty, offset, types, unions, eb);
                 let payload_off = offset + layout::field_offset(*def, 1, types);
@@ -282,8 +280,8 @@ fn classify_into<'a>(ty: &Type<'a>, offset: usize, types: &TypeTable<'a>, unions
 /// data-carrying enum. A field-less enum is a bare scalar and is not.
 ///
 /// This used to be a pattern match, back when `Type` said which kind of named
-/// type it was. It is now a table lookup, which is the point: the answer belongs
-/// to the definition, not to every type value that mentions it.
+/// type it was. Now it is a table lookup: the answer belongs to the definition,
+/// not to every type value that mentions it.
 fn is_aggregate<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> bool {
     match ty {
         Type::Array(..) => true,

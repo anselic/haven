@@ -7,7 +7,7 @@
 /// freed for you; pass every buffer you allocate to `dealloc` when done. These
 /// are the primitives higher level containers like `Vec<T>` are built on.
 
-// backed by rt_alloc/rt_realloc/rt_free in crt/rt.c (always linked in). the raw
+// backed by rt_alloc/rt_realloc/rt_free in std/c/rt.c (always linked in). the raw
 // externs deal in untyped `*void`; the generic wrappers add the typing + sizing.
 
 import option { Option }

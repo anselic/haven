@@ -35,7 +35,7 @@ char* rt_f64_to_str(double d, int32_t precision) {
     return buf;
 }
 
-// Heap allocation, exposed to the language via `std/alloc` (see crt/std/alloc.hv).
+// Heap allocation, exposed to the language via `std/alloc`.
 // On failure these return NULL rather than aborting: `std/alloc` wraps the result
 // in `Option<*T>`, so out-of-memory surfaces as `none` for the caller to handle.
 void* rt_alloc(uint64_t size) {

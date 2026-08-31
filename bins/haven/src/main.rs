@@ -1,7 +1,7 @@
 //! `haven`: the Haven build orchestrator, in the spirit of Cargo.
 //!
 //! A project is a directory with a `haven.toml` manifest and a `src/` tree (see
-//! `examples/example_project`). `haven` locates the manifest, then drives the
+//! `examples/example_plugin`). `haven` locates the manifest, then drives the
 //! lower-level tools - `havenc` to compile, `havendoc` to document - writing all
 //! artifacts under `.haven/` so the source tree stays clean.
 //!

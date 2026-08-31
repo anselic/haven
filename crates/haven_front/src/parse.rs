@@ -23,17 +23,17 @@ type Extra<'tks, 'src> = extra::Err<Rich<'tks, Token<'src>, Span>>;
 /// A parser over [`Tokens`] producing an `O`.
 type P<'tks, 'src, O> = Boxed<'tks, 'tks, Tokens<'tks, 'src>, O, Extra<'tks, 'src>>;
 
-/// Field names for a tuple variant's payload: `Msg::Note(i32, i32)` gets fields
-/// `"0"` and `"1"`, so a tuple variant and a struct-style variant share one
-/// representation downstream. Indexing a fixed table keeps these `&'static str`
-/// without leaking a fresh allocation per field, which is what the parser used
-/// to do. A variant with more payload fields than this falls back to a leak.
 /// Upper bound on a literal in const-argument position - an array length, a SIMD
 /// lane count, a const generic argument. Literals lex as `i128` now that they
 /// carry no width, so a size that would not survive the `as usize` narrowing has
 /// to be rejected here rather than wrapping silently.
 const MAX_CONST_ARG: i128 = u32::MAX as i128;
 
+/// Field names for a tuple variant's payload: `Msg::Note(i32, i32)` gets fields
+/// `"0"` and `"1"`, so a tuple variant and a struct-style variant share one
+/// representation downstream. Indexing a fixed table keeps these `&'static str`
+/// without leaking a fresh allocation per field, which is what the parser used
+/// to do. A variant with more payload fields than this falls back to a leak.
 const TUPLE_FIELD_NAMES: [&str; 16] = [
     "0", "1", "2", "3", "4", "5", "6", "7",
     "8", "9", "10", "11", "12", "13", "14", "15",

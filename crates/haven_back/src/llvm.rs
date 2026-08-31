@@ -80,17 +80,15 @@ fn emit_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>, symbols: &HashMap<DefId, 
         Float64 => "double".to_string(),
         Pointer(_) => "ptr".to_string(),
 
-        // A sequence is contiguous inline storage - `[N x %Name]`, what
-        // `size_of`/`alloc` lay out and what `Index` strides by - never `[N x ptr]`
-        // handles. That is true wherever the type appears: a local, a struct
-        // field, a by-value parameter, a `load`/`store` of the whole array. So the
-        // element goes through `emit_field_type` rather than recursing here, which
-        // renders a struct as the `ptr` handle a struct *value* is.
+        // an array is contiguous inline storage - `[N x %Name]`, what
+        // `size_of`/`alloc` lay out and `Index` strides by - never `[N x ptr]`
+        // handles, wherever it appears. so the element goes through
+        // `emit_field_type`, not a recursion here that would render a struct as
+        // the `ptr` a struct value is.
         //
-        // Rendering it as `[N x ptr]` is not a cosmetic mismatch: a whole-array
-        // `load`/`store` then copies `N*8` bytes between two objects laid out
-        // inline, overrunning both when the element is under 8 bytes and dropping
-        // the tail when it is over.
+        // `[N x ptr]` is not a cosmetic mismatch: a whole-array `load`/`store`
+        // then copies `N*8` bytes between inline objects, overrunning both when
+        // the element is under 8 bytes and dropping the tail when it is over.
         Array(t, n) => format!("[{} x {}]", n.expect_lit(), emit_field_type(t, types, symbols)),
         Slice(_) => "{ ptr, i32 }".to_string(), // struct { ptr, len }
         // `str` is a raw NUL-terminated `*const u8` (a C string), so a bare `ptr`
@@ -712,13 +710,12 @@ fn unsigned_narrow_index(ty: &Type<'_>) -> Option<u32> {
 
 /// The `, align N` suffix for a `load`/`store`/`alloca`, or nothing at all.
 ///
-/// Nothing is the interesting case. Omitted, LLVM assigns the *ABI alignment of
-/// the type* from the target data layout - which is the alignment haven's
-/// layout model already assumes everywhere else: aggregates are emitted as plain
-/// (unpacked) `%Name = type { .. }`, so LLVM is the one computing their field
-/// offsets and padding; `Sizeof` asks the data layout rather than counting bytes
-/// here; and an enum's payload blob picks an `[N x i64]`/`[N x i32]`/`[N x i8]`
-/// chunk type precisely so its ABI alignment covers the widest variant.
+/// Nothing is the interesting case. Omitted, LLVM uses the type's ABI alignment
+/// from the target data layout - the alignment haven's layout model already
+/// assumes everywhere else: aggregates are emitted unpacked (`%Name = type
+/// { .. }`), so LLVM computes their offsets and padding; `Sizeof` asks the data
+/// layout; and an enum's payload blob picks an `[N x i64/i32/i8]` chunk so its
+/// ABI alignment covers the widest variant.
 ///
 /// The previous `align.unwrap_or(1)` therefore did not describe a packed layout,
 /// it just declined to describe the real one - and cost every access for it.

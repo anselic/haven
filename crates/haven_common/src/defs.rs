@@ -282,15 +282,12 @@ pub struct Member<'a> {
     /// `self_ty`. Empty for a target with no parameters (`i32`, `Point`), in
     /// which case unification degenerates to equality.
     pub generics: Vec<GenericParam<'a>>,
-    /// Whether this method may be reached from another module. A method is
-    /// module-private unless declared `pub` - the same rule top-level functions
-    /// follow, except methods bypass per-module scoping (they live in one global
-    /// table so a receiver call resolves without an import), so visibility has to
-    /// be recorded here and checked at each call site rather than falling out of
-    /// scope construction. A method that implements a trait is always public: its
-    /// reachability follows the trait, not an explicit marker (mirroring Rust,
-    /// where a trait-impl method takes no `pub`), so `lower_methods` folds
-    /// trait membership into this flag.
+    /// Whether another module may reach this method. Module-private unless
+    /// declared `pub`, like a top-level function - but methods live in one
+    /// global table (so a receiver call resolves without an import), so scoping
+    /// cannot enforce it: it is recorded here and checked at each call site. A
+    /// trait-impl method is always public: reachability follows the trait, not a
+    /// marker (as in Rust), so `lower_methods` folds trait membership into this.
     pub is_pub: bool,
     /// The module that declared this method. A private method is reachable only
     /// from calls in this same module; a cross-module call to it is an error.
@@ -300,11 +297,11 @@ pub struct Member<'a> {
 /// Methods and associated functions, keyed by `(receiver head, method name)`.
 ///
 /// Replaces reconstructing `format!("{}${}", type_name, method)` and hoping it
-/// lands on a real symbol. That only ever worked because `<slug>$Point` plus
-/// `$area` happens to equal `<slug>$(Point$area)` — a coincidence of the mangling
-/// scheme, and one that does not hold for enums or `@export`ed structs, whose
-/// type names are not slug-prefixed while their methods' names are. Those cases
-/// were silently unreachable outside the entry module.
+/// hit a real symbol. That only worked because `<slug>$Point` plus `$area`
+/// happens to equal `<slug>$(Point$area)` — a coincidence of the mangling that
+/// fails for enums or `@export`ed structs, whose type names are not
+/// slug-prefixed while their methods' are. Those were silently unreachable
+/// outside the entry module.
 ///
 /// Keyed by [`TyHead`] rather than by `DefId` so a method can hang off a type
 /// that has no definition to key on - a primitive or a structural type. The

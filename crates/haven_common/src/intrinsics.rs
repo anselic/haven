@@ -1,9 +1,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
-    /// `null::<T>() -> *T` (a null pointer of type `*T`)
+    /// `null::<T>() -> *T`
     Null,
 
-    /// Numerical type cast
     /// `numerical_cast(0, iN, uN, fN) -> iN/uN/fN`
     NumericalCast,
     /// Size in bytes of a type, respecting the target ABI layout.
@@ -18,24 +17,22 @@ pub enum Intrinsic {
     /// bytes were there before.
     /// `ptr_write::<T>(dst: *T, value: T) -> void`
     ///
-    /// This is the counterpart to `*dst = value`, which the ownership pass
-    /// rejects for an owning `T` because the value being replaced would never be
-    /// destroyed. Here that is the point: the slot is *uninitialized*, so there
-    /// is nothing to destroy, and `value` is moved into it. Writing over a slot
-    /// that does hold a live value leaks it - the caller carries that obligation,
-    /// exactly as with Rust's `ptr::write`.
+    /// The counterpart to `*dst = value`, which the ownership pass rejects for
+    /// an owning `T`: the old value would never be destroyed. Here the slot is
+    /// uninitialized, so there is nothing to destroy; `value` moves into it.
+    /// Writing over a live value leaks it - the caller carries that obligation,
+    /// as with Rust's `ptr::write`.
     PtrWrite,
     /// Destroy `count` initialized values of type `T` starting at `ptr`, leaving
     /// the memory itself alone.
     /// `drop_in_place::<T>(ptr: *T, count: u64) -> void`
     ///
-    /// The elementwise `delete` loop a container's own destructor cannot write
-    /// by hand: calling `delete` explicitly is an error, and the ownership pass
-    /// only ever destroys a *statically* known chain of fields, so "N of them,
-    /// N known at runtime" has no spelling. The ownership pass expands this into
-    /// that loop once `T` is concrete; when `T` owns nothing it expands to
-    /// nothing at all, which is what lets a `Vec<u8>` pay zero for a destructor
-    /// written generically over `T`.
+    /// The elementwise `delete` loop a container's destructor cannot write by
+    /// hand: explicit `delete` is an error, and the ownership pass only destroys
+    /// a statically known chain of fields, so "N of them, N known at runtime"
+    /// has no spelling. The ownership pass expands this into that loop once `T`
+    /// is concrete. When `T` owns nothing it expands to nothing, so a `Vec<u8>`
+    /// pays zero for a destructor written generically over `T`.
     DropInPlace,
 
     /// `__simd_splat::<T, N>(value) -> T where T = simd<T, N>`
@@ -109,11 +106,10 @@ pub enum TyConstraint {
     Pointer,
 }
 
-/// Bound on an intrinsic's const (compile-time integer) parameter: an inclusive
-/// numeric range plus a divisibility requirement. Const constraints don't form a
-/// clean taxonomy (unlike type kinds) - they're parameterized numeric predicates
-/// - so this is a value, not an enum. `multiple_of == 1` means no divisibility
-/// constraint.
+/// Bound on an intrinsic's const parameter: an inclusive range plus a
+/// divisibility requirement. A struct, not an enum: const constraints are
+/// parameterized numeric predicates, not a clean taxonomy like type kinds.
+/// `multiple_of == 1` means no divisibility constraint.
 #[derive(Clone, Copy, Debug)]
 pub struct ConstBound {
     pub min: i64,
@@ -126,13 +122,13 @@ pub const LANES: ConstBound = ConstBound { min: 1, max: 64, multiple_of: 1 };
 /// An even SIMD lane count: an even value in `1..=64`.
 pub const EVEN_LANES: ConstBound = ConstBound { min: 1, max: 64, multiple_of: 2 };
 
-/// The generic header of an intrinsic: the leading type parameters and const
-/// parameters it takes, followed by `value_arity` ordinary value arguments.
+/// The generic header of an intrinsic: its type and const parameters, then
+/// `value_arity` value arguments.
 ///
 /// This drives arity, kind, and bound checking generically. Relationships
-/// *between* value arguments (e.g. `simd_concat`'s inputs being half-width, or
-/// `simd_low`'s input being wider than its result) remain bespoke in
-/// `typecheck_intrinsic`, because they don't reduce to a simple substitution.
+/// between value arguments (e.g. `simd_concat`'s half-width inputs, or
+/// `simd_low`'s input being wider than its result) stay bespoke in
+/// `typecheck_intrinsic`: they do not reduce to a simple substitution.
 pub struct IntrinsicSig {
     pub type_params: &'static [TyConstraint],
     pub const_params: &'static [ConstBound],
@@ -140,9 +136,6 @@ pub struct IntrinsicSig {
 }
 
 impl Intrinsic {
-    /// The intrinsic's generic signature header: type parameters and const
-    /// parameters (supplied via turbofish) followed by `value_arity` ordinary
-    /// value arguments.
     pub fn signature(self) -> IntrinsicSig {
         use TyConstraint::*;
         let (type_params, const_params, value_arity): (
@@ -154,8 +147,8 @@ impl Intrinsic {
             Self::NumericalCast => (&[Numeric], &[],           1),
             Self::Sizeof        => (&[Any],     &[],           0),
             Self::PtrCast       => (&[Pointer], &[],           1),
-            // the turbofish names the *pointee*, not the pointer, so that the
-            // element type is written once and the argument types follow from it.
+            // the turbofish names the pointee, not the pointer, so the element
+            // type is written once.
             Self::PtrWrite      => (&[Any],     &[],           2),
             Self::DropInPlace   => (&[Any],     &[],           2),
             Self::SimdSplat     => (&[Numeric], &[LANES],      1),

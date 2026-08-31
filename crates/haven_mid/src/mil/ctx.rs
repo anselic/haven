@@ -76,8 +76,8 @@ pub(crate) fn pattern_variant_const<'a>(enums: &HashMap<DefId, EnumDef<'a>>, ena
 /// scalar. A field-less enum returns `None` - it is a bare scalar.
 ///
 /// This used to be answerable from the type alone, when `Type::Enum` carried a
-/// `has_payload` copy. It is now a table lookup, which is the point: the fact
-/// belongs to the definition, not to every mention of it.
+/// `has_payload` copy. Now it is a table lookup: the fact belongs to the
+/// definition, not to every mention of it.
 pub fn aggregate_def<'a>(ty: &Type<'a>, enums: &HashMap<DefId, EnumDef<'a>>) -> Option<DefId> {
     match ty {
         Type::Named { def, .. } => match enums.get(def) {

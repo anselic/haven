@@ -29,18 +29,6 @@ fn main() {
     // owned here so it outlives the whole compilation
     let arena = bumpalo::Bump::new();
 
-    // load the entry file + every module it (transitively) imports, inject the
-    // prelude unless disabled, merge into one flat name-mangled program with all
-    // imports resolved away. see `crate::module`
-    // the prelude comes from the embedded std tree under its own `std/prelude`
-    // key, so an explicit `import std/prelude` reuses it rather than loading a
-    // second copy.
-    // `files` holds every loaded module's path + source, indexed by the `FileId`
-    // its spans carry, so diagnostics below quote the span's owning module - not
-    // just the entry file.
-    // `defs` owns every top-level definition's identity: it produced the symbol
-    // names now in `ast`, and it carries the member table both typecheck passes
-    // use to resolve method calls.
     // Compiled-library dependencies: each `--dep name=path.hvmeta` is read and
     // validated up front, so a malformed or version-incompatible artifact fails
     // as a clean diagnostic before compilation rather than mid-resolution. The
@@ -79,6 +67,13 @@ fn main() {
         (None, false) => module::PreludeSource::Auto,
     };
 
+    // load the entry file + every module it (transitively) imports, inject the
+    // prelude unless disabled, and merge into one flat name-mangled program with
+    // imports resolved away (see `crate::module`). `files` holds every loaded
+    // module's path + source, indexed by the `FileId` its spans carry, so the
+    // diagnostics below quote the span's owning module, not just the entry file.
+    // `defs` owns every definition's identity: it produced the symbol names now
+    // in `ast`, and carries the member table both typecheck passes use.
     let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), prelude, &deps, default_std, &arena) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),

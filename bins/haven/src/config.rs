@@ -404,9 +404,6 @@ impl Project {
         self.root.join(".haven").join("doc")
     }
 
-    /// Binary name derived from the project name: lowercased, with any run of
-    /// non-alphanumeric characters collapsed to a single `-`. `"Sample Haven
-    /// Project"` becomes `"sample-haven-project"`.
     /// Display string for the manifest version (`"0.1.0"`, `0.1`, ...), or empty
     /// when omitted. Rendered without surrounding quotes for string values.
     pub fn version_display(&self) -> String {
@@ -417,6 +414,9 @@ impl Project {
         }
     }
 
+    /// Binary name derived from the project name: lowercased, with any run of
+    /// non-alphanumeric characters collapsed to a single `-`. `"Sample Haven
+    /// Project"` becomes `"sample-haven-project"`.
     pub fn bin_name(&self) -> String {
         let mut out = String::new();
         let mut prev_dash = false;

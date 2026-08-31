@@ -256,7 +256,6 @@ pub struct Global<'a> {
 pub struct Module<'a> {
     pub functions: Vec<Function<'a>>,
     pub externs: Vec<ExternDecl<'a>>,
-    /// Struct definitions, in declaration order: name -> ordered (field name, field type)
     /// Aggregates to declare, in emission order. Their field lists live in
     /// `types`; this is just the order, which a `HashMap` cannot carry and which
     /// matters for readable IR (a struct must precede its users).

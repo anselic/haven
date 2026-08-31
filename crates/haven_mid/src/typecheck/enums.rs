@@ -41,20 +41,16 @@ pub(crate) fn enum_agg_deps_ready<'a>(
 }
 
 /// The `$payload` byte-blob type for a data enum's aggregate: an array sized to
-/// hold the largest variant, chunked so the array's own (LLVM/C "natural
-/// layout") alignment matches `needed_align` - the true max alignment any
-/// variant's payload requires. A plain `[N x i8]` is always align 1, which
-/// under-reports the requirement whenever a variant holds something like a
-/// pointer or `f64` (align 8): the tag/payload split would then place the
-/// payload right after a 4-byte `i32` tag at offset 4, misaligned relative to
-/// what an equivalent C `struct { int tag; union { ... }; }` would produce.
-/// Picking `i32`/`i64` chunks instead makes LLVM's own struct layout (and our
-/// `layout::size_of`/`align_of`, which mirrors it) naturally pad and align the
-/// field correctly - with no change needed at the field-access sites, since a
-/// `FieldPtr` into the payload re-bases through the variant's own payload
-/// struct type and never observes `$payload`'s element type. Alignments above
-/// 8 (e.g. a SIMD payload) aren't modeled and stay under-aligned; nothing in
-/// the language currently exercises that.
+/// hold the largest variant, chunked so the array's natural alignment matches
+/// `needed_align` - the max any variant's payload requires. A plain `[N x i8]`
+/// is always align 1, which under-reports whenever a variant holds a pointer or
+/// `f64` (align 8): the payload would then sit right after a 4-byte `i32` tag at
+/// offset 4, misaligned versus a C `struct { int tag; union { ... }; }`. `i32`/
+/// `i64` chunks instead let LLVM's layout (and our `layout` module, which
+/// mirrors it) pad and align the field correctly - no change at access sites,
+/// since a `FieldPtr` re-bases through the variant's own payload struct and
+/// never sees `$payload`'s element type. Alignments above 8 (e.g. SIMD) are not
+/// modeled and stay under-aligned; nothing exercises that yet.
 pub(crate) fn payload_blob_type<'a>(bytes: usize, needed_align: usize) -> Type<'a> {
     let (chunk, chunk_size) = if needed_align >= 8 {
         (Type::Int64, 8)

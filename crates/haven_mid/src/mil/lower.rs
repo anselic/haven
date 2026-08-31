@@ -335,9 +335,8 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
     }
 }
 
-/// Recursively collect all local variable declarations in the function body,
-/// including nested ones in blocks and branches.
-/// This is for emitting all Alloca instructions upfront in the entry block
+/// Collect every local declaration in the body, nested ones included, so their
+/// Allocas can be emitted upfront in the entry block.
 fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<DefId, EnumDef<'a>>, out: &mut Vec<(usize, &'a str, Type<'a>)>) {
     match &stmt.value {
         StmtNode::Declare { name, value, .. } => {

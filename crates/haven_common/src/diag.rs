@@ -7,26 +7,23 @@ use ariadne::{Color, Config, Label, Report, ReportKind};
 
 use crate::ast::{Error, FileId, Span};
 
-/// Whether diagnostics may use ANSI colour. Decided once, from stderr - which is
-/// where every diagnostic goes.
+/// Whether diagnostics may use ANSI colour. Decided once, from stderr, where
+/// every diagnostic goes.
 ///
-/// ariadne colours unconditionally by default, so a captured diagnostic arrived
-/// with escape codes baked into it: `install.py` reading our stderr got literal
-/// `\x1b[31m` in the text it printed, and CI logs get the same. A subprocess
-/// inherits its parent's stderr, so a `havenc` driven by `haven` sees whatever
-/// `haven` was given and this stays right either way.
+/// ariadne colours by default, so a captured diagnostic carried escape codes:
+/// `install.py` reading our stderr got literal `\x1b[31m`, and CI logs too. A
+/// subprocess inherits its parent's stderr, so a `havenc` under `haven` stays
+/// right either way.
 ///
-/// `NO_COLOR` wins over the terminal check, per <https://no-color.org>: set and
-/// non-empty disables, whatever the value.
+/// `NO_COLOR` beats the terminal check, per <https://no-color.org>: set and
+/// non-empty disables it, whatever the value.
 ///
-/// Turning the answer *off* takes two switches, because ariadne's own config only
-/// covers part of its output. [`Config::with_color`] governs the frame, labels and
-/// margins, but the header's colour comes from the `ReportKind`, and the `Custom`
-/// kind we use to print a stage name returns its colour unconditionally where the
-/// built-in kinds filter theirs through the config - so `with_color(false)` alone
-/// still emitted a red `Lang item error:`. Disabling yansi (ariadne's backend, and
-/// the same instance thanks to the unified dependency) covers everything ariadne
-/// paints, whichever route it took.
+/// Turning colour off takes two switches: ariadne's config covers only part of
+/// its output. [`Config::with_color`] governs the frame, labels, and margins,
+/// but the header's colour comes from the `ReportKind`. Our `Custom` kind
+/// returns its colour unconditionally, so `with_color(false)` alone still drew
+/// a red `Lang item error:`. Disabling yansi (ariadne's backend) covers
+/// everything it paints.
 fn color_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -38,8 +35,8 @@ fn color_enabled() -> bool {
     })
 }
 
-/// The rule itself, split out from the environment it reads so both answers can
-/// be tested - a test process has no terminal, so the enabled case is otherwise
+/// The rule itself, split from the environment it reads so both answers are
+/// testable: a test process has no terminal, so the on-case is otherwise
 /// unreachable.
 fn decide_color(no_color: Option<std::ffi::OsString>, stderr_is_tty: bool) -> bool {
     match no_color {
@@ -50,10 +47,9 @@ fn decide_color(no_color: Option<std::ffi::OsString>, stderr_is_tty: bool) -> bo
 
 /// Every source file a diagnostic might point into, indexed by [`FileId`].
 ///
-/// Built up by the module loader as it loads, and threaded down so any stage can
-/// quote the span's *owning* module rather than the entry file. Spans hold a
-/// `FileId` into this table, so looking a source up is an index, not a scan, and
-/// the path string is stored once instead of once per token.
+/// The module loader fills it as it loads, so any stage can quote the span's
+/// owning module, not the entry file. A span holds a `FileId`, so a lookup is
+/// an index, not a scan, and each path is stored once, not once per token.
 #[derive(Default)]
 pub struct Files<'a> {
     /// display path per `FileId`, e.g. an absolute path or `std/math`.
@@ -103,9 +99,8 @@ pub enum Format {
     Json,
 }
 
-// Chosen once at startup (see `set_format`) and read on every `report`. An atomic
-// keeps `report`/`report_error`/`report_plain` free of any extra threading, so
-// every existing call site emits in the selected format for free.
+// chosen once at startup (`set_format`), read on every `report`. an atomic keeps
+// the report fns free of extra threading, so every call site gets the format free.
 static FORMAT: AtomicU8 = AtomicU8::new(Format::Human as u8);
 
 /// Select the diagnostic output format. Call once, before compilation starts.
@@ -121,29 +116,27 @@ pub fn format() -> Format {
     }
 }
 
-/// Longest `msg` still worth repeating on the underline when a diagnostic
-/// carries no label of its own.
+/// Longest `msg` still worth repeating on the underline when a diagnostic has
+/// no label of its own.
 ///
 /// ariadne draws label text on one line beside the source, indented to the
-/// span's column, and never wraps it - so a long one runs past the terminal and
-/// the box's frame comes apart around it. The header line above the snippet has
-/// no such limit, and already carries the same text, so nothing is lost by
-/// leaving the underline bare.
+/// span's column, and never wraps it, so a long one runs off the terminal and
+/// the box's frame breaks. The header above says the same text with no such
+/// limit, so a bare underline loses nothing.
 const LABEL_LINE_BUDGET: usize = 100;
 
-/// Columns the `NNN │ ` gutter takes before any label text. Approximate - it
-/// grows with the line number's width - which is all [`fits_inline`] needs,
-/// since it is choosing between "repeat the header here" and "don't".
+/// Columns the `NNN │ ` gutter takes before any label text. Approximate: it
+/// grows with the line-number width, which is all [`fits_inline`] needs to
+/// choose between repeating the header here and not.
 const LABEL_GUTTER: usize = 6;
 
 /// Whether `msg` fits on the underline for the span `start..end` (char offsets
 /// into `src`), without running past [`LABEL_LINE_BUDGET`].
 ///
-/// Where the span sits, not just the message's length, decides this. ariadne
-/// draws the elbow from under the span and runs it rightwards past the span's
-/// far edge before the text starts, so the text begins at roughly the span's
-/// *end* column - which is why the same message fits under a short name at the
-/// left margin and overflows under a long expression nested four blocks deep.
+/// The span's position decides this, not just the message length. ariadne runs
+/// the elbow rightwards past the span's far edge before the text starts, so the
+/// text begins near the span's end column. The same message fits under a short
+/// name at the margin but overflows under a long expression nested deep.
 fn fits_inline(src: &str, start: usize, end: usize, msg: &str) -> bool {
     let byte = src.char_indices().nth(end.max(start))
         .map_or(src.len(), |(i, _)| i);
@@ -218,11 +211,10 @@ fn push_json_span(out: &mut String, src: &str, sp: &Span) {
 /// resolved `span` are optional so spanless errors (e.g. "no main function")
 /// still land in the same stream with `null` fields.
 ///
-/// `labels` and `note` carry the secondary detail; both are always present as
-/// keys (`[]` / `null` when absent) so a consumer never has to branch on
-/// whether a producer bothered to fill them in. A label whose file has no
-/// source on hand is dropped rather than emitted spanless - it would say
-/// nothing an editor could act on.
+/// `labels` and `note` are always present as keys (`[]` / `null` when absent),
+/// so a consumer never branches on whether a producer filled them in. A label
+/// whose file has no source is dropped, not emitted spanless: it would tell an
+/// editor nothing.
 fn emit_json(
     stage: &str,
     msg: &str,
@@ -287,15 +279,14 @@ pub fn report(stage: &str, msg: &str, span: &Span, files: &Files) {
 
 /// The full diagnostic: headline, primary span, extra labelled spans, note.
 ///
-/// The label set is what keeps a diagnostic inside its box. ariadne draws the
-/// underline text on one line beside the snippet, so a long `msg` used as the
-/// label wraps and the frame around the snippet comes apart. With `labels`
-/// filled in, `msg` stays the short header and each span carries only the
-/// phrase about that span; `note` takes anything longer, printed under the
-/// snippet where it can wrap freely.
+/// The labels keep a diagnostic inside its box. ariadne draws underline text on
+/// one line beside the snippet, so a long `msg` used as the label wraps and the
+/// frame breaks. With `labels` filled in, `msg` stays the short header, each
+/// span carries only its own phrase, and `note` takes anything longer, printed
+/// below where it can wrap.
 ///
-/// With no labels this falls back to the old shape - one underline repeating
-/// `msg` - so every call site that has not been split up still renders as before.
+/// With no labels this falls back to one underline repeating `msg`, so any call
+/// site not yet split up renders as before.
 fn report_full(
     stage: &str,
     msg: &str,
@@ -306,8 +297,7 @@ fn report_full(
 ) {
     let path = files.path(span.file);
     let Some(src) = files.src(span.file) else {
-        // no source on hand (shouldn't happen) but we don't want to swallow the
-        // message
+        // no source on hand (shouldn't happen); don't swallow the message
         match format() {
             Format::Json => emit_json(stage, msg, Some(path), None, labels, note, files),
             Format::Human => {
@@ -334,26 +324,23 @@ fn report_full(
         .with_message(msg);
 
     if labels.is_empty() {
-        // No label of its own, so `msg` doubles as the underline text - which is
-        // fine while it is short. Past that it wraps and takes the box's frame
-        // apart, and it is redundant anyway: the header directly above already
-        // says the same thing, on a line drawn outside the box where length
-        // costs nothing. So a long one underlines without repeating itself.
+        // no label of its own, so `msg` doubles as the underline text - fine
+        // while short. past that it wraps and breaks the frame, and it is
+        // redundant: the header above already says it, on a line where length
+        // costs nothing. so a long one underlines bare.
         let inline = fits_inline(src, primary.1.start, primary.1.end, msg);
         let label = Label::new(primary).with_color(Color::Red);
         report = report.with_label(if inline { label.with_message(msg) } else { label });
     } else {
-        // The label on the error's own span is the primary one: red, and drawn
-        // with priority. Anything pointing elsewhere is context, so it gets a
-        // colour that reads as secondary. A label into a file we hold no source
-        // for is dropped - ariadne fails the whole render on a cache miss, which
-        // would lose the diagnostic entirely.
+        // the label on the error's own span is primary: red, drawn with
+        // priority. anything elsewhere is context, so it reads as secondary. a
+        // label into a file we hold no source for is dropped: ariadne fails the
+        // whole render on a cache miss, losing the diagnostic.
         //
-        // Sorted by position, and `order` assigned from that, because ariadne
-        // opens a *new* source group whenever a label's line goes backwards from
-        // the previous one's. Declaring the use before the move - the natural way
-        // to write "used here / moved here" - therefore split one snippet into
-        // two boxes quoting the same file. In source order they stay in one.
+        // sorted by position, and `order` follows, because ariadne opens a new
+        // source group whenever a label's line goes backwards. declaring the use
+        // before the move - the natural "used here / moved here" - otherwise
+        // split one snippet into two boxes for the same file. source order keeps them one.
         let mut sorted: Vec<(String, Range<usize>, bool, &str)> = labels.iter()
             .filter_map(|(sp, text)| {
                 let lsrc = files.src(sp.file)?;
@@ -372,8 +359,8 @@ fn report_full(
                     .with_priority(if same { 1 } else { 0 })
                     .with_message(text));
         }
-        // An explicit label is kept whatever its width: unlike the fallback above
-        // it is not a copy of the header, so dropping it would lose the only place
+        // an explicit label is kept whatever its width: unlike the fallback it
+        // is not a copy of the header, so dropping it would lose the only place
         // that detail is written.
     }
 
@@ -382,7 +369,7 @@ fn report_full(
     }
 
     report.finish()
-        // ariadne indexes each Source by char offset - matches `to_span` above
+        // ariadne indexes each Source by char offset, matching `to_span` above
         .eprint(files.ariadne_cache())
         .ok();
 }
@@ -392,10 +379,10 @@ pub fn report_error(stage: &str, err: &Error, files: &Files) {
     report_full(stage, &err.msg, &err.span, &err.labels, err.note.as_deref(), files);
 }
 
-/// Report an error with no source location (a driver-level failure like a
-/// missing entry file or absent `main`). In human mode this is a plain stderr
-/// line; in JSON mode it joins the NDJSON stream with `null` file/span so a
-/// consumer never has to parse free-form text to notice the build failed.
+/// Report an error with no source location (a driver failure like a missing
+/// entry file or absent `main`). Human mode prints a plain stderr line; JSON
+/// mode joins the NDJSON stream with `null` file/span, so a consumer need not
+/// parse free-form text to see the build failed.
 pub fn report_plain(stage: &str, msg: &str) {
     match format() {
         Format::Json => emit_json(stage, msg, None, None, &[], None, &Files::new()),

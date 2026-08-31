@@ -19,7 +19,7 @@
 ///     }
 
 // Every operation is a thin wrapper over a platform-normalized `rt_fs_*` shim in
-// crt/rt.c (see there for the Windows/POSIX differences it papers over). The
+// std/c/fs.c (see there for the Windows/POSIX differences it papers over). The
 // shims report failure as a nonzero `errno`; the wrappers turn that into an
 // `Err(FsError)`. `read` adopts the shim's malloc'd buffer straight into a
 // `Vec<u8>` via `from_raw_parts` (no copy), since rt_alloc and libc malloc are

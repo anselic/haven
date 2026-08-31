@@ -53,13 +53,11 @@ impl chumsky::span::Span for Span {
 /// One diagnostic, in the shape ariadne renders: a short headline, a primary
 /// span, any number of extra labelled spans, and an optional trailing note.
 ///
-/// The split exists because ariadne puts `msg` on the report's header line *and*
-/// (by default) on the underline next to the source. A single long sentence
-/// carrying both the *what* and the *why* wrapped onto a second line there,
-/// which breaks the box drawing around the snippet. So `msg` stays a short
-/// headline, the detail moves to a label on the span it is actually about, and
-/// advice or background moves to [`note`](Error::note), which ariadne prints
-/// below the snippet where length costs nothing.
+/// Why the split: ariadne puts `msg` on the header line and, by default, on
+/// the underline by the source. One long sentence carrying both the what and
+/// the why wrapped there and broke the box. So `msg` stays a short headline,
+/// detail moves to a label on the span it is about, and advice moves to
+/// [`note`](Error::note), printed below the snippet where length is free.
 #[derive(Clone, Debug)]
 pub struct Error {
     /// Headline. Keep it to one short line - it is the header *and* the
@@ -95,13 +93,13 @@ impl Error {
         self
     }
 
-    /// Prefix the headline with the context an outer check adds, keeping the
-    /// labels and note. Rebuilding the error from `msg` alone - the obvious way
-    /// to write `format!("in {}: {}", what, e.msg)` - would silently throw the
-    /// inner error's detail away, so wrapping goes through here.
+    /// Prefix the headline with an outer check's context, keeping the labels
+    /// and note. Rebuilding from `msg` alone - the obvious `format!("in {}: {}",
+    /// what, e.msg)` - would throw the inner error's detail away, so wrapping
+    /// comes here.
     ///
-    /// Only the header grows, and the header is drawn above the snippet box
-    /// rather than inside it, so length costs nothing there.
+    /// Only the header grows, and it is drawn above the box, not inside it, so
+    /// length is free.
     pub fn context(mut self, prefix: impl AsRef<str>) -> Self {
         self.msg = format!("{}: {}", prefix.as_ref(), self.msg);
         self
@@ -148,17 +146,6 @@ pub enum Binding<'a> {
     Local(usize),
     Param(&'a str),
 }
-
-/// Extension trait to add a convenient method for creating metadata from a value and span.
-// pub trait MetadataExt<T> {
-//     fn make_metadata(self, span: Span) -> Metadata<T>;
-// }
-
-// impl<T> MetadataExt<T> for T {
-//     fn make_metadata(self, span: Span) -> Metadata<T> {
-//         Metadata::new(self, span)
-//     }
-// }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token<'a> {
@@ -344,12 +331,11 @@ impl<'a> Display for ConstVal<'a> {
 /// A `::`-separated name exactly as written: `String`, `geo::Point`,
 /// `Status::Ready`, `dsp::osc::Osc`.
 ///
-/// The parser used to join these into one `&str` (via `Box::leak`) and every
-/// consumer split them apart again — `split_once("::")`, which silently dropped
-/// everything past the second segment. Keeping the segments means the *shape* of
-/// a name survives parsing, so resolution can decide what each segment denotes
-/// (module qualifier, type, value, enum variant) instead of guessing from a
-/// string.
+/// The parser once joined these into one `&str` (via `Box::leak`) and every
+/// consumer split them again with `split_once("::")`, which dropped everything
+/// past the second segment. Keeping the segments means a name's shape survives
+/// parsing, so resolution can tell what each segment denotes (module, type,
+/// value, variant) instead of guessing from a string.
 ///
 /// Pre-resolution only. Name resolution replaces every `Path` with what it
 /// refers to; nothing downstream of `haven_front::module` should see one.
@@ -1141,12 +1127,10 @@ pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
     },
 ];
 
-/// Check one attribute written on `target`. `Err` carries the headline and the
-/// trailing note, already split - the caller supplies the span and assembles the
-/// [`Error`]. Split here rather than at the call site because only this function
-/// knows which half is the complaint and which half is the advice; every one of
-/// these messages is a "what" followed by a "do this instead", and the "do this
-/// instead" is long enough to wrap the underline if it stays on the headline.
+/// Check one attribute written on `target`. `Err` carries the headline and note
+/// already split; the caller supplies the span and builds the [`Error`]. Split
+/// here because only this function knows which half is the complaint and which
+/// is the advice, and the advice is long enough to wrap the underline.
 pub fn check_attribute(
     attr: &AttributeNode<'_>,
     target: AttrTarget,
@@ -1347,10 +1331,8 @@ pub fn implements<'a>(
 pub enum TopLevelNode<'a> {
     Function {
         name: &'a str,
-        /// This item's identity, assigned by name resolution. Everything that
-        /// needs to talk about this definition — its members, its instances, its
-        /// fields, its conformances — keys on this rather than on `name`, which
-        /// is only the symbol it happens to be emitted under.
+        /// Identity assigned by name resolution; everything keys on this, not
+        /// `name` (the symbol it is emitted under).
         def: DefId,
         /// `true` if declared `pub`; controls whether other modules may import
         /// it. Default (no `pub`) is module-private. See `haven_front::module`.
@@ -1369,10 +1351,8 @@ pub enum TopLevelNode<'a> {
     },
     Extern {
         name: &'a str,
-        /// This item's identity, assigned by name resolution. Everything that
-        /// needs to talk about this definition — its members, its instances, its
-        /// fields, its conformances — keys on this rather than on `name`, which
-        /// is only the symbol it happens to be emitted under.
+        /// Identity assigned by name resolution; everything keys on this, not
+        /// `name` (the symbol it is emitted under).
         def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
@@ -1383,10 +1363,8 @@ pub enum TopLevelNode<'a> {
 
     Struct {
         name: &'a str,
-        /// This item's identity, assigned by name resolution. Everything that
-        /// needs to talk about this definition — its members, its instances, its
-        /// fields, its conformances — keys on this rather than on `name`, which
-        /// is only the symbol it happens to be emitted under.
+        /// Identity assigned by name resolution; everything keys on this, not
+        /// `name` (the symbol it is emitted under).
         def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
@@ -1394,23 +1372,20 @@ pub enum TopLevelNode<'a> {
         fields: Vec<(&'a str, Type<'a>)>,
     },
 
-    /// A field-less, C-style enum: `enum Status { Continue, Sleep = 5, Error }`.
-    /// Each variant is `(name, optional explicit discriminant, payload fields)`.
-    /// Unspecified discriminants continue from the previous one + 1 (starting at
-    /// 0), as in C. The discriminant's integer type is set by `@repr(<int>)` in
-    /// `attributes` (default `i32`). A variant's payload is a list of `(field
-    /// name, type)`: empty for a unit variant (`Stop`); for a tuple variant
-    /// (`Note(u8, f32)`) the fields get synthesized names `"0"`, `"1"`, ...; for a
-    /// struct variant (`Cc { id: u32 }`, Stage-3 Phase 2) the real names. A carried
-    /// discriminant is only meaningful on a unit variant. `generics` (Stage-3
-    /// Phase 3) declares type/const params in scope for every variant's payload
-    /// field types, e.g. `enum Option<T> { None, Some(T) }`; empty for a plain enum.
+    /// A C-style enum, optionally data-carrying:
+    /// `enum Status { Continue, Sleep = 5, Error }`. Each variant is `(name,
+    /// optional discriminant, payload fields)`. An unspecified discriminant
+    /// continues from the previous + 1 (from 0), as in C; its integer type comes
+    /// from `@repr(<int>)` (default `i32`). A payload is a list of `(field name,
+    /// type)`: empty for a unit variant; a tuple variant (`Note(u8, f32)`) gets
+    /// synthesized names `"0"`, `"1"`, ...; a struct variant (`Cc { id: u32 }`)
+    /// keeps the real names. A discriminant is only meaningful on a unit variant.
+    /// `generics` declares params in scope for every payload type, e.g.
+    /// `enum Option<T> { None, Some(T) }`; empty for a plain enum.
     Enum {
         name: &'a str,
-        /// This item's identity, assigned by name resolution. Everything that
-        /// needs to talk about this definition — its members, its instances, its
-        /// fields, its conformances — keys on this rather than on `name`, which
-        /// is only the symbol it happens to be emitted under.
+        /// Identity assigned by name resolution; everything keys on this, not
+        /// `name` (the symbol it is emitted under).
         def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
@@ -1424,10 +1399,8 @@ pub enum TopLevelNode<'a> {
     /// so a host can look the symbol up (see the CLAP `clap_entry` use case).
     Global {
         name: &'a str,
-        /// This item's identity, assigned by name resolution. Everything that
-        /// needs to talk about this definition — its members, its instances, its
-        /// fields, its conformances — keys on this rather than on `name`, which
-        /// is only the symbol it happens to be emitted under.
+        /// Identity assigned by name resolution; everything keys on this, not
+        /// `name` (the symbol it is emitted under).
         def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
@@ -1499,10 +1472,8 @@ pub enum TopLevelNode<'a> {
     /// concrete instance.
     Trait {
         name: &'a str,
-        /// This item's identity, assigned by name resolution. Everything that
-        /// needs to talk about this definition — its members, its instances, its
-        /// fields, its conformances — keys on this rather than on `name`, which
-        /// is only the symbol it happens to be emitted under.
+        /// Identity assigned by name resolution; everything keys on this, not
+        /// `name` (the symbol it is emitted under).
         def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,

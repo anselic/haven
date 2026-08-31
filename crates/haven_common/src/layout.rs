@@ -1,12 +1,10 @@
-//! Memory layout of types, following the C rules (as used by the x86-64 System V
-//! ABI on our target). This is the prerequisite for by-value struct FFI: to pass
-//! a struct in registers the way C does, we first have to know its size, its
-//! alignment, and the byte offset of every field so we can carve it into
-//! eightbytes and classify them.
+//! Memory layout of types, following the C rules (the x86-64 System V ABI on
+//! our target). Needed for by-value struct FFI: to pass a struct in registers
+//! the way C does, we need its size, alignment, and every field's offset, so
+//! we can carve it into eightbytes and classify them.
 //!
-//! Everything here is target-specific (LP64: 8-byte pointers). It is deliberately
-//! kept separate from `emit_type` in `llvm.rs`, which describes the *IR* shape of
-//! a type, not its concrete byte layout.
+//! Target-specific (LP64: 8-byte pointers). Kept apart from `emit_type` in
+//! `llvm.rs`, which describes a type's IR shape, not its byte layout.
 
 use std::collections::HashMap;
 
@@ -15,22 +13,22 @@ use crate::defs::DefId;
 
 /// Everything layout needs to know about one named type.
 ///
-/// Keyed by identity rather than by name because the mid end reaches this table
-/// with `DefId`s and two modules may each declare a `Buf`. The backend keys the
-/// same way and asks `Defs` for a symbol only when it needs to *print* one.
+/// Keyed by identity, not name: the mid end reaches this table with `DefId`s,
+/// and two modules may each declare a `Buf`. The backend keys the same way,
+/// and asks `Defs` for a symbol only to print one.
 #[derive(Clone, Debug, Default)]
 pub struct TypeInfo<'a> {
     /// Ordered `(field name, type)` list: a struct's fields, a data enum's
     /// `{ $tag, $payload }` aggregate, or one variant's payload struct. Empty
     /// for a field-less enum, which is a bare scalar.
     pub fields: Vec<(&'a str, Type<'a>)>,
-    /// Set when this type is an enum. `repr` is the integer its discriminant is
-    /// stored as; `has_payload` distinguishes a scalar C-style enum from a
-    /// data-carrying one, which is laid out through `fields` above.
+    /// Set when this type is an enum. `repr` is the integer the discriminant is
+    /// stored as; `has_payload` tells a scalar C-style enum from a data-carrying
+    /// one, which is laid out through `fields` above.
     ///
-    /// This used to be carried inside `Type::Enum` itself, duplicated into every
-    /// type value that mentioned the enum. Keeping it here means there is one
-    /// copy, and a type is only ever an identity plus its arguments.
+    /// This once lived inside `Type::Enum`, copied into every type value that
+    /// named the enum. Here there is one copy, and a type stays just an identity
+    /// plus its arguments.
     pub enum_: Option<EnumRepr<'a>>,
 }
 
@@ -76,19 +74,19 @@ pub fn size_of<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> usize {
         Int64 | Uint64 | Float64 => 8,
         Pointer(_) | Function { .. } => POINTER_SIZE,
 
-        // An array is `n` elements laid end to end at the element stride.
+        // n elements at the element stride.
         Array(elem, n) => size_of(elem, types) * n.expect_lit(),
 
-        // A SIMD vector is `n` packed elements with no interior padding.
+        // n packed elements, no interior padding.
         Simd(elem, n) => size_of(elem, types) * n.expect_lit(),
 
-        // A slice is a `{ ptr, len }` fat pointer.
+        // a `{ ptr, len }` fat pointer.
         Slice(_) => aggregate_layout(fat_pointer_fields().iter(), types).0,
         // `str` is a raw `*const u8` - a single machine pointer.
         Str => POINTER_SIZE,
-        // a field-less enum is stored as its integer discriminant repr;
-        // everything else named - struct, payload struct, or the aggregate of a
-        // data-carrying enum - is laid out from its field list.
+        // a field-less enum stores just its discriminant repr; every other named
+        // type - struct, payload struct, data-enum aggregate - lays out from its
+        // field list.
         Named { def, .. } => match type_info(*def, types) {
             TypeInfo { enum_: Some(EnumRepr { repr, has_payload: false }), .. } => size_of(repr, types),
             info => aggregate_layout(info.fields.iter().map(|(_, t)| t), types).0,
@@ -112,7 +110,7 @@ pub fn align_of<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> usize {
         Int64 | Uint64 | Float64 => 8,
         Pointer(_) | Function { .. } => POINTER_ALIGN,
 
-        // An array is as aligned as its element.
+        // as aligned as its element.
         Array(elem, _) => align_of(elem, types),
 
         // SysV aligns a vector to its size, rounded up to a power of two (an
@@ -150,8 +148,7 @@ pub fn field_offset<'a>(def: DefId, index: usize, types: &TypeTable<'a>) -> usiz
         offset = round_up(offset, align_of(fty, types));
         offset += size_of(fty, types);
     }
-    // `offset` now sits at the end of the previous field; bump it up to where
-    // the requested field actually starts.
+    // bump past the previous field's end to where this field starts.
     round_up(offset, align_of(&fields[index].1, types))
 }
 

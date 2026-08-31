@@ -4,58 +4,48 @@ use crate::intrinsics::Intrinsic;
 use crate::mono::concrete_method_name;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-// Runtime-safety (`@alloc(false)`) checking.
+// `@alloc(false)` checking. "clean" = never allocates, even through callees.
 //
-// "clean" means a function performs no heap allocation, transitively. The
-// analysis is a greatest fixpoint over the call graph:
+//   * extern    -> clean only if marked `@alloc(false)`; we trust the mark.
+//   * intrinsic -> always clean.
+//   * function  -> clean only if every callee is clean.
 //
-//   * extern    -> clean iff annotated `@alloc(false)` (we trust the user);
-//                  an unannotated extern is an allocating leaf.
-//   * intrinsic -> always clean (dropped during call collection).
-//   * function  -> clean iff every callee is clean.
-//
-// We can't do this in a single definition-order pass, modules are flattened with
-// imports appearing *after* the module that imports them, so a callee can be
-// defined later in the program than its caller. The fixpoint starts every function
-// optimistically clean and propagates dirtiness until it stabilizes, which is
-// order-independent and handles (mutual) recursion correctly.
+// Why a fixpoint, not one pass: modules are flattened, so a callee can come
+// after its caller. Start everything clean, spread dirtiness until it settles.
+// Order stops mattering, and recursion just works.
 
-/// Map from a callable's final (post-mono) name to whether it is known clean.
+/// Keyed by each callable's final, post-mono name.
 type CleanMap<'a> = HashMap<&'a str, bool>;
 
-/// Sentinel "callee" for an indirect call through a function pointer. Its target
-/// isn't statically known, so we can't prove it clean - it never appears in the
-/// clean map, so any function that makes one is forced dirty. Not a valid
-/// identifier, so it can't collide with a real callable's name.
+/// A call through a function pointer has no known target, so we cannot prove
+/// it clean. This stands in for one. Any function that makes such a call turns
+/// dirty. The name is not a valid identifier on purpose: it cannot collide
+/// with a real callable.
 const INDIRECT_CALLEE: &str = "<indirect call>";
 
-/// The dispatch information a method call needs to be resolved to its target: the
-/// post-mono inferred type of every expression (to find a receiver's type) and
-/// the member table (to dispatch that type + method name to a concrete function).
+/// Everything needed to resolve a `recv.m()` to the function it calls.
 struct Resolve<'p, 'a> {
     node_types: &'p HashMap<usize, Type<'a>>,
     members: &'p MemberTable<'a>,
-    /// So a receiver typed as a monomorphized instance still finds the impl it
-    /// dispatches to: this pass runs *after* mono, and the member table is keyed
-    /// on templates.
+    /// This pass runs after mono, but the member table is keyed on templates.
+    /// Without this, a monomorphized receiver would not find its impl.
     instances: &'p Instances<'a>,
 }
 
 /// What the callee position of a `Call` resolves to for the call graph.
 enum Callee<'a> {
-    /// Not a call edge at all: an intrinsic or an enum-variant constructor.
+    /// An intrinsic or enum constructor: not a call edge at all.
     None,
-    /// A statically-known target, by its final name.
     Named(&'a str),
-    /// Target unknown (a fn-pointer, or a method we couldn't resolve): forced dirty.
+    /// A fn-pointer or unresolved method. Forced dirty: we cannot see its body.
     Indirect,
 }
 
-/// Classify a `Call`'s callee expression. A bare name is a direct call (unless a
-/// local of that name shadows it - then it's a value, i.e. indirect); a path is an
-/// enum constructor (no call); and `recv.m(..)` is a method call, resolved through
-/// the member table to the concrete function it dispatches to so it becomes a real
-/// graph edge rather than an opaque indirect one.
+/// A bare name is not always a direct call: a local can shadow the
+/// function, which makes the callee a value.
+/// Method calls go through the member table so they land on a concrete
+/// function. Without that we would emit a dynamic edge and lose the
+/// call graph.
 fn classify_callee<'a>(func: &Expr<'a>, locals: &[&'a str], r: &Resolve<'_, 'a>) -> Callee<'a> {
     match &func.value {
         ExprNode::Var(name) if !locals.contains(name) => {
@@ -74,24 +64,19 @@ fn classify_callee<'a>(func: &Expr<'a>, locals: &[&'a str], r: &Resolve<'_, 'a>)
     }
 }
 
-/// Returns the immediate calls in this expression whose callee is dirty.
-// `locals` is the stack of param/`let` names in scope at this point (see the
-// rewriter in module.rs for the same shape). a called name that's shadowed by a
-// local isn't the top-level symbol of that name: it's an indirect call through a
-// value, so we route it to INDIRECT_CALLEE instead of the clean-map lookup.
+// `locals`: param and `let` names in scope, so a shadowed name routes to
+// INDIRECT_CALLEE instead of a clean-map lookup.
 fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], r: &Resolve<'_, 'a>, e: &Expr<'a>) -> Vec<(&'a str, Span)> {
     match &e.value {
         ExprNode::Call { func, args, .. } => {
-            // dirty calls nested in the arguments, first
             let mut dirty: Vec<(&'a str, Span)> = args.iter()
                 .flat_map(|a| dirty_calls_expr(clean, locals, r, a))
                 .collect();
-            // then dirty calls in a method call's receiver (`recv.m()`'s `recv`).
+            // a method call's receiver can hide calls too.
             if let ExprNode::Access { base, .. } = &func.value {
                 dirty.extend(dirty_calls_expr(clean, locals, r, base));
             }
 
-            // then the callee itself (intrinsics/constructors are always clean).
             match classify_callee(func, locals, r) {
                 Callee::None => {}
                 Callee::Named(name) => {
@@ -114,7 +99,7 @@ fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], r: &Resolve<'_
             dirty.extend(dirty_calls_expr(clean, locals, r, index));
             dirty
         }
-        // literals & variable reads are always clean
+        // no other expression kind contains a call
         _ => vec![],
     }
 }
@@ -169,15 +154,11 @@ fn collect_calls_expr<'a>(calls: &mut HashSet<&'a str>, locals: &[&'a str], r: &
     match &e.value {
         ExprNode::Call { func, args, .. } => {
             match classify_callee(func, locals, r) {
-                // intrinsics and enum constructors call nothing, so they're not
-                // graph edges.
                 Callee::None => {}
                 Callee::Named(name) => { calls.insert(name); }
-                // fn-pointer or unresolved callee: record the sentinel so the
-                // enclosing function is forced dirty.
                 Callee::Indirect => { calls.insert(INDIRECT_CALLEE); }
             }
-            // a method call's receiver (`recv.m()`'s `recv`) can contain calls too.
+            // a method call's receiver can hide calls too.
             if let ExprNode::Access { base, .. } = &func.value {
                 collect_calls_expr(calls, locals, r, base);
             }
@@ -233,21 +214,17 @@ fn collect_calls_stmt<'a>(calls: &mut HashSet<&'a str>, locals: &mut Vec<&'a str
     }
 }
 
-/// The call graph, keyed by caller: every callable defined in this program
-/// mapped to the set of callables its body reaches directly. A name absent from
-/// it has no body here - an extern, or an unresolved callee - which is what
-/// makes it a leaf when tracing a blame chain.
+/// Keyed by caller. An absent name has no body here - an extern, or an
+/// unresolved callee - which is what makes it a leaf in a blame chain.
 type CallGraph<'a> = HashMap<&'a str, HashSet<&'a str>>;
 
-/// Compute the clean/dirty status of every callable via a fixpoint, returning
-/// the call graph alongside it so a violation can be traced to the leaf that
-/// actually allocates.
+/// Also returns the call graph, so a violation can be traced down to the
+/// leaf that really allocates.
 fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>)
 -> (CleanMap<'a>, CallGraph<'a>) {
     let mut clean: CleanMap<'a> = HashMap::new();
 
-    // leaves: externs are clean iff annotated, functions start optimistically
-    // clean and the call graph records who they call
+    // extern: clean only if marked. function: assume clean, record its callees.
     let mut calls: CallGraph<'a> = HashMap::new();
     for node in program {
         match &node.value {
@@ -270,8 +247,7 @@ fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>)
         }
     }
 
-    // propagate dirtiness until stable. a function goes dirty as soon as any of
-    // its callees is dirty (or unknown, which we treat conservatively as dirty)
+    // spread dirtiness until stable. an unknown callee counts as dirty.
     loop {
         let mut changed = false;
         for (&fname, callees) in &calls {
@@ -289,17 +265,15 @@ fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>)
     (clean, calls)
 }
 
-/// The shortest chain of calls from `start` down to the leaf that makes it
-/// dirty, e.g. `Serial$tick -> Bad$tick -> Vec$with_capacity -> malloc`.
+/// The shortest chain from `start` to the leaf that makes it dirty, e.g.
+/// `Serial$tick -> Bad$tick -> Vec$with_capacity -> malloc`.
 ///
-/// Dirtiness propagates up the call graph, so the immediate callee a violation
-/// blames is usually a generic wrapper that allocates nothing itself - with
-/// combinators it nearly always is. Naming only that callee points the reader at
-/// the one function in the chain that is innocent; this recovers the rest.
+/// Why bother: dirtiness spreads upward, so the callee we first blame usually
+/// allocates nothing itself - it is a generic wrapper. Pointing only at it
+/// blames the one innocent function. This walks down to the real culprit.
 ///
-/// Breadth-first, so the chain shown is the shortest explanation rather than
-/// whichever branch a depth-first walk happened to enter, and callees are
-/// visited in name order so the same program always reports the same chain.
+/// Breadth-first for the shortest chain; callees visited in name order, so the
+/// same program always reports the same one.
 fn blame_chain<'a>(calls: &CallGraph<'a>, clean: &CleanMap<'a>, start: &'a str) -> Vec<&'a str> {
     fn path_to<'a>(prev: &HashMap<&'a str, &'a str>, start: &'a str, end: &'a str) -> Vec<&'a str> {
         let mut out = vec![end];
@@ -321,14 +295,14 @@ fn blame_chain<'a>(calls: &CallGraph<'a>, clean: &CleanMap<'a>, start: &'a str) 
     queue.push_back(start);
 
     while let Some(cur) = queue.pop_front() {
-        // no body in this program: an unannotated extern, the indirect-call
-        // sentinel, or an unknown symbol. This is the leaf that allocates.
+        // no body here: an unmarked extern, the indirect-call sentinel, or an
+        // unknown symbol. this is the leaf that allocates.
         let Some(callees) = calls.get(cur) else { return path_to(&prev, start, cur) };
         let mut dirty: Vec<&'a str> = callees.iter().copied()
             .filter(|c| !clean.get(c).copied().unwrap_or(false))
             .collect();
-        // a dirty function with no dirty callee cannot arise from the fixpoint,
-        // but treating it as a leaf keeps this total rather than looping.
+        // the fixpoint cannot make a dirty function with no dirty callee. treat
+        // it as a leaf anyway, so this stays total instead of looping.
         if dirty.is_empty() { return path_to(&prev, start, cur); }
         dirty.sort_unstable();
         for d in dirty {
@@ -346,13 +320,12 @@ pub fn alloc_check_program<'a>(
     let r = Resolve { node_types, members: defs.members(), instances: defs.instances() };
     let (clean, calls) = compute_clean(program, &r);
 
-    // mono rewrites generic calls to their mangled instance name; prefer the
-    // friendly spelling it recorded (`alloc::<Vec2>`) over `std.alloc$alloc$Vec2`
+    // mono mangles generic call names. prefer the friendly spelling it
+    // recorded (`alloc::<Vec2>`) over `std.alloc$alloc$Vec2`.
     let show = |n: &'a str| defs.show_symbol(n);
 
-    // report each `@alloc(false)` function that came out dirty, pointing at the
-    // offending immediate calls in its body. dirtiness always propagates through
-    // at least one immediate callee, so a dirty function has >=1 span to blame
+    // a dirty `@alloc(false)` function always has at least one dirty immediate
+    // callee to blame: dirtiness only ever arrives through one.
     let mut errors: Vec<Error> = Vec::new();
     for node in program {
         let TopLevelNode::Function { name, attributes, params, body, .. } = &node.value else { continue };
@@ -368,8 +341,8 @@ pub fn alloc_check_program<'a>(
             let err = Error::new(span.clone(), format!(
                 "'{}' is marked as @alloc(false) but may allocate", show(name)))
                 .with_label(span, format!("calls '{}', which may allocate", show(callee)));
-            // the immediate callee is only the entry point; say where the
-            // allocation actually is, unless it is the callee itself.
+            // the immediate callee is just the entry point; name where the
+            // allocation really is.
             let chain = blame_chain(&calls, &clean, callee);
             errors.push(if chain.len() > 1 {
                 let rendered = chain.iter().map(|n| match *n {

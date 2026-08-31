@@ -28,7 +28,7 @@ pub struct Args {
     pub input: PathBuf,
 
     /// The output file path for the compiled binary
-    /// Defaults to `a.out` if not specified.
+    /// Defaults to `output` if not specified.
     #[arg(short, long, value_name = "OUTPUT", default_value = "output")]
     pub output: PathBuf,
 
