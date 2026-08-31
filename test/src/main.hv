@@ -1,0 +1,63 @@
+import dsp/block { serial4, gain, ident }
+import dsp/filters { Biquad }
+import dsp/utils { lin_to_db, db_to_lin }
+
+import std/iter { Iterator }
+
+struct ArrayIter<T> {
+    buf: [T],
+    idx: u64,
+}
+extend ArrayIter<T>: Iterator {
+    type Item = T;
+    proc next(*self) Option<T> {
+        if (self.idx < slice_len::<T>(&self.buf)) {
+            let item = self.buf[self.idx];
+            self.idx = self.idx + 1;
+            return Option::Some::<T>(item);
+        } else {
+            return Option::None::<T>();
+        }
+    }
+}
+extend [T] {
+    proc iter(self) ArrayIter<T> {
+        return ArrayIter::<T>{ buf: self, idx: 0 };
+    }
+}
+
+proc main() i32 {
+    let sr = 44100.0;
+    let input_buf: [f32] = [
+         1.0,  0.9,  0.8,  0.7,  0.6,  0.5,  0.4,  0.3,  0.2,  0.1, 0.0
+        -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9, -1.0
+    ];
+    let output_buf: [f32] = [
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ];
+
+    let chain = serial4(
+        Biquad::lowpass(1000.0, 0.707, sr),
+        Biquad::highpass(200.0, 0.707, sr),
+        gain(db_to_lin(3.0)),
+        ident(),
+    );
+
+    let i = 0;
+    println("input: ");
+    for (x in input_buf.iter()) {
+        print(x); print(" ");
+        output_buf[i] = chain.process(x);
+        i = i + 1;
+    }
+    println("");
+
+    println("output: ");
+    for (x in output_buf.iter()) {
+        print(x); print(" ");
+    }
+    println("");
+
+    return 0;
+}

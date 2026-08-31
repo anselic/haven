@@ -101,6 +101,16 @@ struct CompilerFlags {
     /// escaping here.
     #[arg(short = 'F', long, value_name = "FLAGS", allow_hyphen_values = true)]
     compiler_flags: Option<String>,
+
+    /// Keep the generated LLVM IR (`.ll`) beside the artifact in
+    /// `.haven/target/`, forwarded to `havenc --emit-ir`.
+    #[arg(long)]
+    emit_ir: bool,
+
+    /// Emit the optimized LLVM IR (`.opt.ll`) beside the artifact, following the
+    /// optimization flags, forwarded to `havenc --emit-optimized-ir`.
+    #[arg(long)]
+    emit_optimized_ir: bool,
 }
 
 /// The settings one `haven build`/`haven run` applies to every `havenc` it
@@ -113,11 +123,20 @@ struct BuildOpts<'a> {
     /// `havenc --compiler-flags`, when the user overrode it. `None` leaves
     /// `havenc`'s own default in force, so the default lives in one place.
     compiler_flags: Option<&'a str>,
+    /// Forwarded to `havenc --emit-ir`: keep the generated `.ll`.
+    emit_ir: bool,
+    /// Forwarded to `havenc --emit-optimized-ir`: emit the `.opt.ll`.
+    emit_optimized_ir: bool,
 }
 
 impl<'a> BuildOpts<'a> {
     fn new(fmt: MessageFormat, flags: &'a CompilerFlags) -> Self {
-        BuildOpts { fmt, compiler_flags: flags.compiler_flags.as_deref() }
+        BuildOpts {
+            fmt,
+            compiler_flags: flags.compiler_flags.as_deref(),
+            emit_ir: flags.emit_ir,
+            emit_optimized_ir: flags.emit_optimized_ir,
+        }
     }
 }
 
@@ -337,6 +356,16 @@ fn compile_project(
     // with `-O`, and a separate entry would be read as another option.
     if let Some(flags) = opts.compiler_flags {
         cmd.arg(format!("--compiler-flags={}", flags));
+    }
+
+    // IR-emitting flags ride along the same walk as the compiler flags: the one
+    // package that reaches LLVM drops its `.ll`/`.opt.ll` beside the artifact in
+    // `.haven/target/`. A `lib` dependency stops before codegen and ignores them.
+    if opts.emit_ir {
+        cmd.arg("--emit-ir");
+    }
+    if opts.emit_optimized_ir {
+        cmd.arg("--emit-optimized-ir");
     }
 
     match output {

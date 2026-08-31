@@ -1,0 +1,7 @@
+[project]
+name = "test"
+version = "0.1.0"
+kind = ["bin"]
+
+[dependencies]
+dsp = { path = "../stdlib/dsp" }
