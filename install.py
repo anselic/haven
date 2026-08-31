@@ -8,25 +8,12 @@ import argparse
 import subprocess
 from pathlib import Path
 
-# The compiler embeds no standard library: it discovers `std.hvmeta` on disk,
-# first looking right next to the `havenc` binary. So a working install is the
-# binaries *plus* this artifact, built from the standalone `std` package here and
-# installed alongside them.
 STD_ARTIFACT = "std.hvmeta"
 
-# Where an install lands by default: `~/.haven`, holding the binaries and the
-# stdlib artifacts side by side. `--path` overrides it.
 DEFAULT_DEST = Path.home() / ".haven"
 
-# Build one library package under `stdlib/` and copy its `.hvmeta` to the
-# destination directory. `env` is passed through to `haven build` (and thus to
-# `havenc`) - the standalone packages need `HAVEN_STD` pointing at the freshly
-# installed `std.hvmeta`, since it is not yet beside the binary during install.
 def build_lib(source_dir, dest_dir, pkg, artifact, env=None):
     exe_ext = ".exe" if platform.system() == "Windows" else ""
-    # Resolve to absolute: we run with `cwd` set to the package, and `haven`
-    # locates `havenc` relative to its own (absolute) path, so a relative
-    # `target/release/haven` would otherwise be looked up under `cwd`.
     haven = (source_dir / f"haven{exe_ext}").resolve()
     havenc = (source_dir / f"havenc{exe_ext}").resolve()
     if not haven.exists() or not havenc.exists():
@@ -52,17 +39,6 @@ def build_lib(source_dir, dest_dir, pkg, artifact, env=None):
         print(f"Built and installed {artifact} to {out}")
     except Exception as e:
         print(f"Failed to install {artifact}: {e}")
-
-# Build `std` first (it is its own prelude, so no discovery is needed), then the
-# standalone packages with `HAVEN_STD` aimed at the just-installed `std.hvmeta` -
-# `havenc`'s beside-the-binary discovery cannot find it during an install.
-def build_stdlib(source_dir, dest_dir):
-    build_lib(source_dir, dest_dir, "std", STD_ARTIFACT)
-    std_meta = dest_dir / STD_ARTIFACT
-    if not std_meta.exists():
-        print(f"Skipping {', '.join(a for _, a in LIB_ARTIFACTS)}: {STD_ARTIFACT} "
-              f"was not installed, so they cannot resolve `std`.")
-        return
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
@@ -93,7 +69,7 @@ def main():
         removed_any = False
         for d in dirs_to_check:
             if not d.is_dir(): continue
-            for bin_name in binaries + STD_ARTIFACTS:
+            for bin_name in binaries + STD_ARTIFACT:
                 target_file = d / bin_name
                 if target_file.exists():
                     try:
@@ -151,9 +127,7 @@ def main():
             else:
                 print(f"Warning: {src_file} not found in {source_dir}. Skipping.")
 
-        # the compiler carries no std of its own; build and install it alongside,
-        # together with the standalone stdlib packages.
-        build_stdlib(source_dir, dest_dir)
+        build_lib(source_dir, dest_dir, "std", STD_ARTIFACT)
 
         # `~/.haven` is not on `PATH` by default; nudge the user to add it.
         path_dirs = os.environ.get("PATH", "").split(os.pathsep)
