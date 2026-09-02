@@ -431,19 +431,30 @@ fn random() -> usize {
 /// The multi-line human rendering. Plain text on purpose: a crash report is
 /// pasted into an issue, and ariadne's frame and colours only get in the way.
 fn ice_human(r: &IceReport<'_>) -> String {
-    // just for fun
+    // just for fun, maybe try to keep it under 100 chars
     let choices = [
-        "don't worry! we sometimes have a bad day :)\n\n",
-        "oh no... :(\n\n",
-        "it's not you, it's me...\n\n",
-        "have we met before? i hope not\n\n",
-        "this is embarrassing, but i need to tell you something\n\n",
-        "i'm sorry, but i have to be honest with you...\n\n",
-        "we will never break your heart, but we will:\n\n",
+        "don't worry! we sometimes have a bad day :)",
+        "oh no... :(",
+        "it's not you, it's me...",
+        "have we met before? i hope not",
+        "this is embarrassing, but i need to tell you something",
+        "i'm sorry, but i have to be honest with you...",
+        "we will never break your heart, but we will:",
+        "hi !!",
+        "whose idea is to put these non-deterministic messages here?", // me
+        "how did we get here?",
+        "knock knock. who's there? internal compiler error. internal compiler wh",
+        "i would like to speak to my own manager",
+
+        // from @marr_ales_fios from r/proglang discord 09/02/2026
+        "do you know where my bug tracker is?",
+        "congrats! you just won some ICE for cooling off. ignore if it's not summer in your location",
+        "you just ran into a bug. maybe try running over it next time? (or around it, your choice)",
+        "it's not a feature, it's a bug",
     ];
     let mut s = String::new();
     s.push_str(choices[random() % choices.len()]);
-    s.push_str(&format!("{ICE_STAGE}: {}\n", r.message));
+    s.push_str(&format!("\n{ICE_STAGE}: {}\n", r.message));
     if let Some(loc) = &r.location {
         s.push_str(&format!("  at {loc}\n"));
     }
