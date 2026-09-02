@@ -8,6 +8,7 @@ name  = "haven"
 path = "src/main.rs"
 
 [dependencies]
+haven_common.workspace = true
 clap.workspace = true
 toml.workspace = true
 serde.workspace = true

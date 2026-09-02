@@ -1,0 +1,9 @@
+// the value set is closed: anything but `always`/`never` is a diagnostic,
+// never a crash in codegen (which used to panic on it).
+//@ error: `@inline(sometimes)` is not a valid value
+//@ error: expected always or never
+
+@inline(sometimes)
+proc f() i32 { return 1; }
+
+proc main() i32 { return f(); }

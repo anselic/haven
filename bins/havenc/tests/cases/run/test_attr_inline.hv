@@ -1,0 +1,18 @@
+// `@inline(always)` / `@inline(never)` are codegen hints: the program's
+// behaviour is unchanged, and the attribute is accepted on a function.
+
+@inline(always)
+proc add(a: i32, b: i32) i32 { return a + b; }
+
+@inline(never)
+proc mul(a: i32, b: i32) i32 { return a * b; }
+
+@fastmath(fast)
+proc half(x: f32) f32 { return x * 0.5; }
+
+proc main() i32 {
+    println(add(2, 3));
+    println(mul(2, 3));
+    if (half(8.0) == 4.0) { println(1); } else { println(0); }
+    return 0;
+}

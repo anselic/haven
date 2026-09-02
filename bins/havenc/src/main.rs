@@ -22,6 +22,12 @@ fn main() {
     // `diag::report*` call below - including those inside `load_and_merge` -
     // renders in the requested format.
     diag::set_format(args.message_format.into());
+    // and, in that format, turn any panic below into an internal-compiler-error
+    // report instead of Rust's `thread 'main' panicked at ...`.
+    diag::install_ice_hook("havenc");
+    if args.internal_panic || std::env::var_os("HAVENC_INTERNAL_PANIC").is_some() {
+        panic!("deliberate internal panic (--internal-panic)");
+    }
 
     // arena backing every `&'a str` in the AST (module sources, token streams,
     // and the synthetic mangled/prefixed names minted during module resolution
@@ -199,11 +205,12 @@ fn main() {
 
             // If the output is in a directory (that may or may not exist), create the directory first
             if let Some(parent_dir) = llvm_ir_output_path.parent() {
-                std::fs::create_dir_all(parent_dir).expect("Failed to create output directory");
+                std::fs::create_dir_all(parent_dir).unwrap_or_else(|e| fatal(format!(
+                    "cannot create output directory '{}': {}", parent_dir.display(), e)));
             }
 
-            std::fs::write(&llvm_ir_output_path, llvm_ir)
-                .expect("Failed to write LLVM IR to file");
+            std::fs::write(&llvm_ir_output_path, llvm_ir).unwrap_or_else(|e| fatal(format!(
+                "cannot write LLVM IR to '{}': {}", llvm_ir_output_path.display(), e)));
 
             if args.emit_optimized_ir {
                 let optimized_ir_output_path = args.output.with_extension("opt.ll");
@@ -217,7 +224,7 @@ fn main() {
                     .arg("-o")
                     .arg(&optimized_ir_output_path)
                     .status()
-                    .expect("Failed to execute compiler for optimized IR");
+                    .unwrap_or_else(|e| fatal(cannot_run(&args.compiler, e)));
 
                 if !status.success() {
                     eprintln!("Compiler exited with non-zero status when generating optimized IR: {}", status);
@@ -235,7 +242,7 @@ fn main() {
                     .arg("-o")
                     .arg(&asm_output_path)
                     .status()
-                    .expect("Failed to execute compiler for assembly");
+                    .unwrap_or_else(|e| fatal(cannot_run(&args.compiler, e)));
 
                 if !status.success() {
                     eprintln!("Compiler exited with non-zero status when generating assembly: {}", status);
@@ -280,16 +287,11 @@ fn main() {
                     }
                 }
                 for src in &meta.native {
-                    let mut c_temp = tempfile::Builder::new()
-                        .suffix(".c")
-                        .tempfile()
-                        .expect("Failed to create temp C file");
-                    c_temp.write_all(src.source.as_bytes())
-                        .expect("Failed to write dependency C source to temp file");
-                    let o_temp = tempfile::Builder::new()
-                        .suffix(".o")
-                        .tempfile()
-                        .expect("Failed to create temp object file");
+                    let mut c_temp = temp_file(".c");
+                    c_temp.write_all(src.source.as_bytes()).unwrap_or_else(|e| fatal(format!(
+                        "cannot write C source '{}' of dependency '{}' to '{}': {}",
+                        src.name, name, c_temp.path().display(), e)));
+                    let o_temp = temp_file(".o");
                     let status = std::process::Command::new(&args.compiler)
                         .arg("-c")
                         .arg("-O3")
@@ -297,7 +299,7 @@ fn main() {
                         .arg("-o")
                         .arg(o_temp.path())
                         .status()
-                        .expect("Failed to execute compiler for dependency C source");
+                        .unwrap_or_else(|e| fatal(cannot_run(&args.compiler, e)));
                     if !status.success() {
                         eprintln!(
                             "Compiler exited with non-zero status compiling '{}' from dependency '{}': {}",
@@ -320,10 +322,7 @@ fn main() {
             // `link_libs` after the deps' so a lib both a dep and the leaf ask for
             // collapses to a single `-l`.
             for path in &args.c_file {
-                let o_temp = tempfile::Builder::new()
-                    .suffix(".o")
-                    .tempfile()
-                    .expect("Failed to create temp object file");
+                let o_temp = temp_file(".o");
                 let status = std::process::Command::new(&args.compiler)
                     .arg("-c")
                     .arg("-O3")
@@ -331,7 +330,7 @@ fn main() {
                     .arg("-o")
                     .arg(o_temp.path())
                     .status()
-                    .expect("Failed to execute compiler for --c-file source");
+                    .unwrap_or_else(|e| fatal(cannot_run(&args.compiler, e)));
                 if !status.success() {
                     eprintln!(
                         "Compiler exited with non-zero status compiling '{}': {}",
@@ -368,10 +367,13 @@ fn main() {
             // `native_objs` above), so the link line carries only those objects. A
             // freestanding build with no runtime-bearing dep links none - which is
             // what `--no-prelude` means.
-            let mut compiler_args = vec![llvm_ir_output_path.to_str().unwrap()];
-            compiler_args.extend(args.compiler_flags.split_whitespace());
+            // `OsString`s, not `&str`: a path need not be UTF-8, and the link
+            // line is only ever handed back to the OS
+            let mut compiler_args: Vec<std::ffi::OsString> =
+                vec![llvm_ir_output_path.clone().into_os_string()];
+            compiler_args.extend(args.compiler_flags.split_whitespace().map(Into::into));
             // dependency C objects, ahead of the `-l` flags they may reference
-            compiler_args.extend(native_objs.iter().map(|p| p.to_str().unwrap()));
+            compiler_args.extend(native_objs.iter().map(|p| p.clone().into_os_string()));
 
             // add -lm on non-Windows platforms because math library is
             // in the CRT for MSVC and MinGW. Skipped when a dependency already
@@ -379,10 +381,10 @@ fn main() {
             // runtime is std's and std ships `libs = ["m"]`, the compiler stops
             // asserting libm on its own.
             if !cfg!(target_os = "windows") && !link_libs.iter().any(|l| l == "m") {
-                compiler_args.push("-lm");
+                compiler_args.push("-lm".into());
             }
             // libraries the dependencies asked for, after every object
-            compiler_args.extend(lib_flags.iter().map(|s| s.as_str()));
+            compiler_args.extend(lib_flags.iter().map(Into::into));
 
             let status = if args.shared {
                 let shared_output_path = if cfg!(target_os = "windows") {
@@ -400,7 +402,7 @@ fn main() {
                     .arg("-o")
                     .arg(&shared_output_path)
                     .status()
-                    .expect("Failed to execute compiler for shared library")
+                    .unwrap_or_else(|e| fatal(cannot_run(&args.compiler, e)))
             } else if args.static_lib {
                 // clang won't archive for us, so compile the IR to a single
                 // object first, then bundle it with the dependency objects into one
@@ -413,7 +415,7 @@ fn main() {
                     .arg("-o")
                     .arg(&obj_path)
                     .status()
-                    .expect("Failed to execute compiler for object file");
+                    .unwrap_or_else(|e| fatal(cannot_run(&args.compiler, e)));
 
                 if !obj_status.success() {
                     eprintln!("Compiler exited with non-zero status when generating object file: {}", obj_status);
@@ -448,7 +450,7 @@ fn main() {
 
                 let archive_status = archive_cmd
                     .status()
-                    .unwrap_or_else(|e| panic!("Failed to execute archiver '{}': {}", archiver, e));
+                    .unwrap_or_else(|e| fatal(cannot_run(archiver, e)));
 
                 if !obj_path.exists() || std::fs::remove_file(&obj_path).is_err() {
                     // best-effort cleanup of the intermediate object
@@ -467,7 +469,7 @@ fn main() {
                     .arg("-o")
                     .arg(&output)
                     .status()
-                    .expect("Failed to execute compiler for executable")
+                    .unwrap_or_else(|e| fatal(cannot_run(&args.compiler, e)))
             };
 
             if !status.success() {
@@ -476,10 +478,42 @@ fn main() {
             }
 
             if !args.emit_ir {
-                std::fs::remove_file(llvm_ir_output_path).expect("Failed to remove LLVM IR file");
+                std::fs::remove_file(&llvm_ir_output_path).unwrap_or_else(|e| fatal(format!(
+                    "cannot remove intermediate LLVM IR '{}': {}", llvm_ir_output_path.display(), e)));
             }
         }
     }
+}
+
+/// Report a failure of the *environment* - a tool that will not start, a file
+/// that will not write - and exit 1. Not a panic: nothing in the compiler went
+/// wrong, so the ICE hook's "this is a compiler bug, please report it" would
+/// send the user to the wrong place. Same channel as every other driver error
+/// (`report_plain`), so it lands in the JSON stream too.
+fn fatal(msg: impl std::fmt::Display) -> ! {
+    diag::report_plain("Error", &msg.to_string());
+    std::process::exit(1)
+}
+
+/// The message for an external tool (clang, llvm-ar, ...) that could not be
+/// started at all - as opposed to one that ran and failed, which prints its own
+/// complaint. `NotFound` is the usual cause, and the hint says so.
+fn cannot_run(program: impl std::fmt::Display, e: std::io::Error) -> String {
+    let hint = if e.kind() == std::io::ErrorKind::NotFound {
+        " (is it installed and on PATH?)"
+    } else {
+        ""
+    };
+    format!("failed to run `{}`: {}{}", program, e, hint)
+}
+
+/// A temporary file with the given suffix, or a clean exit if the temp
+/// directory is unusable.
+fn temp_file(suffix: &str) -> tempfile::NamedTempFile {
+    tempfile::Builder::new()
+        .suffix(suffix)
+        .tempfile()
+        .unwrap_or_else(|e| fatal(format!("cannot create a temporary `{}` file: {}", suffix, e)))
 }
 
 /// Find the default `std` library on disk, the compiler having none embedded.
@@ -684,7 +718,8 @@ fn write_lib_metadata(
     let out_path = output.with_extension("hvmeta");
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).expect("Failed to create output directory");
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| fatal(format!(
+                "cannot create output directory '{}': {}", parent.display(), e)));
         }
     }
     if let Err(e) = haven_meta::write(&out_path, &meta) {

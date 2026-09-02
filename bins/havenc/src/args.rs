@@ -128,4 +128,12 @@ pub struct Args {
     /// tooling (LSP, the `haven` build orchestrator) to parse.
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
+
+    /// Panic on purpose right after startup. Exists so the tests can exercise
+    /// the internal-compiler-error report without a real bug to trip; hidden
+    /// because nobody else has a use for it. `HAVENC_INTERNAL_PANIC=1` in the
+    /// environment does the same, for a caller (the `haven` tests) that cannot
+    /// add to `havenc`'s argv.
+    #[arg(long, hide = true)]
+    pub internal_panic: bool,
 }

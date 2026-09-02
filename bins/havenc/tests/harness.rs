@@ -207,6 +207,16 @@ fn run_case(path: &Path, mode: Mode) -> Result<(), Failed> {
             if compile.status.success() {
                 return Err(format!("expected compilation to fail, but it succeeded\n{stderr}").into());
             }
+            // a crash is not a failure to compile. the compiler must *report*
+            // the error - exit 1 - never panic (exit 101, kept by the ICE hook)
+            // or die some other way. without this, a fixture whose `//@ error:`
+            // substring happened to appear in a panic message passed, and an
+            // internal error hid behind a test that was green.
+            if compile.status.code() != Some(1) {
+                return Err(format!(
+                    "expected a diagnostic exit (1) but the compiler crashed ({})\n{stderr}",
+                    compile.status).into());
+            }
             for want in &directives.errors {
                 if !stderr.contains(want) {
                     return Err(format!(

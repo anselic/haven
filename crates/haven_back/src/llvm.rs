@@ -766,25 +766,27 @@ fn gep_eightbyte<'a>(cx: &mut EmitCtx<'a>, struct_ptr: &str, i: usize) -> String
 
 fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
     let mut export = false;
+    // `@fastmath` is per function: without this reset the previous function's
+    // flags would ride along into every one emitted after it
+    cx.current_fast_math_flags = FastMathFlags::None;
 
     let attrs = func.attributes.iter()
         .filter_map(|a| match (a.value.name, a.value.value.as_deref()) {
+            // the value sets below are the ones `ast::KNOWN_ATTRIBUTES` admits;
+            // anything else was rejected as a diagnostic long before codegen
             ("inline", Some("always")) => Some(String::from("alwaysinline")),
             ("inline", Some("never"))  => Some(String::from("noinline")),
-            ("inline", _) => panic!("invalid inline attribute value (got {:?})", a.value.value),
+            ("inline", v) => unreachable!("`@inline({v:?})` passed attribute validation"),
 
             ("export", None) => { export = true; None },
-            ("export", _) => panic!("invalid export attribute value (got {:?})", a.value.value),
+            ("export", v) => unreachable!("`@export({v:?})` passed attribute validation"),
 
             ("fastmath", Some(flag)) => {
-                cx.current_fast_math_flags = match FastMathFlags::from_str(flag) {
-                    Some(f) => f,
-                    None => panic!("invalid fastmath attribute value (got {:?})", a.value.value),
-                };
-
+                cx.current_fast_math_flags = FastMathFlags::from_str(flag)
+                    .unwrap_or_else(|| unreachable!("`@fastmath({flag})` passed attribute validation"));
                 None
             }
-            ("fastmath", _) => panic!("invalid fastmath attribute value (got {:?})", a.value.value),
+            ("fastmath", None) => unreachable!("bare `@fastmath` passed attribute validation"),
 
             _ => None,
         }).collect::<Vec<_>>()

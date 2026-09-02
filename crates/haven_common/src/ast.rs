@@ -1125,6 +1125,18 @@ pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
         name: "repr", value: AttrValue::Optional, values: None,
         targets: &[AttrTarget::Struct, AttrTarget::Enum],
     },
+    // codegen hints, forwarded to LLVM as function attributes / fast-math
+    // flags (see `haven_back::llvm::emit_function`). The value sets are the
+    // ones codegen matches on; anything else there is unreachable by this check.
+    AttrSpec {
+        name: "inline", value: AttrValue::Always, values: Some(&["always", "never"]),
+        targets: &[AttrTarget::Function],
+    },
+    AttrSpec {
+        name: "fastmath", value: AttrValue::Always,
+        values: Some(&["fast", "reassoc", "nnan", "ninf", "nsz", "arcp", "contract"]),
+        targets: &[AttrTarget::Function],
+    },
 ];
 
 /// Check one attribute written on `target`. `Err` carries the headline and note

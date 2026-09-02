@@ -28,6 +28,7 @@ pub struct DocArgs {
 }
 
 fn main() {
+    haven_common::diag::install_ice_hook("havendoc");
     let args = DocArgs::parse();
     match doc::generate(&args) {
         Ok(()) => std::process::exit(0),

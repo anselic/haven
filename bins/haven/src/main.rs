@@ -150,6 +150,9 @@ impl MessageFormat {
 }
 
 fn main() -> ExitCode {
+    // `haven` prints human text only (it never speaks JSON itself), so the
+    // default format is the right one for its own crash report.
+    haven_common::diag::install_ice_hook("haven");
     let cli = Cli::parse();
     let result = match cli.cmd {
         Cmd::New { path, lib, .. } => cmd_new(&path, lib),
@@ -405,9 +408,7 @@ fn compile_project(
     let exit = cmd
         .status()
         .map_err(|e| format!("failed to run `{}`: {}", havenc.display(), e))?;
-    if !exit.success() {
-        return Err("compilation failed".to_string());
-    }
+    havenc_outcome(exit, "compilation failed")?;
 
     // Resolve the actual artifact path from the output kind, mirroring `havenc`'s
     // extension choices, so callers (chiefly `run`) know what to launch.
@@ -514,9 +515,7 @@ fn run_build_script(
             .arg(fmt.as_str())
             .status()
             .map_err(|e| format!("failed to run `{}`: {}", havenc.display(), e))?;
-        if !exit.success() {
-            return Err(format!("build script `{}` failed to compile", shown));
-        }
+        havenc_outcome(exit, format!("build script `{}` failed to compile", shown))?;
     }
 
     // The build's details, passed as environment variables rather than argv: a
@@ -708,6 +707,23 @@ fn cwd() -> Result<PathBuf, String> {
 /// `haven` binary - in a workspace build all three live in the same
 /// `target/<profile>/` dir - and fall back to the bare name so a `PATH` install
 /// still works.
+/// `havenc`'s exit, as the build's verdict. A diagnostic exit (1) was already
+/// explained on stderr by the compiler, so `failed` stays a one-liner. 101 is
+/// Rust's exit for a panic - the compiler *crashed*, which is a bug in it and
+/// not in the project, and the report it printed says where to file that. The
+/// distinction matters: "compilation failed" sends a user back to their code,
+/// which is the wrong place to look.
+fn havenc_outcome(exit: std::process::ExitStatus, failed: impl Into<String>) -> Result<(), String> {
+    if exit.success() {
+        return Ok(());
+    }
+    Err(match exit.code() {
+        Some(101) => "the compiler crashed (internal error) - see the report above".to_string(),
+        Some(_) => failed.into(),
+        None => "the compiler was terminated by a signal".to_string(),
+    })
+}
+
 fn tool_path(name: &str) -> PathBuf {
     let exe_name = if cfg!(target_os = "windows") {
         format!("{name}.exe")

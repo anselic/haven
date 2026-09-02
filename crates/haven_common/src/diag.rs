@@ -390,10 +390,186 @@ pub fn report_plain(stage: &str, msg: &str) {
     }
 }
 
+/// Where a user files a compiler bug. Printed by the ICE hook.
+pub const ISSUES_URL: &str = "https://github.com/anselic/haven/issues";
+
+/// The header `stage` an internal compiler error carries, in both formats. A
+/// JSON consumer distinguishes a crash from a user error by this string, since
+/// the exit code (101, Rust's own for a panic) travels only to the parent.
+pub const ICE_STAGE: &str = "internal compiler error";
+
+/// The facts an ICE report is built from, gathered by the hook and rendered by
+/// [`ice_human`] / [`ice_note`]. Split out so the rendering is a pure function
+/// the tests can drive without panicking.
+struct IceReport<'a> {
+    tool: &'a str,
+    version: &'a str,
+    message: &'a str,
+    /// `file:line:col` of the panic, when the payload carries one.
+    location: Option<String>,
+    /// argv as invoked, space-joined.
+    invocation: &'a str,
+    /// A captured backtrace, present only when `RUST_BACKTRACE` asked for one.
+    backtrace: Option<String>,
+}
+
+fn random() -> usize {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut seed = SystemTime::now().duration_since(UNIX_EPOCH)
+        // if this happens, the system clock is broken and the user (or we) has
+        // bigger problems than a compiler bug
+        .expect("Time went backwards")
+        .as_nanos();
+    if seed == 0 { seed = 1; }
+    seed ^= seed << 13;
+    seed ^= seed << 7;
+    seed ^= seed << 13;
+    return (seed % 1_000_000) as usize;
+}
+
+/// The multi-line human rendering. Plain text on purpose: a crash report is
+/// pasted into an issue, and ariadne's frame and colours only get in the way.
+fn ice_human(r: &IceReport<'_>) -> String {
+    // just for fun
+    let choices = [
+        "don't worry! we sometimes have a bad day :)\n\n",
+        "oh no... :(\n\n",
+        "it's not you, it's me...\n\n",
+        "have we met before? i hope not\n\n",
+        "this is embarrassing, but i need to tell you something\n\n",
+        "i'm sorry, but i have to be honest with you...\n\n",
+        "we will never break your heart, but we will:\n\n",
+    ];
+    let mut s = String::new();
+    s.push_str(choices[random() % choices.len()]);
+    s.push_str(&format!("{ICE_STAGE}: {}\n", r.message));
+    if let Some(loc) = &r.location {
+        s.push_str(&format!("  at {loc}\n"));
+    }
+    s.push_str(&format!("  {} {} on {}/{}\n", r.tool, r.version,
+        std::env::consts::OS, std::env::consts::ARCH));
+    s.push_str(&format!("  invoked as: {}\n", r.invocation));
+    s.push_str("this is a bug in the compiler, not in your program.\n");
+    s.push_str(&format!("please report it at {ISSUES_URL} and include the lines above.\n"));
+    match &r.backtrace {
+        Some(bt) => { s.push_str("\nbacktrace:\n"); s.push_str(bt); }
+        None => s.push_str("rerun with RUST_BACKTRACE=1 for a backtrace\n"),
+    }
+    s
+}
+
+/// The `note` of the JSON rendering: everything but the message, one line.
+fn ice_note(r: &IceReport<'_>) -> String {
+    let mut s = String::new();
+    if let Some(loc) = &r.location {
+        s.push_str(&format!("at {loc} | "));
+    }
+    s.push_str(&format!("{} {} on {}/{} | invoked as: {} | this is a compiler bug, report it at {ISSUES_URL}",
+        r.tool, r.version, std::env::consts::OS, std::env::consts::ARCH, r.invocation));
+    if let Some(bt) = &r.backtrace {
+        s.push_str(" | backtrace: ");
+        s.push_str(bt);
+    }
+    s
+}
+
+/// Replace Rust's panic output with an internal-compiler-error report.
+///
+/// A panic anywhere in the pipeline is a compiler bug, and the default hook
+/// tells the user so in Rust's terms: `thread 'main' panicked at
+/// crates/haven_mid/src/mono.rs:412` and a hint about `RUST_BACKTRACE`. This
+/// hook says what that means - a bug in the compiler, not in their program -
+/// and gathers what a bug report needs (message, location, version, argv).
+///
+/// It honours [`set_format`], which is why it lives here and not in a binary:
+/// under `--message-format json` the report is one NDJSON line with
+/// [`ICE_STAGE`] as its `stage`, so the `haven` orchestrator and an LSP keep
+/// parsing instead of choking on free text. Call it once at startup, after the
+/// format is chosen and before anything can panic. `tool` names the binary.
+///
+/// The process still exits 101 - the hook only prints; the unwind proceeds -
+/// so a parent can tell a crash from a diagnostic exit of 1.
+pub fn install_ice_hook(tool: &'static str) {
+    std::panic::set_hook(Box::new(move |info| {
+        let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        let location = info.location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+        let invocation = std::env::args().collect::<Vec<_>>().join(" ");
+        // `capture` reads RUST_BACKTRACE itself: unset, it captures nothing and
+        // reports `Disabled`, and the report tells the user how to ask for one
+        let bt = std::backtrace::Backtrace::capture();
+        let backtrace = match bt.status() {
+            std::backtrace::BacktraceStatus::Captured => Some(bt.to_string()),
+            _ => None,
+        };
+        let report = IceReport {
+            tool,
+            version: env!("CARGO_PKG_VERSION"),
+            message: &message,
+            location,
+            invocation: &invocation,
+            backtrace,
+        };
+        match format() {
+            Format::Json => emit_json(ICE_STAGE, &message, None, None, &[],
+                Some(&ice_note(&report)), &Files::new()),
+            Format::Human => eprint!("{}", ice_human(&report)),
+        }
+    }));
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{decide_color, fits_inline, LABEL_LINE_BUDGET};
+    use super::{decide_color, fits_inline, ice_human, ice_note, IceReport, ICE_STAGE,
+                ISSUES_URL, LABEL_LINE_BUDGET};
     use std::ffi::OsString;
+
+    fn report(backtrace: Option<String>) -> IceReport<'static> {
+        IceReport {
+            tool: "havenc",
+            version: "9.9.9",
+            message: "block 3 has no terminator",
+            location: Some("crates/haven_back/src/llvm.rs:694:9".into()),
+            invocation: "havenc foo.hv -o foo",
+            backtrace,
+        }
+    }
+
+    #[test]
+    fn the_human_report_says_it_is_a_compiler_bug_and_where_to_report_it() {
+        let text = ice_human(&report(None));
+        assert!(text.starts_with(&format!("{ICE_STAGE}: block 3 has no terminator\n")));
+        assert!(text.contains("at crates/haven_back/src/llvm.rs:694:9"));
+        assert!(text.contains("havenc 9.9.9"));
+        assert!(text.contains("invoked as: havenc foo.hv -o foo"));
+        assert!(text.contains(ISSUES_URL));
+        assert!(text.contains("RUST_BACKTRACE=1"), "no backtrace => tell them how to get one");
+        assert!(!text.contains("panicked"), "no Rust vocabulary in a user-facing report");
+    }
+
+    #[test]
+    fn a_captured_backtrace_replaces_the_hint() {
+        let text = ice_human(&report(Some("   0: frame\n".into())));
+        assert!(text.contains("backtrace:\n   0: frame"));
+        assert!(!text.contains("RUST_BACKTRACE=1"));
+    }
+
+    #[test]
+    fn the_json_note_is_one_line_with_the_same_facts() {
+        let note = ice_note(&report(None));
+        assert!(!note.contains('\n'));
+        assert!(note.contains("at crates/haven_back/src/llvm.rs:694:9"));
+        assert!(note.contains("havenc 9.9.9"));
+        assert!(note.contains("invoked as: havenc foo.hv -o foo"));
+        assert!(note.contains(ISSUES_URL));
+    }
 
     #[test]
     fn a_short_message_stays_on_the_underline() {

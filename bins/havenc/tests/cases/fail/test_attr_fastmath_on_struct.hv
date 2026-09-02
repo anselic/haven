@@ -1,0 +1,7 @@
+// `@fastmath` is a function hint; a bare one, or one on a type, is rejected.
+//@ error: `@fastmath` cannot be written on a struct
+
+@fastmath(fast)
+struct P { x: f32 }
+
+proc main() i32 { return 0; }
