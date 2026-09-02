@@ -32,20 +32,6 @@ $ python install.py --uninstall [--path <install_path>]
 The script will also install and compile the standard library, which is required
 for compiling any haven program.
 
-## Usage
-```shell
-# compile to an executable
-$ havenc program.hv
-$ ./output
-
-# or, compile to a library
-$ havenc lib.hv --shared
-$ clang host.c output.lib -o output
-
-# use the help flag for more info
-$ havenc -h
-```
-
 ## Directory Structure
 ```
 bins/
@@ -61,8 +47,9 @@ crates/
 extensions/
 └── vscode/         # VSCode extension for syntax highlighting
 std/                # haven standard library package
-├── src/            # its modules (lib.hv is the entry point / prelude)
-└── c/              # C runtime
+├── dsp/            # DSP-related modules
+├── plug/           # CLAP plugin framework modules
+└── std/            # its modules (lib.hv is the entry point / prelude)
 ```
 
 ## License
