@@ -436,9 +436,6 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
         }
 
         // use fat pointer struct for slices
-        ExprNode::Slice(elements) if elements.len() == 0 => {
-            todo!()
-        },
         ExprNode::Slice(elements) => {
             let (ty, is_fixed) = match cx.node_types[&expr.id].clone() {
                 Type::Slice(inner) => (*inner, false),
