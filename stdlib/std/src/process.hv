@@ -84,9 +84,9 @@ pub proc run(program: str, args: Vec<str>) Result<i32, ProcError> {
     let argv: *str = args.as_ptr();
     let e: i32 = rt_proc_run(program, argv, n, &code);
     if (e != 0i32) {
-        return Result::Err::<i32, ProcError>(ProcError { code: e });
+        return Result::Err(ProcError { code: e });
     }
-    return Result::Ok::<i32, ProcError>(code);
+    return Result::Ok(code);
 }
 
 /// Run `program` (searched on `PATH`) with `args`, capturing its stdout and
@@ -104,9 +104,9 @@ pub proc capture(program: str, args: Vec<str>) Result<Output, ProcError> {
     let e: i32 = rt_proc_capture(program, argv, n, &code,
                                  &out_ptr, &out_len, &err_ptr, &err_len);
     if (e != 0i32) {
-        return Result::Err::<Output, ProcError>(ProcError { code: e });
+        return Result::Err(ProcError { code: e });
     }
-    return Result::Ok::<Output, ProcError>(Output {
+    return Result::Ok(Output {
         code:   code,
         stdout: adopt(out_ptr, out_len),
         stderr: adopt(err_ptr, err_len),

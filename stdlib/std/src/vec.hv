@@ -100,18 +100,18 @@ pub struct Vec<T> {
     /// `get_ptr` instead.
     pub proc get(*self, i: u64) Option<T> {
         if (i >= self.len) {
-            return Option::None::<T>();
+            return Option::None;
         }
-        return Option::Some::<T>(self.data[i]);
+        return Option::Some(self.data[i]);
     }
 
     /// A pointer to the element at `i`, for in-place mutation of the slot, or
     /// `none` when `i` is out of bounds.
     pub proc get_ptr(*self, i: u64) Option<*T> {
         if (i >= self.len) {
-            return Option::None::<*T>();
+            return Option::None;
         }
-        return Option::Some::<*T>(&self.data[i]);
+        return Option::Some(&self.data[i]);
     }
 
     /// The raw base pointer of the buffer (element 0), or null when the Vec has
@@ -136,10 +136,10 @@ pub struct Vec<T> {
     /// The pointer is valid until the next push or free.
     pub proc pop(*self) Option<*T> {
         if (self.len == 0u64) {
-            return Option::None::<*T>();
+            return Option::None;
         }
         self.len = self.len - 1u64;
-        return Option::Some::<*T>(&self.data[self.len]);
+        return Option::Some(&self.data[self.len]);
     }
 
     /// Empty the Vec, destroying its elements but keeping the buffer and capacity.
@@ -199,11 +199,11 @@ extend VecIter<T>: Iterator {
     type Item = *T;
     proc next(*self) Option<*T> {
         if (self.pos >= self.vec.len()) {
-            return Option::None::<*T>();
+            return Option::None;
         }
         let p: *T = self.vec.get_ptr(self.pos).unwrap();
         self.pos = self.pos + 1u64;
-        return Option::Some::<*T>(p);
+        return Option::Some(p);
     }
 }
 

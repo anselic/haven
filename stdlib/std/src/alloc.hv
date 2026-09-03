@@ -22,9 +22,9 @@ extern rt_free(ptr: *void) void;
 pub proc alloc<T>(count: u64) Option<*T> {
     let ptr: *void = rt_alloc(count * sizeof::<T>());
     if (ptr == null::<*void>()) {
-        return Option::None::<*T>();
+        return Option::None;
     }
-    return Option::Some::<*T>(ptr_cast::<*T>(ptr));
+    return Option::Some(ptr_cast::<*T>(ptr));
 }
 
 /// Resize the allocation at `ptr` to hold `count` values of type `T`, preserving
@@ -34,9 +34,9 @@ pub proc alloc<T>(count: u64) Option<*T> {
 pub proc realloc<T>(ptr: *T, count: u64) Option<*T> {
     let new_ptr: *void = rt_realloc(ptr_cast::<*void>(ptr), count * sizeof::<T>());
     if (new_ptr == null::<*void>()) {
-        return Option::None::<*T>();
+        return Option::None;
     }
-    return Option::Some::<*T>(ptr_cast::<*T>(new_ptr));
+    return Option::Some(ptr_cast::<*T>(new_ptr));
 }
 
 /// Release an allocation obtained from `alloc`/`realloc`. Using `ptr` afterward

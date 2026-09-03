@@ -70,8 +70,8 @@ pub enum Result<T, E> {
     /// (the receiver fixes `T` and `E`), so write it as a turbofish: `r.map::<U>(f)`.
     pub proc map<U>(self, f: proc(T) U) Result<U, E> {
         match (self) {
-            Result::Ok(v)  -> { return Result::Ok::<U, E>(f(v)); }
-            Result::Err(e) -> { return Result::Err::<U, E>(e); }
+            Result::Ok(v)  -> { return Result::Ok(f(v)); }
+            Result::Err(e) -> { return Result::Err(e); }
         }
     }
 
@@ -79,8 +79,8 @@ pub enum Result<T, E> {
     /// of `map`; written with a turbofish for the new error type: `r.map_err::<F>(f)`.
     pub proc map_err<F>(self, f: proc(E) F) Result<T, F> {
         match (self) {
-            Result::Ok(v)  -> { return Result::Ok::<T, F>(v); }
-            Result::Err(e) -> { return Result::Err::<T, F>(f(e)); }
+            Result::Ok(v)  -> { return Result::Ok(v); }
+            Result::Err(e) -> { return Result::Err(f(e)); }
         }
     }
 
@@ -90,7 +90,7 @@ pub enum Result<T, E> {
     pub proc and_then<U>(self, f: proc(T) Result<U, E>) Result<U, E> {
         match (self) {
             Result::Ok(v)  -> { return f(v); }
-            Result::Err(e) -> { return Result::Err::<U, E>(e); }
+            Result::Err(e) -> { return Result::Err(e); }
         }
     }
 }

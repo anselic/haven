@@ -59,8 +59,8 @@ pub enum Option<T> {
     /// receiver fixes `T`), so write it as a turbofish: `o.map::<U>(f)`.
     pub proc map<U>(self, f: proc(T) U) Option<U> {
         match (self) {
-            Option::Some(v) -> { return Option::Some::<U>(f(v)); }
-            Option::None    -> { return Option::None::<U>(); }
+            Option::Some(v) -> { return Option::Some(f(v)); }
+            Option::None    -> { return Option::None; }
         }
     }
 
@@ -70,7 +70,7 @@ pub enum Option<T> {
     pub proc and_then<U>(self, f: proc(T) Option<U>) Option<U> {
         match (self) {
             Option::Some(v) -> { return f(v); }
-            Option::None    -> { return Option::None::<U>(); }
+            Option::None    -> { return Option::None; }
         }
     }
 }

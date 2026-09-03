@@ -58,12 +58,12 @@ pub proc read(path: str) Result<String, FsError> {
     let err: i32 = 0i32;
     let buf: *u8 = rt_fs_read(path, &len, &err);
     if (buf == null::<*u8>()) {
-        return Result::Err::<String, FsError>(FsError { code: err });
+        return Result::Err(FsError { code: err });
     }
     // adopt the malloc'd buffer directly: `len` bytes are live, and the shim over-
     // allocated one byte for the NUL, so the true capacity is at least `len + 1`.
     let bytes: Vec<u8> = Vec::<u8>::from_raw_parts(buf, len, len + 1u64);
-    return Result::Ok::<String, FsError>(String::from_bytes(bytes));
+    return Result::Ok(String::from_bytes(bytes));
 }
 
 /// Write the bytes of `contents` to `path`, creating it or truncating an existing
@@ -73,9 +73,9 @@ pub proc write(path: str, contents: *String) Result<u64, FsError> {
     let data: *u8 = contents.as_bytes();
     let e: i32 = rt_fs_write(path, data, contents.len(), &written);
     if (e != 0i32) {
-        return Result::Err::<u64, FsError>(FsError { code: e });
+        return Result::Err(FsError { code: e });
     }
-    return Result::Ok::<u64, FsError>(written);
+    return Result::Ok(written);
 }
 
 /// Copy the file `src` to `dst`, creating or truncating `dst`. On success yields
@@ -84,9 +84,9 @@ pub proc copy(src: str, dst: str) Result<u64, FsError> {
     let bytes: u64 = 0u64;
     let e: i32 = rt_fs_copy(src, dst, &bytes);
     if (e != 0i32) {
-        return Result::Err::<u64, FsError>(FsError { code: e });
+        return Result::Err(FsError { code: e });
     }
-    return Result::Ok::<u64, FsError>(bytes);
+    return Result::Ok(bytes);
 }
 
 /// Create the directory `path`. Fails if it already exists or a parent is
@@ -94,9 +94,9 @@ pub proc copy(src: str, dst: str) Result<u64, FsError> {
 pub proc mkdir(path: str) Result<Unit, FsError> {
     let e: i32 = rt_fs_mkdir(path);
     if (e != 0i32) {
-        return Result::Err::<Unit, FsError>(FsError { code: e });
+        return Result::Err(FsError { code: e });
     }
-    return Result::Ok::<Unit, FsError>(Unit::Unit);
+    return Result::Ok(Unit::Unit);
 }
 
 /// Create the directory `path` and any missing parents, like Rust's
@@ -139,31 +139,31 @@ pub proc mkdir_all(path: str) Result<Unit, FsError> {
             Result::Ok(_)  -> {}
             Result::Err(e) -> {
                 if (!is_dir(acc.as_str())) {
-                    return Result::Err::<Unit, FsError>(e);
+                    return Result::Err(e);
                 }
             }
         }
         i = i + 1u64;
     }
-    return Result::Ok::<Unit, FsError>(Unit::Unit);
+    return Result::Ok(Unit::Unit);
 }
 
 /// Remove the file or empty directory at `path`.
 pub proc remove(path: str) Result<Unit, FsError> {
     let e: i32 = rt_fs_remove(path);
     if (e != 0i32) {
-        return Result::Err::<Unit, FsError>(FsError { code: e });
+        return Result::Err(FsError { code: e });
     }
-    return Result::Ok::<Unit, FsError>(Unit::Unit);
+    return Result::Ok(Unit::Unit);
 }
 
 /// Rename (or move) `src` to `dst`.
 pub proc rename(src: str, dst: str) Result<Unit, FsError> {
     let e: i32 = rt_fs_rename(src, dst);
     if (e != 0i32) {
-        return Result::Err::<Unit, FsError>(FsError { code: e });
+        return Result::Err(FsError { code: e });
     }
-    return Result::Ok::<Unit, FsError>(Unit::Unit);
+    return Result::Ok(Unit::Unit);
 }
 
 /// Whether anything (file or directory) exists at `path`.
