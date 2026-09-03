@@ -1,0 +1,112 @@
+// Type arguments a generic enum constructor leaves out are inferred, from one
+// of two places. A constructor in a position that already expects the enum
+// takes the expected type's arguments: `let x: Option<i32> = Option::None;`,
+// `return Option::None;`, a call argument, a struct field. That is the only
+// thing that can determine a unit variant's (a bare path has no turbofish
+// syntax, and `None()` has no payload to look at). A constructor with nothing
+// around it recovers them from its payload instead, the way a bare generic
+// call recovers a callee's from its arguments: `let x = Option::Some(5);` is an
+// `Option<i32>`.
+//
+// The expectation wins over the payload where both are available, so a
+// width-less literal in the payload takes the width the context asks for: the
+// `42` in `let x: Option<i64> = Option::Some(42);` is an `i64`. A written
+// turbofish wins over both.
+
+enum Option<T> { None, Some(T) }
+enum Res<T> { Ok { val: T }, Err { code: i32 } }
+
+struct Holder { slot: Option<i32> }
+
+proc unwrap_or(o: Option<i32>, default: i32) i32 {
+    match (o) {
+        Option::Some(v) -> { return v; }
+        Option::None -> { return default; }
+    }
+}
+
+proc unwrap_or64(o: Option<i64>, default: i64) i64 {
+    match (o) {
+        Option::Some(v) -> { return v; }
+        Option::None -> { return default; }
+    }
+}
+
+proc pick<T>(o: Option<T>, default: T) T {
+    match (o) {
+        Option::Some(v) -> { return v; }
+        Option::None -> { return default; }
+    }
+}
+
+proc show_res(r: Res<i32>) i32 {
+    match (r) {
+        Res::Ok { val } -> { return val; }
+        Res::Err { code } -> { return 0 - code; }
+    }
+}
+
+// return position: the proc's return type is the expectation, for both the
+// tuple variant and the bare unit one.
+proc find(x: i32) Option<i32> {
+    if (x > 0) { return Option::Some(x); }
+    return Option::None;
+}
+
+// inside a generic body the expectation is `Option<T>`, `T` being the
+// enclosing proc's own parameter; mono substitutes it exactly as it would a
+// forwarded turbofish `Option::Some::<T>(x)`.
+proc wrap<T>(x: T) Option<T> { return Option::Some(x); }
+
+@export
+proc main() i32 {
+    // the annotation supplies the arguments; `None` in both spellings.
+    let a: Option<i32> = Option::Some(42);
+    let b: Option<i32> = Option::None;
+    let c: Option<i32> = Option::None();
+    println(unwrap_or(a, -1)); // 42
+    println(unwrap_or(b, -1)); // -1
+    println(unwrap_or(c, -1)); // -1
+
+    // the width-less literal takes the width the expectation asks for.
+    let w: Option<i64> = Option::Some(42);
+    println(unwrap_or64(w, 0i64) + 4000000000i64); // 4000000042
+
+    // no expectation: the payload decides.
+    let d = Option::Some(5);
+    println(unwrap_or(d, -1)); // 5
+    let f = Option::Some(2.5f32);
+    println(numerical_cast::<i32>(pick::<f32>(f, 0.0f32))); // 2
+
+    // a return, a call argument, a struct field.
+    println(unwrap_or(find(9), -1));  // 9
+    println(unwrap_or(find(-9), -1)); // -1
+    println(unwrap_or(Option::Some(3), -1)); // 3
+    let h: Holder = Holder { slot: Option::Some(8) };
+    println(unwrap_or(h.slot, -1)); // 8
+
+    // through a generic body's own `T`.
+    println(pick::<i32>(wrap::<i32>(11), -1)); // 11
+
+    // struct-style variants: the expectation determines `T` where the payload
+    // cannot (`Err` never mentions it), and the payload does where there is no
+    // expectation.
+    let e: Res<i32> = Res::Err { code: 4 };
+    let ok = Res::Ok { val: 6 };
+    println(show_res(e));  // -4
+    println(show_res(ok)); // 6
+
+    // nested: the outer expectation reaches the inner constructor through the
+    // substituted payload type (`Option<Option<i32>>` asks `Option<i32>` of it).
+    let n: Option<Option<i32>> = Option::Some(Option::Some(99));
+    match (n) {
+        Option::Some(inner) -> { println(unwrap_or(inner, -1)); } // 99
+        Option::None -> { println(-2); }
+    }
+
+    // a written turbofish still wins.
+    let x: Option<i64> = Option::Some::<i64>(1);
+    println(unwrap_or64(x, 0i64)); // 1
+
+    return 0;
+}

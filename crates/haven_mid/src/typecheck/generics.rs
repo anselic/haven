@@ -408,6 +408,43 @@ pub(crate) fn infer_struct_type_args<'a>(
     materialize_targs(name, params, &u.types, &u.consts, TargSite::StructLit, span)
 }
 
+/// Recover a generic enum's type arguments from the values a constructor gives
+/// its variant's payload, for a constructor written without a turbofish and
+/// with nothing around it to say what it should be (`let x = Option::Some(5);`
+/// rather than `Option::Some::<i32>(5)`).
+///
+/// The enum counterpart of [`infer_struct_type_args`], and the same shape: each
+/// payload field type is a pattern over the enum's params, unified against the
+/// inferred type of the value given for it. `Some(T)` against an `i32` binds
+/// `T = i32`. `payload` pairs each declared field type with the expression
+/// written for it, in declaration order; the tuple and struct-style forms both
+/// reduce to that.
+///
+/// This is the fallback, not the main road: a constructor in a position with an
+/// expectation (`let x: Option<i64> = ..`, `return None`) takes its arguments
+/// from that type instead, which is the only thing that can determine a unit
+/// variant's, and lets a width-less literal in the payload take the width the
+/// context asks for. A unit variant reaching here has no values to look at, so
+/// every param goes unbound and the error says so.
+pub(crate) fn infer_enum_type_args<'a>(
+    cx: &mut Context<'a>,
+    name: &str,
+    params: &[GenericParam<'a>],
+    payload: &[(&Type<'a>, &Expr<'a>)],
+    site: TargSite,
+    span: &Span,
+) -> Result<Vec<GenericArg<'a>>, Error> {
+    let pnames = param_names(params);
+    let mut u = Unified::default();
+    for (def_ty, value) in payload {
+        if !mentions_param(def_ty, &pnames) { continue; }
+        let Ok(arg_ty) = infer(cx, value) else { continue };
+        unify(def_ty, &arg_ty, &pnames, &mut u);
+    }
+    check_bounds(cx, name, params, &u.types, span)?;
+    materialize_targs(name, params, &u.types, &u.consts, site, span)
+}
+
 /// Whether `ty` mentions any of `params` anywhere inside it.
 fn mentions_param<'a>(ty: &Type<'a>, params: &[&'a str]) -> bool {
     match ty {
@@ -428,11 +465,13 @@ fn mentions_param<'a>(ty: &Type<'a>, params: &[&'a str]) -> bool {
 }
 
 /// Which syntax the args were being recovered from, so an "unbound parameter"
-/// message can name what the reader actually wrote. The two differ only in
+/// message can name what the reader actually wrote. They differ only in
 /// wording; a call is inferred from arguments and spelled with parentheses, a
-/// literal from field values and spelled with braces.
+/// literal from field values and spelled with braces, and a unit variant has
+/// nothing to infer from at all, so the only ways out are an annotation on
+/// whatever it is assigned to or a written turbofish.
 #[derive(Clone, Copy)]
-pub(crate) enum TargSite { Call, StructLit }
+pub(crate) enum TargSite { Call, StructLit, UnitVariant }
 
 impl TargSite {
     /// What failed to determine the parameter.
@@ -440,6 +479,7 @@ impl TargSite {
         match self {
             TargSite::Call => "not determined by these arguments",
             TargSite::StructLit => "not determined by these field values",
+            TargSite::UnitVariant => "a unit variant carries nothing to infer it from",
         }
     }
     /// How to write the turbofish explicitly instead.
@@ -448,6 +488,9 @@ impl TargSite {
             TargSite::Call => format!("specify it explicitly, e.g. `{}::<...>(...)`", name),
             TargSite::StructLit =>
                 format!("specify it explicitly, e.g. `{}::<...> {{ ... }}`", name),
+            TargSite::UnitVariant => format!(
+                "annotate what it is assigned to (`let x: E<..> = ...`), or specify it \
+                 explicitly, e.g. `{}::<...>()`", name),
         }
     }
 }

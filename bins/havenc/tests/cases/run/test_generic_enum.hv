@@ -1,6 +1,6 @@
 // Stage-3 Phase 3: generic data-carrying enums (`enum Option<T> { None, Some(T) }`).
-// Construction (tuple + unit variants, with required turbofish - no context
-// inference yet, matching plain generic structs), `match`-binding both from an
+// Construction (tuple + unit variants, with an explicit turbofish; inference
+// of omitted arguments is `test_generic_enum_infer`), `match`-binding both from an
 // ordinary function and from INSIDE a generic function's own body (exercising
 // mono's payload-type substitution and its match-pattern-qualifier handling),
 // distinct monomorphized instances at different type args not colliding, and

@@ -952,10 +952,31 @@ impl<'p, 'a> Mono<'p, 'a> {
                 Some(cb) => const_literal(cb),
                 None => ExprNode::Var(name),
             },
-            // a unit enum variant. A generic enum's is only reachable through the
-            // call form (`Option::None::<i32>()`), handled in the `Call` arm above,
-            // so nothing here needs substituting.
-            ExprNode::Path(path) => ExprNode::Path(path.clone()),
+            // a unit enum variant. A bare path has no turbofish syntax, so a
+            // generic enum's is only reachable here when the typechecker took
+            // its arguments from the surrounding expectation (`let x: Option<i32>
+            // = Option::None;`) and recorded them under the node id: mangle to
+            // that instance and rewrite the enum segment to it, exactly as the
+            // `Call` arm does for `Option::None::<i32>()`. Any other path is
+            // copied through.
+            ExprNode::Path(path) => {
+                match self.inferred_type_args.get(&expr.id)
+                    .filter(|_| self.enum_templates.contains_key(&path.def))
+                {
+                    Some(targs) => {
+                        let concrete: Vec<ConcreteArg<'a>> = targs.iter()
+                            .map(|ga| match self.subst_targ(ga, b) {
+                                GenericArg::Type(t) => ConcreteArg::Type(t),
+                                GenericArg::Const(cv) => ConcreteArg::Const(cv.expect_lit()),
+                            }).collect();
+                        let inst = self.request_enum(path.def, concrete);
+                        let mut new_path = path.clone();
+                        new_path.def = inst;
+                        ExprNode::Path(new_path)
+                    }
+                    None => ExprNode::Path(path.clone()),
+                }
+            }
         };
         Metadata::new(node, expr.span.clone())
     }

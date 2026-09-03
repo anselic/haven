@@ -1,10 +1,11 @@
-//@ error: enum 'Option' is generic
-// a bare unit variant of a generic enum can never carry a turbofish (a `Var`
-// has no `::<...>` syntax) - must use the call form `Option::None::<i32>()`.
+//@ error: cannot infer type argument `T` for `Option::None`
+// a bare unit variant of a generic enum has no payload to infer `T` from and no
+// syntax for a turbofish, so it needs an expectation to take `T` from. With
+// nothing around it (`let a = ...` with no annotation) there is none.
 enum Option<T> { None, Some(T) }
 
 @export
 proc main() i32 {
-    let a: Option<i32> = Option::None;
+    let a = Option::None;
     return 0;
 }

@@ -1,0 +1,11 @@
+//@ error: cannot infer type argument `T` for `Option::None`
+// the call form of a unit variant is no better off than the bare path when
+// nothing expects the enum: `None()` has no arguments to infer `T` from. The
+// turbofish (`Option::None::<i32>()`) or an annotation is required.
+enum Option<T> { None, Some(T) }
+
+@export
+proc main() i32 {
+    let a = Option::None();
+    return 0;
+}

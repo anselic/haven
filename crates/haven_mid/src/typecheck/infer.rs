@@ -3,7 +3,7 @@ use haven_common::ast::*;
 use crate::intrinsics::Intrinsic;
 use haven_common::defs::{DefId, Member};
 use super::context::{Context, MethodCall, RecvAdjust};
-use super::generics::{bind_generics, bind_turbofish, check_bounds, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self, infer_struct_type_args};
+use super::generics::{bind_generics, bind_turbofish, check_bounds, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self, infer_struct_type_args, infer_enum_type_args, TargSite};
 use super::enums::{enum_variant, split_enum_variant, enum_variant_ctor, check_variant_pattern};
 
 
@@ -582,6 +582,201 @@ fn binary_operand_ty<'a>(
     }
 }
 
+/// The type arguments a generic enum's constructor is built with, and the
+/// substitutions they induce. Three sources, in order of authority: an explicit
+/// turbofish always wins; a constructor without one takes the arguments of the
+/// type its position expects (`hint`, from `check_expr`); failing that, they
+/// are recovered from the values the constructor gives its payload, the way a
+/// bare generic call recovers a callee's from its arguments. Whatever was not
+/// written is recorded under the node id for mono, which reads that alongside
+/// an empty turbofish exactly as it does for a bare generic call.
+///
+/// A non-generic enum takes no arguments and rejects any it is given.
+fn enum_ctor_targs<'a>(
+    cx: &mut Context<'a>,
+    node_id: usize,
+    ename: DefId,
+    ctor: &NameRef<'a>,
+    type_args: &[GenericArg<'a>],
+    hint: Option<&[GenericArg<'a>]>,
+    payload: &[(&Type<'a>, &Expr<'a>)],
+    site: TargSite,
+    span: &Span,
+) -> Result<(HashMap<&'a str, Type<'a>>, HashMap<&'a str, ConstVal<'a>>, Vec<GenericArg<'a>>), Error> {
+    let Some(params) = cx.generic_enums.get(&ename).cloned() else {
+        if !type_args.is_empty() {
+            return Err(Error::new(span.clone(), format!(
+                "enum constructor '{}' takes no type arguments", ctor)));
+        }
+        return Ok((HashMap::new(), HashMap::new(), Vec::new()));
+    };
+    let args: Vec<GenericArg<'a>> = if !type_args.is_empty() {
+        type_args.to_vec()
+    } else {
+        let inferred = match hint {
+            Some(hint) => hint.to_vec(),
+            None => infer_enum_type_args(cx, &ctor.to_string(), &params, payload, site, span)?,
+        };
+        cx.inferred_type_args.insert(node_id, inferred.clone());
+        inferred
+    };
+    bind_struct_generics(cx, &cx.name_of(ename), &params, &args, span)
+}
+
+/// A tuple or unit variant constructor call, `E::V(args)`: arity, then each
+/// argument against its (substituted) payload field type, yielding the enum
+/// type with its concrete arguments.
+fn check_enum_call_ctor<'a>(
+    cx: &mut Context<'a>,
+    expr: &Expr<'a>,
+    cname: &NameRef<'a>,
+    ename: DefId,
+    payload_tys: &[Type<'a>],
+    type_args: &[GenericArg<'a>],
+    args: &[Expr<'a>],
+    hint: Option<&[GenericArg<'a>]>,
+    span: &Span,
+) -> Result<Type<'a>, Error> {
+    // arity first: inference pairs payload types with arguments positionally.
+    if args.len() != payload_tys.len() {
+        return Err(Error::new(span.clone(), format!("variant '{}' expects {} field(s), got {}",
+            cname, payload_tys.len(), args.len())));
+    }
+    let payload: Vec<(&Type<'a>, &Expr<'a>)> = payload_tys.iter().zip(args).collect();
+    let site = if payload.is_empty() { TargSite::UnitVariant } else { TargSite::Call };
+    let (type_subst, const_subst, resolved_args) =
+        enum_ctor_targs(cx, expr.id, ename, cname, type_args, hint, &payload, site, span)?;
+    for (pty, arg) in payload_tys.iter().zip(args) {
+        let expected = subst_param_type(&type_subst, &const_subst, pty);
+        check_expr(cx, &expected, arg)?;
+    }
+    let ty = Type::Named { def: ename, args: resolved_args };
+    cx.node_types.insert(expr.id, ty.clone());
+    Ok(ty)
+}
+
+/// A struct-style variant constructor, `E::V { id: .., val: .. }`: it looks
+/// like a struct literal but names a variant, so the literal is checked against
+/// the variant's payload struct - every field, in declaration order - and
+/// yields the enum type with its concrete arguments.
+fn check_enum_struct_ctor<'a>(
+    cx: &mut Context<'a>,
+    expr: &Expr<'a>,
+    name: &NameRef<'a>,
+    ename: DefId,
+    variant: &'a str,
+    type_args: &[GenericArg<'a>],
+    fields: &[(&'a str, Expr<'a>)],
+    hint: Option<&[GenericArg<'a>]>,
+    span: &Span,
+) -> Result<Type<'a>, Error> {
+    let pstruct = cx.payloads[&(ename, variant)];
+    let pdef = match cx.types.get(&pstruct) {
+        Some(d) if !d.fields.is_empty() => d.fields.clone(),
+        _ => return Err(Error::new(span.clone(), format!("variant '{}' has no fields", name))
+            .with_note(format!("construct it as `{}`", name))),
+    };
+    // a tuple variant's fields are named "0", "1", ...; those can't be
+    // written in a `{ }` literal, so point the user at the `( )` form.
+    if pdef.first().is_some_and(|(n, _)| n.bytes().all(|b| b.is_ascii_digit())) {
+        return Err(Error::new(span.clone(), format!("variant '{}' is a tuple variant", name))
+            .with_note(format!("construct it with `{}(...)`", name)));
+    }
+    if fields.len() != pdef.len() {
+        return Err(Error::new(span.clone(), format!("variant '{}' expects {} field(s), got {}",
+            name, pdef.len(), fields.len())));
+    }
+    // fields pair with the declaration positionally for inference, up to the
+    // first misnamed one; that one is reported by the per-field check below.
+    let payload: Vec<(&Type<'a>, &Expr<'a>)> = pdef.iter().zip(fields)
+        .take_while(|((dn, _), (ln, _))| dn == ln)
+        .map(|((_, dt), (_, lv))| (dt, lv))
+        .collect();
+    let (type_subst, const_subst, resolved_args) =
+        enum_ctor_targs(cx, expr.id, ename, name, type_args, hint, &payload, TargSite::StructLit, span)?;
+    // field order must match the declaration (same rule as a struct
+    // literal); each field checks against its (param-substituted)
+    // declared payload type.
+    for ((def_name, def_ty), (lit_name, lit_value)) in pdef.iter().zip(fields.iter()) {
+        if def_name != lit_name {
+            return Err(Error::new(lit_value.span.clone(), format!(
+                "In variant '{}': expected field '{}', got '{}'",
+                name, def_name, lit_name)));
+        }
+        let expected = subst_param_type(&type_subst, &const_subst, def_ty);
+        check_expr(cx, &expected, lit_value)?;
+    }
+    let ty = Type::Named { def: ename, args: resolved_args };
+    cx.node_types.insert(expr.id, ty.clone());
+    Ok(ty)
+}
+
+/// A bare `Enum::Variant` used as a value. A unit variant is one: a field-less
+/// enum's scalar discriminant, or (for a data enum) an aggregate with no
+/// payload. A tuple/struct variant used bare is a missing constructor call -
+/// `Msg::Note` needs `Msg::Note(...)`.
+///
+/// A bare path has no syntax to attach a turbofish, so a generic enum's unit
+/// variant is only writable this way where the context supplies the arguments
+/// (`let x: Option<i32> = Option::None;`); anywhere else it needs the call form
+/// with a turbofish, `Option::None::<i32>()`, and the error says so.
+fn check_enum_unit_path<'a>(
+    cx: &mut Context<'a>,
+    expr: &Expr<'a>,
+    path: &NameRef<'a>,
+    ename: DefId,
+    hint: Option<&[GenericArg<'a>]>,
+    span: &Span,
+) -> Result<Type<'a>, Error> {
+    let variant = path.variant();
+    if cx.enums[&ename].payloads.get(variant).is_some_and(|p| !p.is_empty()) {
+        return Err(Error::new(span.clone(), format!("variant '{}' carries a payload", path))
+            .with_note(format!("construct it with `{}(...)`", path)));
+    }
+    let (_, _, resolved_args) =
+        enum_ctor_targs(cx, expr.id, ename, path, &[], hint, &[], TargSite::UnitVariant, span)?;
+    Ok(Type::Named { def: ename, args: resolved_args })
+}
+
+/// A generic enum's constructor, written without a turbofish, in a position
+/// that expects that very enum: the expected type's arguments are the
+/// constructor's, so `Option::None` under `let x: Option<i32>` is
+/// `Option::None::<i32>()`, and the `42` in `Option::Some(42)` under
+/// `Option<i64>` is an `i64`, as a width-less literal under a plain `i64`
+/// would be. Returns `None` for any other expression, or a constructor of a
+/// different enum, or one that already carries its own turbofish, so the caller
+/// falls back to `infer` and the ordinary comparison.
+fn enum_ctor_with_hint<'a>(
+    cx: &mut Context<'a>,
+    expected: &Type<'a>,
+    expr: &Expr<'a>,
+) -> Result<Option<Type<'a>>, Error> {
+    let Type::Named { def: want, args: hint } = expected else { return Ok(None) };
+    if !cx.generic_enums.contains_key(want) { return Ok(None); }
+    let span = expr.span.clone();
+    match &expr.value {
+        ExprNode::Call { func, type_args, args } if type_args.is_empty() => {
+            let ExprNode::Path(cname) = &func.value else { return Ok(None) };
+            let Some((ename, payload_tys)) = enum_variant_ctor(cx, cname) else { return Ok(None) };
+            if ename != *want { return Ok(None); }
+            check_enum_call_ctor(cx, expr, cname, ename, &payload_tys, type_args, args, Some(hint), &span)
+                .map(Some)
+        }
+        ExprNode::Struct { name, type_args, fields } if type_args.is_empty() => {
+            let Some((ename, variant)) = split_enum_variant(cx, name) else { return Ok(None) };
+            if ename != *want { return Ok(None); }
+            check_enum_struct_ctor(cx, expr, name, ename, variant, type_args, fields, Some(hint), &span)
+                .map(Some)
+        }
+        ExprNode::Path(path) => {
+            let Some((ename, _, _)) = enum_variant(cx, path) else { return Ok(None) };
+            if ename != *want { return Ok(None); }
+            check_enum_unit_path(cx, expr, path, ename, Some(hint), &span).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn check_expr<'a>(
     cx: &mut Context<'a>,
     expected: &Type<'a>,
@@ -659,7 +854,14 @@ pub(crate) fn check_expr<'a>(
             }
         },
 
-        _ => infer(cx, expr)?,
+        // a generic enum's constructor in a position that already knows which
+        // instance it wants takes its type arguments from there, which is what
+        // lets `let x: Option<i32> = Option::None;` say nothing twice. Anything
+        // else is inferred on its own and compared below.
+        _ => match enum_ctor_with_hint(cx, expected, expr)? {
+            Some(ty) => ty,
+            None => infer(cx, expr)?,
+        },
     };
 
     let compatible = actual == *expected ||
@@ -729,27 +931,10 @@ pub(crate) fn infer<'a>(
         // tuple/struct variant used bare is a missing constructor call -
         // `Msg::Note` needs `Msg::Note(...)`.
         ExprNode::Path(path) => {
-            let Some((ename, _val, repr)) = enum_variant(cx, path) else {
+            let Some((ename, _val, _repr)) = enum_variant(cx, path) else {
                 return Err(Error::new(span, format!("Undefined variable '{}'", path)));
             };
-            let variant = path.variant();
-            if cx.enums[&ename].payloads.get(variant).is_some_and(|p| !p.is_empty()) {
-                return Err(Error::new(span, format!("variant '{}' carries a payload", path))
-                    .with_note(format!("construct it with `{}(...)`", path)));
-            }
-            // a generic enum's variant can never be used bare - a bare path has no
-            // syntax to attach a turbofish, so even a unit variant needs the call
-            // form: `Option::None::<i32>()`.
-            if cx.generic_enums.contains_key(&ename) {
-                return Err(Error::new(span,
-                    format!("enum '{}' is generic", cx.name_of(ename)))
-                    .with_label(span, "missing type arguments")
-                    .with_note(format!(
-                        "a bare path has nowhere to put a turbofish, so even a unit \
-                         variant needs the call form: `{}::<...>()`", path)));
-            }
-            let _ = repr;
-            Type::named(ename)
+            check_enum_unit_path(cx, expr, path, ename, None, &span)?
         },
 
         ExprNode::Var(name) => {
@@ -923,59 +1108,7 @@ pub(crate) fn infer<'a>(
             // against the variant's payload struct and yield the aggregate enum
             // type. Guarded before ordinary struct-literal handling.
             if let Some((ename, variant)) = split_enum_variant(cx, name) {
-                // a generic enum's struct-style variant needs turbofish (no context
-                // inference yet, matching plain generic-struct construction); a
-                // non-generic one must NOT have any.
-                let (type_subst, const_subst, resolved_args) = match cx.generic_enums.get(&ename).cloned() {
-                    Some(params) => {
-                        if type_args.is_empty() {
-                            return Err(Error::new(span,
-                                format!("enum '{}' is generic", cx.name_of(ename)))
-                                .with_label(span, "missing type arguments")
-                                .with_note(format!(
-                                    "construct it as `{}::<...> {{ ... }}`", name)));
-                        }
-                        bind_struct_generics(cx, &cx.name_of(ename), &params, type_args, &span)?
-                    }
-                    None => {
-                        if !type_args.is_empty() {
-                            return Err(Error::new(span, format!(
-                                "enum constructor '{}' takes no type arguments", name)));
-                        }
-                        (HashMap::new(), HashMap::new(), Vec::new())
-                    }
-                };
-                let pstruct = cx.payloads[&(ename, variant)];
-                let pdef = match cx.types.get(&pstruct) {
-                    Some(d) if !d.fields.is_empty() => d.fields.clone(),
-                    _ => return Err(Error::new(span, format!("variant '{}' has no fields", name))
-                        .with_note(format!("construct it as `{}`", name))),
-                };
-                // a tuple variant's fields are named "0", "1", ...; those can't be
-                // written in a `{ }` literal, so point the user at the `( )` form.
-                if pdef.first().is_some_and(|(n, _)| n.bytes().all(|b| b.is_ascii_digit())) {
-                    return Err(Error::new(span, format!("variant '{}' is a tuple variant", name))
-                        .with_note(format!("construct it with `{}(...)`", name)));
-                }
-                if fields.len() != pdef.len() {
-                    return Err(Error::new(span, format!("variant '{}' expects {} field(s), got {}",
-                        name, pdef.len(), fields.len())));
-                }
-                // field order must match the declaration (same rule as a struct
-                // literal); each field checks against its (param-substituted)
-                // declared payload type.
-                for ((def_name, def_ty), (lit_name, lit_value)) in pdef.iter().zip(fields.iter()) {
-                    if def_name != lit_name {
-                        return Err(Error::new(lit_value.span.clone(), format!(
-                            "In variant '{}': expected field '{}', got '{}'",
-                            name, def_name, lit_name)));
-                    }
-                    let expected = subst_param_type(&type_subst, &const_subst, def_ty);
-                    check_expr(cx, &expected, lit_value)?;
-                }
-                let ty = Type::Named { def: ename, args: resolved_args };
-                cx.node_types.insert(expr.id, ty.clone());
-                return Ok(ty);
+                return check_enum_struct_ctor(cx, expr, name, ename, variant, type_args, fields, None, &span);
             }
 
             // the literal named an enum but not one of its variants. (A path with
@@ -1201,39 +1334,7 @@ pub(crate) fn infer<'a>(
             // and yield the aggregate enum type. Guarded before ordinary dispatch.
             if let ExprNode::Path(cname) = &func.value {
                 if let Some((ename, payload_tys)) = enum_variant_ctor(cx, cname) {
-                    // a generic enum's tuple/unit variant needs turbofish (no
-                    // context inference yet, matching plain generic-struct
-                    // construction); a non-generic one must NOT have any.
-                    let (type_subst, const_subst, resolved_args) = match cx.generic_enums.get(&ename).cloned() {
-                        Some(params) => {
-                            if type_args.is_empty() {
-                                return Err(Error::new(span,
-                                    format!("enum '{}' is generic", cx.name_of(ename)))
-                                    .with_label(span, "missing type arguments")
-                                    .with_note(format!(
-                                        "construct it as `{}::<...>(...)`", cname)));
-                            }
-                            bind_struct_generics(cx, &cx.name_of(ename), &params, type_args, &span)?
-                        }
-                        None => {
-                            if !type_args.is_empty() {
-                                return Err(Error::new(span, format!(
-                                    "enum constructor '{}' takes no type arguments", cname)));
-                            }
-                            (HashMap::new(), HashMap::new(), Vec::new())
-                        }
-                    };
-                    if args.len() != payload_tys.len() {
-                        return Err(Error::new(span, format!("variant '{}' expects {} field(s), got {}",
-                            cname, payload_tys.len(), args.len())));
-                    }
-                    for (pty, arg) in payload_tys.iter().zip(args.iter()) {
-                        let expected = subst_param_type(&type_subst, &const_subst, pty);
-                        check_expr(cx, &expected, arg)?;
-                    }
-                    let ty = Type::Named { def: ename, args: resolved_args };
-                    cx.node_types.insert(expr.id, ty.clone());
-                    return Ok(ty);
+                    return check_enum_call_ctor(cx, expr, cname, ename, &payload_tys, type_args, args, None, &span);
                 }
             }
             // user generic call (`foo::<T>(...)`) check against the generic sig

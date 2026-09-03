@@ -3,9 +3,11 @@
 //! startup, so these tests need no real bug and no real input.
 //!
 //! The contract: exit 101 (Rust's panic exit, so a parent can tell a crash from
-//! a diagnostic), a report that says it is a compiler bug and where to file it,
-//! and - under `--message-format json` - that report as one NDJSON line rather
-//! than free text in the stream.
+//! a diagnostic), a report that opens with an easter egg (picked at random,
+//! so nothing here depends on its text) and then leads with the panic message,
+//! says it is a compiler bug and where to file it, and - under
+//! `--message-format json` - that report as one NDJSON line rather than free
+//! text in the stream.
 
 use std::process::Command;
 
@@ -32,8 +34,11 @@ fn a_panic_exits_101_with_a_report_not_a_rust_backtrace() {
     assert_eq!(o.status.code(), Some(101), "a crash keeps Rust's panic exit code");
 
     let err = stderr(&o);
-    assert!(err.starts_with("internal compiler error: deliberate internal panic"),
-        "report should lead with the panic message; got:\n{err}");
+    let mut lines = err.lines();
+    // the first line is the easter egg so we can ignore it
+    let _ = lines.next().unwrap_or_default();
+    assert_eq!(lines.next(), Some("internal compiler error: deliberate internal panic (--internal-panic)"),
+        "the panic message should follow the easter egg; got:\n{err}");
     assert!(err.contains("havenc "), "the tool and version, for the bug report:\n{err}");
     assert!(err.contains("invoked as: ") && err.contains("--internal-panic"),
         "the invocation, for the bug report:\n{err}");

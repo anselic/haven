@@ -1,0 +1,12 @@
+//@ error: type mismatch
+//@ error: expected `i32`, got `f32`
+// the expectation supplies `T`, so the payload is checked against it: the
+// annotation says `Option<i32>`, and the error is about the `f32` payload, not
+// about `Option<f32>` versus `Option<i32>` as a whole.
+enum Option<T> { None, Some(T) }
+
+@export
+proc main() i32 {
+    let a: Option<i32> = Option::Some(2.5f32);
+    return 0;
+}
