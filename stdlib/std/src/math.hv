@@ -62,7 +62,10 @@ pub proc clampf(x: f64, lo: f64, hi: f64) f64 {
 /// Cube root of `x`.
 @alloc(false) pub extern cbrt(x: f64) f64;
 /// Absolute value of `x`.
-@alloc(false) pub extern fabs(x: f64) f64;
+// TODO: fix something about MSVC CRT `fabs`/`fabsf` so we can use an `extern`
+// here instead of a proc. But at -O2 it lowers to hardware sign-bit clear which
+// is close to what `llvm.fabs` do anyway
+@alloc(false) pub proc fabs(x: f64) f64 { if (x <= 0.0f64) { return 0.0f64 - x; } return x; }
 /// Largest integer value not greater than `x`, as an `f64`.
 @alloc(false) pub extern floor(x: f64) f64;
 /// Smallest integer value not less than `x`, as an `f64`.
@@ -98,7 +101,8 @@ pub proc clampf(x: f64, lo: f64, hi: f64) f64 {
 /// Square root of `x`, single precision. `x` must be non-negative.
 @alloc(false) pub extern sqrtf(x: f32) f32;
 /// Absolute value of `x`, single precision.
-@alloc(false) pub extern fabsf(x: f32) f32;
+// TODO: see `fabs` above
+@alloc(false) pub proc fabsf(x: f32) f32 { if (x <= 0.0f32) { return 0.0f32 - x; } return x; }
 /// Largest integer value not greater than `x`, single precision.
 @alloc(false) pub extern floorf(x: f32) f32;
 /// Smallest integer value not less than `x`, single precision.
