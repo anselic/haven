@@ -18,6 +18,7 @@ use std::process::{Command, ExitCode};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 mod config;
+mod git;
 
 use config::{Output, Project};
 
@@ -647,6 +648,8 @@ fn cmd_doc() -> Result<(), String> {
 enum Status {
     /// Created a new project, file, or directory.
     Created,
+    /// Fetching a git dependency into the cache.
+    Fetching,
     /// Compiling a project or dependency.
     Compiling,
     /// Finished compiling a project or dependency.
@@ -665,6 +668,7 @@ impl std::fmt::Display for Status {
 
         match self {
             Status::Created   => write!(f, "{:>width$}", "Created".green()),
+            Status::Fetching  => write!(f, "{:>width$}", "Fetching".cyan()),
             Status::Compiling => write!(f, "{:>width$}", "Compiling".blue()),
             Status::Finished  => write!(f, "{:>width$}", "Finished".green()),
             Status::Running   => write!(f, "{:>width$}", "Running".green()),

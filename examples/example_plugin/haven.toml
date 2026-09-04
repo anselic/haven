@@ -5,5 +5,5 @@ kind = ["cdylib"]
 build = "build.hv"
 
 [dependencies]
-plug = { path = "../../stdlib/plug" }
-dsp = { path = "../../stdlib/dsp" }
+plug = { git = "https://github.com/anselic/plug" }
+dsp = { git = "https://github.com/anselic/dsp" }

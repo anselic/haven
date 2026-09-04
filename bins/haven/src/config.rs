@@ -67,26 +67,63 @@ pub struct CTable {
 
 /// One entry of `[dependencies]`.
 ///
-/// Only the path form is understood in v1:
+/// Two forms are understood:
 ///
 /// ```toml
 /// [dependencies]
 /// example_lib = { path = "../example_lib" }
+/// remote_lib  = { git = "https://example.com/remote_lib.git", tag = "v1.2.0" }
 /// ```
 ///
 /// An inline *table* rather than a bare string deliberately: it is the shape that
 /// can grow a `version`/registry field later without breaking manifests written
 /// today. Anything else is captured by [`DepSpec::Other`] so the error can quote
 /// what was actually written instead of a serde type mismatch.
+///
+/// `untagged` picks the variant by which keys are present: `path` -> [`Path`],
+/// `git` -> [`Git`], anything else -> [`Other`]. `Other` must stay last, as it
+/// matches any value.
+///
+/// [`Path`]: DepSpec::Path
+/// [`Git`]: DepSpec::Git
+/// [`Other`]: DepSpec::Other
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum DepSpec {
     /// `{ path = "../example_lib" }` - a library on disk, relative to this
     /// manifest's directory.
     Path { path: String },
+    /// `{ git = "<url>", rev/tag/branch = "..." }` - a library in a git
+    /// repository, fetched into a global cache and then treated exactly like a
+    /// path dependency rooted at the checkout. See [`GitDep`] and
+    /// [`crate::git::checkout`].
+    Git(GitDep),
     /// Any other spelling; rejected by [`Project::dependencies`] with a message
-    /// naming the supported form.
+    /// naming the supported forms.
     Other(toml::Value),
+}
+
+/// A git dependency: a repository URL and, optionally, which commit to pin to.
+///
+/// At most one of `rev`/`tag`/`branch` may be given (enforced by
+/// [`crate::git::checkout`], not serde). None of them means the default branch's
+/// current tip. `rev` and `tag` name an immutable commit and so build
+/// reproducibly; `branch` (and the no-ref default) resolve afresh each build and
+/// draw a warning.
+#[derive(Debug, Deserialize)]
+pub struct GitDep {
+    /// The repository URL, passed verbatim to `git clone`. Any transport `git`
+    /// understands works, including a local path (which is what the tests use).
+    pub git: String,
+    /// Pin to an exact commit (a full or abbreviated SHA-1).
+    #[serde(default)]
+    pub rev: Option<String>,
+    /// Pin to a tag.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Track a branch's tip. Non-reproducible: re-resolved on every build.
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// A dependency after its manifest has been located, loaded and validated.
@@ -250,23 +287,27 @@ impl Project {
     pub fn dependencies(&self) -> Result<Vec<ResolvedDep>, String> {
         let mut out = Vec::new();
         for (name, spec) in &self.dependencies {
-            let rel = match spec {
-                DepSpec::Path { path } => path,
+            // Resolve the spec to a directory on disk. A git dependency is
+            // fetched into the global cache first; from here on it is
+            // indistinguishable from a path dependency rooted at its checkout.
+            let dir = match spec {
+                DepSpec::Path { path } => self.root.join(path),
+                DepSpec::Git(git) => crate::git::checkout(name, git)?,
                 DepSpec::Other(v) => {
                     return Err(format!(
                         "dependency `{}` is `{}`, which is not a supported form. \
-                         Use a path dependency, e.g. `{} = {{ path = \"../{}\" }}`; \
+                         Use a path dependency (`{} = {{ path = \"../{}\" }}`) or a \
+                         git dependency (`{} = {{ git = \"<url>\", tag = \"...\" }}`); \
                          version and registry dependencies do not exist yet",
-                        name, v, name, name));
+                        name, v, name, name, name));
                 }
             };
 
-            let dir = self.root.join(rel);
             let manifest = dir.join(MANIFEST);
             if !manifest.is_file() {
                 return Err(format!(
-                    "dependency `{}` has no `{}` at `{}` (path = \"{}\")",
-                    name, MANIFEST, dir.display(), rel));
+                    "dependency `{}` has no `{}` at `{}`",
+                    name, MANIFEST, dir.display()));
             }
             // canonicalize so the dependency's own artifact paths and build
             // output do not carry the `..` from the manifest's relative spelling.

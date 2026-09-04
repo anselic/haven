@@ -58,12 +58,18 @@ pub fn std_meta() -> &'static Path {
 }
 
 pub fn haven(cwd: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(HAVEN)
-        .current_dir(cwd)
-        .env("HAVEN_STD", std_meta())
-        .args(args)
-        .output()
-        .expect("failed to spawn haven")
+    haven_env(cwd, args, &[])
+}
+
+/// Like [`haven`], but with extra environment variables set on the process -
+/// used by the git-dependency suite to point `HAVEN_HOME` at a disposable cache.
+pub fn haven_env(cwd: &Path, args: &[&str], envs: &[(&str, &Path)]) -> std::process::Output {
+    let mut cmd = Command::new(HAVEN);
+    cmd.current_dir(cwd).env("HAVEN_STD", std_meta());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.args(args).output().expect("failed to spawn haven")
 }
 
 pub fn out(o: &std::process::Output) -> String {
