@@ -9,7 +9,7 @@ use clap::Parser;
 use haven_common::{ast, diag};
 use haven_common::defs::Origin;
 use haven_front::module;
-use haven_mid::{typecheck, mono, own, safecheck, mil};
+use haven_mid::{typecheck, mono, own, safecheck, reach, mil};
 use haven_back::llvm;
 
 mod args;
@@ -197,6 +197,11 @@ fn main() {
                 }
                 std::process::exit(1);
             });
+
+            // drop every function nothing reachable from an `@export` calls, so
+            // MIL/LLVM (and clang's parser) never see the unused bulk of `std`.
+            // Must follow ownership, the last pass that synthesizes calls.
+            reach::prune_unreachable(&mut mono_ast, &cx);
 
             let mil = mil::lower(&mono_ast, &cx, &defs, &arena);
             let llvm_ir = llvm::emit(mil);
