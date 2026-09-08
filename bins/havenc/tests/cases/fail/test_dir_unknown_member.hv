@@ -1,11 +1,10 @@
 // Walking into a namespace that exists but asking for a name it doesn't export.
-//@ error: is not exported by module 'clap::version'
-//@ dep: dsp=stdlib/dsp
-//@ dep: plug=stdlib/plug
+//@ error: is not exported by module 'shapes::rect'
+//@ dep: geom=bins/havenc/tests/pkgs/geom
 
-import plug/clap
+import geom/shapes
 
 @export
 proc main() i32 {
-    return clap::version::no_such_thing();
+    return shapes::rect::no_such_thing();
 }

@@ -1,0 +1,10 @@
+// A top-level module of the package: reached as `vec2::...` by a consumer that
+// does `import geom/vec2`.
+
+pub struct Vec2 { x: f64, y: f64 }
+
+extend Vec2 {
+    pub proc new(x: f64, y: f64) Self { return Self { x: x, y: y }; }
+
+    pub proc dot(*self, o: Vec2) f64 { return self.x * o.x + self.y * o.y; }
+}

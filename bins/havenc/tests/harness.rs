@@ -74,17 +74,18 @@ fn std_meta() -> &'static Path {
 }
 
 /// Built dependency artifacts, keyed by package dir relative to the repo root. A
-/// `//@ dep: name=stdlib/foo` fixture binds `foo.hvmeta`; several fixtures share
+/// `//@ dep: name=<pkgdir>` fixture binds `<name>.hvmeta`; several fixtures share
 /// one, so each is built once. The `TempDir`s are parked so the artifacts outlive
 /// the run.
 static DEP_METAS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
 static DEP_TMPS: OnceLock<Mutex<Vec<tempfile::TempDir>>> = OnceLock::new();
 
-/// Build the stdlib package at `<repo>/<pkgdir>` (e.g. `stdlib/plug`) into a
-/// `<name>.hvmeta` a fixture can bind with `--dep`, once per `pkgdir`. These
-/// packages' own modules do `import std/...`, so the build runs with `$HAVEN_STD`
-/// pointed at the harness's std artifact - the same discovery a real consumer
-/// build gets from the installed std.
+/// Build the package at `<repo>/<pkgdir>` (e.g. `bins/havenc/tests/pkgs/geom`)
+/// into a `<name>.hvmeta` a fixture can bind with `--dep`, once per `pkgdir`. The
+/// build runs with `$HAVEN_STD` pointed at the harness's std artifact - the same
+/// discovery a real consumer build gets from the installed std - so a package
+/// module may `import std/...`. Note there is no `--prelude`: a dep package gets
+/// std only through an explicit import, never implicitly.
 fn dep_meta(pkgdir: &str, name: &str, prior: &[(String, PathBuf)]) -> PathBuf {
     let cache = DEP_METAS.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(p) = cache.lock().unwrap().get(pkgdir) {
@@ -102,17 +103,15 @@ fn dep_meta(pkgdir: &str, name: &str, prior: &[(String, PathBuf)]) -> PathBuf {
         .args(["--lib", "--package-name", name])
         .arg("-o").arg(&meta)
         .env("HAVEN_STD", std_meta());
-    // A package built here may itself depend on an earlier `//@ dep:` entry (e.g.
-    // `plug` on `dsp`), so bind everything declared before it. The cache key is
-    // `pkgdir`, which assumes a package is always built with the same prior set -
-    // true for these fixtures.
+    // A package built here may itself depend on an earlier `//@ dep:` entry, so
+    // bind everything declared before it. The cache key is `pkgdir`, which assumes
+    // a package is always built with the same prior set - true for these fixtures.
     for (n, p) in prior {
         cmd.arg("--dep").arg(format!("{n}={}", p.display()));
     }
     // A package's `[[c]]` native sources ride into its `.hvmeta` for a consumer's
-    // leaf to link (dsp ships `c/denormal.c`, backing `rt_denormals_*`). The
-    // harness doesn't parse `haven.toml`, so it globs `<pkg>/c/*.c` - enough for
-    // the stdlib packages, whose C all lives there.
+    // leaf to link. The harness doesn't parse `haven.toml`, so it globs
+    // `<pkg>/c/*.c` - the convention every package in this repo follows.
     if let Ok(entries) = std::fs::read_dir(dir.join("c")) {
         let mut cfiles: Vec<PathBuf> = entries
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -184,11 +183,12 @@ fn run_case(path: &Path, mode: Mode) -> Result<(), Failed> {
         .arg(&out)
         // point the flagless fixture at the on-disk std the harness built.
         .env("HAVEN_STD", std_meta());
-    // `//@ dep: name=stdlib/foo` fixtures bind a standalone stdlib package (dsp,
-    // plug) the same way a consumer does. Build each in declaration order,
-    // threading the already-built ones in so a package that depends on an earlier
-    // one (plug -> dsp) resolves; then bind the whole set on the fixture's compile
-    // - the transitive closure a leaf needs, since a `.hvmeta` lists no deps.
+    // `//@ dep: name=<pkgdir>` fixtures bind a standalone package the same way a
+    // consumer does - see `tests/pkgs/` for the fixture packages. Build each in
+    // declaration order, threading the already-built ones in so a package that
+    // depends on an earlier one resolves; then bind the whole set on the fixture's
+    // compile - the transitive closure a leaf needs, since a `.hvmeta` lists no
+    // deps.
     let mut built: Vec<(String, PathBuf)> = Vec::new();
     for (name, pkgdir) in &directives.deps {
         let meta = dep_meta(pkgdir, name, &built);
@@ -277,7 +277,7 @@ fn run_case(path: &Path, mode: Mode) -> Result<(), Failed> {
 struct Directives {
     exit: ExitCheck,
     errors: Vec<String>,
-    /// `(package name, package dir relative to repo root)` from `//@ dep:` lines.
+    /// `(package name, package dir relative to the repo root)` from `//@ dep:` lines.
     deps: Vec<(String, String)>,
 }
 

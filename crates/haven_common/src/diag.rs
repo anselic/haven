@@ -556,7 +556,9 @@ mod tests {
     #[test]
     fn the_human_report_says_it_is_a_compiler_bug_and_where_to_report_it() {
         let text = ice_human(&report(None));
-        assert!(text.starts_with(&format!("{ICE_STAGE}: block 3 has no terminator\n")));
+        // ignore first line (randomized easter egg)
+        assert_eq!(text.lines().nth(1),
+            Some(format!("{ICE_STAGE}: block 3 has no terminator").as_str()));
         assert!(text.contains("at crates/haven_back/src/llvm.rs:694:9"));
         assert!(text.contains("havenc 9.9.9"));
         assert!(text.contains("invoked as: havenc foo.hv -o foo"));

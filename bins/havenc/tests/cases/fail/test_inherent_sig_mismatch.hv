@@ -1,0 +1,16 @@
+// Conforming to a trait through an inherent method is a real check, not a name
+// match. `Wide` has a `step(*self, x: f32)` like the conforming types in
+// `run/test_inherent_conformance.hv`, but it returns `f64`, so the empty
+// `extend` is rejected instead of quietly admitting the wrong signature.
+//@ error: signature mismatch on
+
+trait Step { proc step(*self, x: f32) f32; }
+
+struct Wide { k: f64 }
+extend Wide {
+    proc step(*self, x: f32) f64 { return numerical_cast::<f64>(x) * self.k; }
+}
+extend Wide: Step {}
+
+@export
+proc main() i32 { return 0; }

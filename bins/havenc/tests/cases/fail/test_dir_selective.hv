@@ -2,10 +2,9 @@
 // a namespace. A selective import of one is rejected with the spelling that
 // would work.
 //@ error: is a directory of modules, not a module
-//@ dep: dsp=stdlib/dsp
-//@ dep: plug=stdlib/plug
+//@ dep: geom=bins/havenc/tests/pkgs/geom
 
-import plug/clap { version }
+import geom/shapes { rect }
 
 @export
 proc main() i32 { return 0; }

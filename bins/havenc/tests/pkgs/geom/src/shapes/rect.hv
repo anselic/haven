@@ -1,0 +1,14 @@
+// A member of the `shapes` directory namespace: reached as `shapes::rect::...`
+// by a consumer that does `import geom/shapes`.
+
+pub struct Rect { w: i32, h: i32 }
+
+extend Rect {
+    // an associated function, so a caller spells four segments:
+    // `shapes::rect::Rect::make`.
+    pub proc make(w: i32, h: i32) Self { return Self { w: w, h: h }; }
+
+    pub proc area(*self) i32 { return self.w * self.h; }
+}
+
+pub proc unit() Rect { return Rect::make(1, 1); }

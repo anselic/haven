@@ -1,0 +1,87 @@
+// The framework bridge: a generic layer that turns a user type into a C-shaped
+// vtable plus an opaque `*void` handle, so the driver never names the concrete
+// type. This is the whole trick a plugin framework rests on - a monomorphized
+// generic proc *is* a function address, so `bridge_*::<P>` can be stored in a
+// struct field and called back through.
+//
+// Distinct from `run/test_fn_ptr_generic.hv`, which pins generic fn-pointers in
+// value and const positions: what is exercised here is the round trip - a trait
+// *static* method reached through a type parameter (`P::name()`, no self), state
+// handed out as `*void` and cast back, and a mutation through that handle
+// landing on the caller's own value.
+
+trait Effect {
+    proc name() str;
+    proc make() Self;
+    proc apply(*self, x: i32) i32;
+    proc tune(*self, k: i32) void;
+}
+
+// The C-shaped operations table. Nothing in it mentions a concrete effect.
+@repr(C)
+struct Ops {
+    name: proc() str,
+    apply: proc(*void, i32) i32,
+    tune: proc(*void, i32) void,
+}
+
+// the generic bridges: recover `P` from the opaque handle and dispatch.
+proc bridge_name<P: Effect>() str { return P::name(); }
+proc bridge_apply<P: Effect>(p: *void, x: i32) i32 {
+    let self: *P = ptr_cast::<*P>(p);
+    return self.apply(x);
+}
+proc bridge_tune<P: Effect>(p: *void, k: i32) void {
+    let self: *P = ptr_cast::<*P>(p);
+    self.tune(k);
+}
+
+proc ops_of<P: Effect>() Ops {
+    return Ops {
+        name: bridge_name::<P>,
+        apply: bridge_apply::<P>,
+        tune: bridge_tune::<P>,
+    };
+}
+
+// two user effects.
+struct Scale { k: i32 }
+extend Scale: Effect {
+    proc name() str { return "scale"; }
+    proc make() Self { return Self { k: 2 }; }
+    proc apply(*self, x: i32) i32 { return x * self.k; }
+    proc tune(*self, k: i32) void { self.k = k; }
+}
+
+struct Bias { b: i32 }
+extend Bias: Effect {
+    proc name() str { return "bias"; }
+    proc make() Self { return Self { b: 5 }; }
+    proc apply(*self, x: i32) i32 { return x + self.b; }
+    proc tune(*self, k: i32) void { self.b = k; }
+}
+
+// the driver: takes a table and a handle, and is not generic at all.
+proc drive(ops: *Ops, handle: *void, x: i32) i32 {
+    print(ops.name());
+    print("=");
+    return ops.apply(handle, x);
+}
+
+@export
+proc main() i32 {
+    let s: Scale = Scale::make();
+    let s_ops: Ops = ops_of::<Scale>();
+    println(drive(&s_ops, ptr_cast::<*void>(&s), 21));  // scale=42
+
+    let b: Bias = Bias::make();
+    let b_ops: Ops = ops_of::<Bias>();
+    println(drive(&b_ops, ptr_cast::<*void>(&b), 21));  // bias=26
+
+    // a write through the opaque handle has to land on `s` itself.
+    s_ops.tune(ptr_cast::<*void>(&s), 10);
+    println(s.k);                                       // 10
+    println(drive(&s_ops, ptr_cast::<*void>(&s), 21));  // scale=210
+
+    return 0;
+}

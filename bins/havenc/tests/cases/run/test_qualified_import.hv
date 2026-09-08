@@ -1,21 +1,21 @@
 // whole-module `import` makes a module's symbols reachable *only* qualified
-// under its last path segment (`math::`, `osc::`). exercises the three qualified
-// spellings the import-semantics flip enables: a qualified call, a qualified
-// struct *type* in a binding, and qualified struct construction.
-//@ dep: dsp=stdlib/dsp
+// under its last path segment (`math::`, `vec2::`). exercises the three
+// qualified spellings the import-semantics flip enables: a qualified call, a
+// qualified struct *type* in a binding, and qualified struct construction.
+//@ dep: geom=bins/havenc/tests/pkgs/geom
 
 import std/math
-import dsp/osc
+import geom/vec2
 
 @export
 proc main() i32 {
     println(math::square(3.0f64)); // 9.0
 
-    let o: osc::Osc = osc::Osc::new(1.0, 4.0);
-    println(o.square());       // phase 0 -> 1.0
+    let a: vec2::Vec2 = vec2::Vec2::new(3.0f64, 4.0f64);
+    println(a.dot(a));             // 25.0
 
-    let o2: osc::Osc = osc::Osc { phase: 0.0, inc: 0.0 };
-    println(o2.square());       // phase 0 -> 1.0
+    let b: vec2::Vec2 = vec2::Vec2 { x: 1.0f64, y: 0.0f64 };
+    println(a.dot(b));             // 3.0
 
     return 0;
 }

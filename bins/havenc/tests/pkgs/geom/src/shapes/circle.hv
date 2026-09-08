@@ -1,0 +1,10 @@
+// A second member of `shapes`, so the directory is a namespace over more than
+// one module rather than a single file wearing a directory.
+
+pub struct Circle { r: f64 }
+
+extend Circle {
+    pub proc make(r: f64) Self { return Self { r: r }; }
+
+    pub proc diameter(*self) f64 { return self.r * 2.0f64; }
+}

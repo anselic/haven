@@ -1,0 +1,14 @@
+// `geom` — a fixture package for the harness, not a real library.
+//
+// It exists so `//@ dep:` fixtures have something to bind that is (a) built from
+// this repo, so the tests stay hermetic, and (b) shaped like a real package: a
+// top-level module plus a *directory* of modules, which is the thing the
+// directory-namespace fixtures are actually about.
+//
+// A `//@ dep:` package is built with `--lib --package-name geom` and *no*
+// prelude (see `dep_meta` in harness.rs), so nothing here may use std — plain
+// structs and procs over primitives only.
+
+import vec2
+import shapes/rect
+import shapes/circle

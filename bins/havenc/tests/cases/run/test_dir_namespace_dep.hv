@@ -1,18 +1,20 @@
 // The directory-namespace rule over a directory *inside a dependency artifact*
-// (`plug/clap`), which the compiler walks by a separate implementation from a
+// (`geom/shapes`), which the compiler walks by a separate implementation from a
 // leaf's on-disk modules - so it gets its own fixture rather than riding on the
-// user-module one. Binds the `plug` package, whose `clap/` subtree is a real
-// directory of modules in the emitted `.hvmeta`.
+// user-module one (`run/test_dir_namespace.hv`). Binds the `geom` fixture
+// package, whose `shapes/` subtree is a real directory of modules in the
+// emitted `.hvmeta`.
 //@ exit: 0
-//@ dep: dsp=stdlib/dsp
-//@ dep: plug=stdlib/plug
+//@ dep: geom=bins/havenc/tests/pkgs/geom
 
-import plug/clap
+import geom/shapes
 
 @export
 proc main() i32 {
-    // walk the `clap/` namespace to a member function of `version`.
-    let v: clap::version::ClapVersion = clap::version::clap_version_current();
-    if (v.major == 1u32) { return 0; }
+    // walk the `shapes/` namespace to a free function of `rect`, then to an
+    // associated function of a type one level deeper still.
+    let r: shapes::rect::Rect = shapes::rect::unit();
+    let c: shapes::circle::Circle = shapes::circle::Circle::make(2.0f64);
+    if (r.area() == 1 && c.diameter() == 4.0f64) { return 0; }
     return 1;
 }

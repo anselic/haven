@@ -1,0 +1,32 @@
+// An empty `extend T: Trait {}` conforms by *reusing* the type's inherent
+// methods: no forwarding bodies, the inherent `step` is what the bound
+// dispatches to. Both types below satisfy `Step` that way, and a generic proc
+// bounded on `Step` picks the right one per instantiation.
+//
+// This is the positive half of `fail/test_inherent_sig_mismatch.hv`, where an
+// inherent method spelled `step` but typed differently is rejected. Without
+// this half, "the check accepts a real match" and "the check accepts anything"
+// look the same.
+
+trait Step { proc step(*self, x: f32) f32; }
+
+struct Gain { k: f32 }
+extend Gain {
+    proc step(*self, x: f32) f32 { return x * self.k; }
+}
+extend Gain: Step {}
+
+struct Offset { b: f32 }
+extend Offset {
+    proc step(*self, x: f32) f32 { return x + self.b; }
+}
+extend Offset: Step {}
+
+proc drive<B: Step>(b: B, x: f32) f32 { return b.step(x); }
+
+@export
+proc main() i32 {
+    println(drive(Gain { k: 3.0f32 }, 2.0f32));    // 6.0
+    println(drive(Offset { b: 1.5f32 }, 2.0f32));  // 3.5
+    return 0;
+}

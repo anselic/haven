@@ -1,0 +1,65 @@
+// A C-ABI vtable: a `@repr(C)` struct whose fields are function pointers, built
+// as a const global and driven both by value and through a `*Entry`.
+//
+// Two things are pinned here that a plain fn-pointer local (`run/test_fnptr.hv`)
+// does not reach:
+//
+//  * layout. Three `u32`s followed by a block of function pointers - the
+//    pointers are 8-aligned, so the 12 bytes of `u32` are padded to 16 before
+//    them. A C header this is transcribed from gets 40; a naive packed
+//    placement would get 36, and every field after the pad would be misread.
+//  * the call shape. A fn-pointer *field* reached through a pointer to the
+//    struct, which is how a real vtable is used (`p.method(p, ...)`), rather
+//    than a fn-pointer held in a local.
+
+@repr(C)
+struct Device { id: u32, live: bool, ticks: i32 }
+
+proc dev_init(d: *Device) bool { d.live = true; return true; }
+proc dev_deinit(d: *Device) void { d.live = false; }
+proc dev_poll(d: *Device, n: u32) i32 {
+    d.ticks = d.ticks + numerical_cast::<i32>(n);
+    return d.ticks;
+}
+
+@repr(C)
+struct Entry {
+    v_major: u32,
+    v_minor: u32,
+    v_revision: u32,
+    init: proc(*Device) bool,
+    deinit: proc(*Device) void,
+    poll: proc(*Device, u32) i32,
+}
+
+const ENTRY: Entry = Entry {
+    v_major: 1u32,
+    v_minor: 2u32,
+    v_revision: 2u32,
+    init: dev_init,
+    deinit: dev_deinit,
+    poll: dev_poll,
+};
+
+@export
+proc main() i32 {
+    println(sizeof::<Entry>());  // 40 = 12 + 4 pad + 3*8
+    println(sizeof::<Device>()); // 12 = 4 + 1 + 3 pad + 4
+
+    let d: Device = Device { id: 7u32, live: false, ticks: 0i32 };
+
+    // through the const's own fields
+    if (!ENTRY.init(&d)) { return 1; }
+    println(d.live);            // true
+
+    // and through a `*Entry`: the field load is a GEP off a pointer register,
+    // not a global address the backend can fold to a direct call.
+    let e: Entry = ENTRY;
+    let pe: *Entry = &e;
+    println(pe.poll(&d, 5u32)); // 5
+    println(pe.poll(&d, 3u32)); // 8
+    pe.deinit(&d);
+    println(d.live);            // false
+
+    return 0;
+}

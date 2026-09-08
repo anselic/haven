@@ -1,13 +1,14 @@
 // A path may end in a name, or in a type followed by one of its members. Any
 // more segments after the module qualifier has been walked as far as it goes is
-// an error rather than a silently dropped tail.
+// an error rather than a silently dropped tail. `Rect::make` resolves - it is a
+// real associated function - so what is rejected here is the trailing segment,
+// not an unknown name.
 //@ error: has too many `::` segments after the module qualifier
-//@ dep: dsp=stdlib/dsp
-//@ dep: plug=stdlib/plug
+//@ dep: geom=bins/havenc/tests/pkgs/geom
 
-import plug/clap
+import geom/shapes
 
 @export
 proc main() i32 {
-    return clap::version::ClapVersion::make::extra();
+    return shapes::rect::Rect::make::extra();
 }
