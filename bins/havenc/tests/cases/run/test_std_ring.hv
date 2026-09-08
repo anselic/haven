@@ -1,0 +1,68 @@
+// std/ring: a circular FIFO. Covers power-of-two capacity rounding, wrap-around
+// with a non-zero head, `push_overwrite` as a fixed history window, a delay line
+// read back at an offset, and `try_push` returning an owning value on overflow.
+import std/ring { Ring }
+import std/fmt { display_println }
+
+// a per-sample delay line, entirely @alloc(false)
+@alloc(false)
+proc delay_tick(r: *Ring<f32>, x: f32, d: u64) f32 {
+    r.push_overwrite(x);
+    let n: u64 = r.len();
+    if (d >= n) { return 0.0f32; }
+    return r.get(n - 1u64 - d).unwrap();
+}
+
+@export
+proc main() i32 {
+    let q: Ring<i32> = Ring::<i32>::with_capacity(48u64);
+    println(q.cap());              // 64, rounded up
+    println(q.is_empty());
+
+    let i: i32 = 0;
+    while (i < 5) { q.push(i); i = i + 1; }
+    display_println::<Ring<i32>>(&q);   // [0, 1, 2, 3, 4]
+    println(q.len());
+    println(q.peek().unwrap());
+    println(q.pop().unwrap());
+    println(q.pop().unwrap());
+    display_println::<Ring<i32>>(&q);   // [2, 3, 4]
+    println(q.get(0u64).unwrap());
+    println(q.get(2u64).unwrap());
+    println(q.get(3u64).is_none());
+
+    // wrap-around: fill to capacity from a non-zero head, then drain
+    let j: i32 = 100;
+    while (q.push(j)) { j = j + 1; }
+    println(q.len());              // 64, full
+    println(q.is_full());
+    println(q.get(0u64).unwrap()); // still 2 (front unchanged)
+    println(q.get(63u64).unwrap());
+
+    // small ring, exercised as an overwriting window
+    let w: Ring<i32> = Ring::<i32>::with_capacity(4u64);
+    let k: i32 = 1;
+    while (k <= 6) { w.push_overwrite(k); k = k + 1; }
+    display_println::<Ring<i32>>(&w);   // [3, 4, 5, 6]
+    for (p in w.iter()) { print(*p); print(" "); }
+    println("");
+
+    // delay line
+    let dl: Ring<f32> = Ring::<f32>::with_capacity(8u64);
+    println(delay_tick(&dl, 1.0f32, 2u64));   // 0 (not enough history)
+    println(delay_tick(&dl, 2.0f32, 2u64));   // 0
+    println(delay_tick(&dl, 3.0f32, 2u64));   // 1
+    println(delay_tick(&dl, 4.0f32, 2u64));   // 2
+
+    // owning elements
+    let s: Ring<String> = Ring::<String>::with_capacity(2u64);
+    s.push(String::from_str("a"));
+    s.push(String::from_str("b"));
+    let back: Option<String> = s.try_push(String::from_str("c"));
+    println(back.is_some());
+    display_println::<String>(&back.unwrap());
+    display_println::<Ring<String>>(&s);
+    s.clear();
+    println(s.is_empty());
+    return 0;
+}

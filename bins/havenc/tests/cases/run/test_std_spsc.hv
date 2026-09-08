@@ -1,0 +1,50 @@
+// std/spsc: the wait-free single-producer/single-consumer queue. Single-threaded
+// here, so this pins the queue *logic* - fill/drain, the full and empty edges, and
+// 10000 round trips through a 4-slot buffer to exercise cursor wrap - while the
+// memory orderings it depends on are pinned in std/c/atomic.c.
+import std/spsc { Spsc }
+
+@alloc(false)
+proc produce(q: *Spsc<f32>, x: f32) bool { return q.push(x); }
+
+@export
+proc main() i32 {
+    let q: Spsc<i32> = Spsc::<i32>::with_capacity(4u64);
+    println(q.cap());
+    println(q.is_empty());
+    println(q.pop().is_none());
+
+    let i: i32 = 0;
+    while (q.push(i)) { i = i + 1; }
+    println(i);            // 4 accepted
+    println(q.len());      // 4
+    println(q.peek().unwrap());
+
+    println(q.pop().unwrap());  // 0
+    println(q.pop().unwrap());  // 1
+    println(q.len());           // 2
+    // room again: cursors keep counting, slots are reused by masking
+    println(q.push(100));
+    println(q.push(101));
+    println(q.push(102));       // false, full again
+    println(q.len());           // 4
+    println(q.pop().unwrap());  // 2
+    println(q.pop().unwrap());  // 3
+    println(q.pop().unwrap());  // 100
+    println(q.pop().unwrap());  // 101
+    println(q.is_empty());
+
+    // wrap far past the buffer size: 10000 round trips through 4 slots
+    let n: i32 = 0; let sum: i64 = 0i64;
+    while (n < 10000) {
+        q.push(n);
+        sum = sum + numerical_cast::<i64>(q.pop().unwrap());
+        n = n + 1;
+    }
+    println(sum);   // 49995000
+
+    let f: Spsc<f32> = Spsc::<f32>::with_capacity(2u64);
+    println(produce(&f, 0.5f32));
+    println(f.pop().unwrap());
+    return 0;
+}

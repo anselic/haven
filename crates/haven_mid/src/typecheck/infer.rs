@@ -811,6 +811,28 @@ pub(crate) fn check_expr<'a>(
         ExprNode::Float64(_) => Type::Float64,
         ExprNode::Str(_)     => Type::Str,
 
+        // `[value; N]` in a known array position: check the element against the
+        // element type being asked for rather than inferring it on its own, for
+        // the same reason the list form does - otherwise the width-less literal
+        // in `let xs: [i64; 8] = [0; 8];` would settle on `i32` and then the
+        // array would mismatch as a whole. A length disagreement falls through to
+        // `infer`, which reports it.
+        ExprNode::Repeat { value, count } => {
+            let elem = match expected {
+                Type::Array(elem, n) if n == count => Some(elem),
+                Type::Slice(elem) => Some(elem),
+                _ => None,
+            };
+            match elem {
+                Some(elem) => {
+                    let elem = (**elem).clone();
+                    check_expr(cx, &elem, value)?;
+                    Type::Array(Box::new(elem), count.clone())
+                }
+                None => infer(cx, expr)?,
+            }
+        },
+
         // let xs: []i32 = []; so the type of [] is i32
         // else, if [...] is populated, infer it
         ExprNode::Slice(inner) if inner.len() == 0 => {
@@ -985,6 +1007,29 @@ pub(crate) fn infer<'a>(
             let fn_ty = Type::Function { params, return_type: Box::new(ret) };
             cx.node_types.insert(metadata.id, fn_ty.clone());
             fn_ty
+        },
+
+        // `[value; N]` -> `[T; N]`, where `T` is the element's own type. `N` is
+        // either a literal or a const generic parameter of the enclosing proc;
+        // an identifier that names neither is caught here rather than surviving
+        // to monomorphization as an unresolvable length.
+        ExprNode::Repeat { value, count } => {
+            if let ConstVal::Param(n) = count {
+                if !cx.const_generics.contains(n) {
+                    return Err(Error::new(span, format!(
+                        "unknown const parameter '{}' as a repeat count", n))
+                        .with_note("a repeat count must be an integer literal or a \
+                                    `const` generic parameter of the enclosing proc"));
+                }
+            }
+            if let ConstVal::Lit(0) = count {
+                return Err(Error::new(span, "a repeat count must be at least 1")
+                    .with_label(span, "this would produce an array of no elements")
+                    .with_note("haven has no zero-length array type; use an empty slice \
+                                literal (`[]`) with an annotation if that is what you want"));
+            }
+            let elem = infer(cx, value)?;
+            Type::Array(Box::new(elem), count.clone())
         },
 
         ExprNode::Slice(inner) if inner.len() == 0 => {

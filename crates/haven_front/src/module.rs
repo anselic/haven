@@ -859,6 +859,7 @@ fn self_subst_expr<'a>(e: &mut Expr<'a>, target: &Type<'a>, head: Option<&Path<'
             for a in args { self_subst_expr(a, target, head, assoc); }
         }
         ExprNode::Slice(elems) => for el in elems { self_subst_expr(el, target, head, assoc); },
+        ExprNode::Repeat { value, .. } => self_subst_expr(value, target, head, assoc),
         ExprNode::Access { base, .. } => self_subst_expr(base, target, head, assoc),
         ExprNode::Index { slice, index } => {
             self_subst_expr(slice, target, head, assoc);
@@ -970,6 +971,7 @@ fn refresh_ids_expr(e: &mut Expr<'_>) {
             for a in args { refresh_ids_expr(a); }
         }
         ExprNode::Slice(elems) => for el in elems { refresh_ids_expr(el); },
+        ExprNode::Repeat { value, .. } => refresh_ids_expr(value),
         ExprNode::Access { base, .. } => refresh_ids_expr(base),
         ExprNode::Index { slice, index } => {
             refresh_ids_expr(slice);
@@ -1933,6 +1935,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.expr(right, gparams);
             }
             ExprNode::Slice(elems) => for el in elems { self.expr(el, gparams); },
+            ExprNode::Repeat { value, .. } => self.expr(value, gparams),
             // a name used as a value: rewrite it to the mangled top-level name,
             // unless a param/local shadows it (then it's a local read, leave it),
             // or it names an enum variant (which stays a `Path`). taking a

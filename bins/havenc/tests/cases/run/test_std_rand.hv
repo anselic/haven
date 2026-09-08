@@ -1,0 +1,37 @@
+// std/rand: PCG32. The two `next_u32` values below are the reference
+// pcg32_random_r sequence for seed 42 on the default stream, so this pins the
+// generator's exact output rather than merely checking it produces numbers.
+// Also covers determinism (same seed, same sequence), stream independence, and
+// use from an `@alloc(false)` callback, which is what the module exists for.
+import std/rand { Rng }
+
+@alloc(false)
+proc noise_block(rng: *Rng, out: *f32, n: u64) void {
+    let i: u64 = 0u64;
+    while (i < n) {
+        out[i] = rng.bipolar_f32();
+        i = i + 1u64;
+    }
+}
+
+@export
+proc main() i32 {
+    let r: Rng = Rng::new(42u64);
+    println(r.next_u32());
+    println(r.next_u32());
+    println(r.below(10u32));
+    println(r.next_f32());
+    println(r.next_bool());
+    // determinism: same seed, same sequence
+    let a: Rng = Rng::new(7u64);
+    let b: Rng = Rng::new(7u64);
+    println(a.next_u64() == b.next_u64());
+    // distinct streams diverge
+    let c: Rng = Rng::with_stream(7u64, 99u64);
+    println(a.next_u32() == c.next_u32());
+    // @alloc(false) block fill
+    let buf: [f32; 4] = [0.0f32, 0.0f32, 0.0f32, 0.0f32];
+    noise_block(&r, &buf[0u64], 4u64);
+    println(buf[0] > -1.0f32 && buf[0] < 1.0f32);
+    return 0;
+}

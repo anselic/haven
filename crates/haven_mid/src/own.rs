@@ -402,6 +402,31 @@ impl<'a, 'c> Checker<'a, 'c> {
             ExprNode::Slice(elements) => {
                 for x in elements { self.consume(x); }
             }
+            // `[value; N]` puts one value into N slots. For a `Copy` element that
+            // is just N copies of some bits and means nothing; for an owning one
+            // it would hand the same resource to N owners, and the array's drop
+            // glue would then release it N times. There is no repair available at
+            // the literal - a repeat has one element expression, so there is
+            // nowhere to put the `.clone()` calls the other N-1 slots would need -
+            // so this is rejected rather than silently duplicated.
+            //
+            // `N == 1` is exempt: one value, one slot, an ordinary move.
+            ExprNode::Repeat { value, count } => {
+                let n = count.expect_lit();
+                match self.ty_of(value) {
+                    Some(ty) if n > 1 && !self.model.is_copy(&ty) => {
+                        let shown = self.cx.show(&ty);
+                        self.push(Error::new(e.span, format!(
+                            "cannot repeat a '{}' into {} elements", shown, n))
+                            .with_label(value.span, "it owns a resource")
+                            .with_note("every slot would own the same resource and each would \
+                                        release it; build the array elementwise, cloning into \
+                                        each slot, or repeat a value that owns nothing"));
+                    }
+                    _ => {}
+                }
+                self.consume(value);
+            }
             ExprNode::Call { func, args, .. } => {
                 if let Some(mc) = self.cx.method_calls.get(&e.id).cloned() {
                     let ExprNode::Access { base, .. } = &func.value else {
@@ -528,6 +553,7 @@ impl<'a, 'c> Checker<'a, 'c> {
             ExprNode::Slice(elements) => {
                 for x in elements { self.hoist_temps(x, decls); }
             }
+            ExprNode::Repeat { value, .. } => self.hoist_temps(value, decls),
             ExprNode::Call { func, args, .. } => {
                 // a method call borrows its receiver when the adjust is `&recv`;
                 // `func` is then the `recv.method` access whose base is that
@@ -641,6 +667,7 @@ impl<'a, 'c> Checker<'a, 'c> {
             ExprNode::Binary { left, right, .. } => { self.walk_reads(left, f); self.walk_reads(right, f); }
             ExprNode::Struct { fields, .. } => for (_, x) in fields { self.walk_reads(x, f) },
             ExprNode::Slice(elements) => for x in elements { self.walk_reads(x, f) },
+            ExprNode::Repeat { value, .. } => self.walk_reads(value, f),
             ExprNode::Call { func, args, .. } => {
                 self.walk_reads(func, f);
                 for a in args { self.walk_reads(a, f); }

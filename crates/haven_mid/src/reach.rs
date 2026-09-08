@@ -120,6 +120,8 @@ impl<'w, 'a> Walker<'w, 'a> {
 
     fn expr(&mut self, expr: &Expr<'a>) {
         match &expr.value {
+            // `[value; N]` names nothing itself; the element may.
+            ExprNode::Repeat { value, .. } => self.expr(value),
             // the only place a function is named. We do not check if this `Var`
             // is really a local. If a local shadows a function, we only keep a
             // function that clang would have removed anyway.

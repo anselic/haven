@@ -1,0 +1,103 @@
+/// std/mem: copy, fill, and compare memory through typed pointers.
+///
+/// Counts are in elements, not bytes. Each wrapper uses `sizeof::<T>()` to
+/// calculate the byte count. None of these operations allocate.
+///
+///     mem::copy::<f32>(out, input, frames);
+///     mem::zero::<f32>(tail, frames);
+///
+/// There are no bounds checks. Callers must provide valid pointers and enough
+/// readable or writable storage, and ensure the byte count does not overflow.
+///
+/// Raw byte operations do not manage ownership or destroy overwritten values.
+/// Copying an owning value can create two owners of the same allocation;
+/// overwriting one can leak it. Container code must track which slots are live
+/// and which values need destruction. `@alloc(false)` does not check this.
+/// `set`, `swap`, and `replace` require a `Copy` element type.
+
+// libc takes untyped pointers and byte counts. The wrappers below convert
+// from typed pointers and element counts. These externs do not allocate.
+@alloc(false) extern memcpy(dst: *void, src: *void, n: u64) *void;
+@alloc(false) extern memmove(dst: *void, src: *void, n: u64) *void;
+@alloc(false) extern memset(dst: *void, c: i32, n: u64) *void;
+@alloc(false) extern memcmp(a: *void, b: *void, n: u64) i32;
+
+/// Copy `count` elements from `src` to `dst`. The buffers must not overlap.
+/// Use `copy_overlapping` if they might; overlap here is undefined behavior.
+@alloc(false)
+pub proc copy<T>(dst: *T, src: *T, count: u64) void {
+    memcpy(ptr_cast::<*void>(dst), ptr_cast::<*void>(src), count * sizeof::<T>());
+}
+
+/// Copy `count` elements from `src` to `dst`, allowing overlap.
+/// The result is as if the source bytes were saved before writing. Use this
+/// when shifting elements within a buffer, such as during insertion or removal.
+@alloc(false)
+pub proc copy_overlapping<T>(dst: *T, src: *T, count: u64) void {
+    memmove(ptr_cast::<*void>(dst), ptr_cast::<*void>(src), count * sizeof::<T>());
+}
+
+/// Fill `count` slots with copies of `value`. Requires a `Copy` element type.
+///
+/// Write one element at a time because `memset` repeats a byte, not a `T`.
+/// `ptr_write` does not destroy the previous contents of a slot.
+@alloc(false)
+pub proc set<T>(dst: *T, value: T, count: u64) void {
+    let i: u64 = 0u64;
+    while (i < count) {
+        ptr_write::<T>(&dst[i], value);
+        i = i + 1u64;
+    }
+}
+
+/// Write zero bytes over `count` elements at `dst`.
+///
+/// Only read the result as `T` if all-zero bytes form a valid `T`. This clears
+/// a sample buffer to silence, but is not a general way to create default
+/// values. Any resources owned by overwritten values are not freed.
+@alloc(false)
+pub proc zero<T>(dst: *T, count: u64) void {
+    memset(ptr_cast::<*void>(dst), 0, count * sizeof::<T>());
+}
+
+/// Compare the raw bytes of `count` elements. Returns a negative number if
+/// `a` comes first in byte order, zero if equal, and a positive number otherwise.
+///
+/// This is not numeric ordering or value equality. For example, +0.0 and -0.0
+/// have different bytes, and struct padding is included in the comparison.
+@alloc(false)
+pub proc compare<T>(a: *T, b: *T, count: u64) i32 {
+    return memcmp(ptr_cast::<*void>(a), ptr_cast::<*void>(b), count * sizeof::<T>());
+}
+
+/// Whether the buffers have identical bytes across `count` elements.
+/// Uses the same byte comparison as `compare`, including any padding.
+@alloc(false)
+pub proc equal<T>(a: *T, b: *T, count: u64) bool {
+    return compare::<T>(a, b, count) == 0;
+}
+
+/// Exchange the values at `a` and `b`. The pointers may be the same.
+/// Requires a `Copy` type because reading through a pointer cannot move an
+/// owning value out of its slot.
+@alloc(false)
+pub proc swap<T>(a: *T, b: *T) void {
+    let tmp: T = *a;
+    ptr_write::<T>(a, *b);
+    ptr_write::<T>(b, tmp);
+}
+
+/// Write `value` into `slot` and return its previous value.
+/// Requires a `Copy` type, like `swap`. Haven does not yet have a `ptr_read`
+/// intrinsic for moving an owning value out of a pointer.
+@alloc(false)
+pub proc replace<T>(slot: *T, value: T) T {
+    let old: T = *slot;
+    ptr_write::<T>(slot, value);
+    return old;
+}
+
+/// Return the size of `T` in bytes, including padding. This is also the
+/// distance between consecutive array elements. Wraps the `sizeof` intrinsic.
+@alloc(false)
+pub proc size_of<T>() u64 { return sizeof::<T>(); }

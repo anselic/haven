@@ -1,0 +1,13 @@
+// A repeat count that is neither an integer literal nor a `const` generic
+// parameter in scope. A bare identifier parses as a const-parameter reference
+// (nothing in the grammar separates the two), so it has to be rejected in
+// typecheck against the enclosing proc's own const params rather than at parse
+// time - otherwise it would survive to monomorphization as an unresolvable
+// length.
+//@ error: unknown const parameter 'K'
+
+@export
+proc main() i32 {
+    let a: [i32; 4] = [0; K];
+    return a[0];
+}

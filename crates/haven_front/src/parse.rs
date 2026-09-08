@@ -727,6 +727,35 @@ fn parse_expr<'tks, 'src: 'tks>() -> P<'tks, 'src, Expr<'src>> {
             // decide. A `::symbol` is only taken when followed by an ident, so a
             // turbofish `::<...>` is left for the call postfix.
             path_of().map(|p| ExprNode::Path(NameRef::new(p))).boxed(),
+            // `[value; N]` - N copies of one element, yielding a `[T; N]`.
+            // Tried before the comma-separated form: both open with `[`, and the
+            // `;` is what tells them apart, so this alternative fails fast and
+            // backtracks on an ordinary `[a, b]`. `N` takes the same shape it does
+            // in a `[T; N]` *type* - a literal or a const generic parameter -
+            // because it has to be known at monomorphization, not at run time.
+            just(Token::LBracket)
+                .ignore_then(expr.clone())
+                .then_ignore(just(Token::Semicolon))
+                .then(select! {
+                    Token::IntLit(x) => SizeArg::Lit(x),
+                    Token::Var(n) => SizeArg::Param(n),
+                })
+                .then_ignore(just(Token::RBracket))
+                // the count's *range* is checked in typecheck, not here. A
+                // `try_map` failure would only make this alternative backtrack
+                // into the comma-separated one below, which then reports its own
+                // (baffling) parse error and buries this one - so `[x; 0]` would
+                // complain about a missing `,`. Accepting any literal shape here
+                // and rejecting the bad range later is what gets the real message
+                // in front of the reader.
+                .map(|(value, size)| ExprNode::Repeat {
+                    value: Box::new(value),
+                    count: match size {
+                        SizeArg::Lit(x) => ConstVal::Lit(x.clamp(0, MAX_CONST_ARG) as usize),
+                        SizeArg::Param(n) => ConstVal::Param(n),
+                    },
+                })
+                .boxed(),
             expr.clone()
                 .separated_by(just(Token::Comma))
                 .allow_leading()

@@ -1,0 +1,80 @@
+// `[value; N]` - the repeat array literal.
+//
+// The element expression is evaluated *once* and copied into all N slots, which
+// `count_calls` below pins: it prints on each call, and the fixture's golden has
+// exactly one "called" line for a `[count_calls(); 4]`. That matters because the
+// alternative reading (N evaluations) would make `[next(); 8]` a plausible way to
+// fill a buffer with distinct values, and it is not one.
+//
+// `N` takes the same shape as the length in a `[T; N]` *type*: an integer literal
+// or a `const` generic parameter of the enclosing proc. It has to be known by
+// monomorphization, so there is no runtime-length form - `zeros` below forwards
+// its own const param into the literal, which is what makes a fixed-capacity
+// container's constructor writable.
+//
+// The element type comes from the annotation where there is one, not from the
+// literal's own default width: `[1; 4]` in a `[i64; 4]` position is i64, the same
+// rule the comma-separated form follows.
+
+import std/simd { simd_fill }
+
+struct P { x: f32, y: f32 }
+
+proc sum(xs: [i32], n: u64) i32 {
+    let t: i32 = 0; let i: u64 = 0u64;
+    while (i < n) { t = t + xs[i]; i = i + 1u64; }
+    return t;
+}
+
+// N forwarded from the enclosing proc's const param into the literal
+proc zeros<const N: u64>() [f32; N] { return [0.0f32; N]; }
+
+proc count_calls() i32 { println("called"); return 7; }
+
+@export
+proc main() i32 {
+    let a: [i32; 8] = [3; 8];
+    println(a[0]); println(a[7]);
+
+    // width taken from the annotation, not from the literal's default
+    let b: [i64; 4] = [1; 4];
+    println(b[3]);
+
+    // an arbitrary runtime expression, not just a constant
+    let v: i32 = 42;
+    let c: [i32; 3] = [v * 2; 3];
+    println(c[2]);
+
+    // an aggregate element: each slot gets its own copy of the inline storage
+    let d: [P; 3] = [P { x: 1.5, y: 2.5 }; 3];
+    println(d[0u64].x); println(d[2u64].y);
+
+    // const generic count, forwarded through a generic proc
+    let z: [f32; 16] = zeros::<16>();
+    println(z[0]); println(z[15]);
+
+    // evaluated exactly once - one "called" line, then the value in every slot
+    let e: [i32; 4] = [count_calls(); 4];
+    println(e[0]); println(e[3]);
+
+    // a size worth having the feature for
+    let big: [f32; 512] = [0.25f32; 512];
+    println(big[0]); println(big[511]);
+
+    // in a slice position the literal coerces to a fat pointer, exactly as the
+    // comma-separated form does - so it reaches anything taking a `[T]`,
+    // `std/simd`'s buffer procs included.
+    let sl: [i32] = [7; 4];
+    println(sum(sl, 4u64));            // 28
+    println(sum([3; 5], 5u64));        // 15, passed straight as an argument
+    let fs: [f32] = [1.5f32; 8];
+    simd_fill::<f32, 4>(fs, 2.0f32, 8u64);
+    println(fs[0]); println(fs[7]);
+
+    // N == 1 is an ordinary move, so it is legal even for an owning element
+    let s: String = String::from_str("owned");
+    let one: [String; 1] = [s; 1];
+    print("one="); println(one[0u64].as_str());
+
+    return 0;
+}

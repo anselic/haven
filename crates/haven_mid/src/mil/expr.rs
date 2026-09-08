@@ -436,6 +436,76 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
         }
 
         // use fat pointer struct for slices
+        // `[value; N]`: one alloca, the element evaluated *once*, then copied
+        // into each of the N slots. Evaluating once is the contract - `[f(); 8]`
+        // calls `f` a single time - and it is also what keeps a large repeat from
+        // re-running arbitrary work N times.
+        //
+        // Structurally this is the `Slice` arm with the element list replaced by
+        // a count, so it takes the same `store_target` (letting a fixed array
+        // bound to a local write straight into its hoisted entry-block slot) and
+        // the same aggregate-vs-scalar store decision.
+        ExprNode::Repeat { value, count } => {
+            let n = count.expect_lit();
+            let (ty, is_fixed) = match cx.node_types[&expr.id].clone() {
+                Type::Slice(inner) => (*inner, false),
+                Type::Array(inner, _) => (*inner, true),
+                _ => unreachable!(),
+            };
+
+            // taken before the element is lowered, so the element's own lowering
+            // cannot claim the slot meant for this array.
+            let arr_reg = match (is_fixed, cx.store_target.take()) {
+                (true, Some(slot)) => slot,
+                _ => {
+                    let arr_reg = cx.fresh_reg();
+                    cx.emit(Inst::AllocaArray { dst: arr_reg, ty: ty.clone(), length: n });
+                    arr_reg
+                }
+            };
+
+            let elem_val = lower_expr(cx, value);
+            let aggregate = is_aggregate_ty(&ty, &cx.enums);
+            for index in 0..n {
+                let ptr = cx.fresh_reg();
+                cx.emit(Inst::IndexArray {
+                    dst: ptr, ty: ty.clone(), length: n, array: arr_reg, index,
+                });
+                if aggregate {
+                    let Value::Reg(src) = elem_val else {
+                        unreachable!("an aggregate value is always a pointer register")
+                    };
+                    // every slot gets its own copy of the one evaluated element.
+                    copy_aggregate(cx, &ty, src, ptr);
+                } else {
+                    cx.emit(Inst::Store {
+                        ptr, val: elem_val.clone(), ty: ty.clone(), align: None });
+                }
+            }
+
+            if is_fixed {
+                Value::Reg(arr_reg)
+            } else {
+                let fat_ptr0 = cx.fresh_reg();
+                cx.emit(Inst::InsertValue {
+                    dst: fat_ptr0,
+                    elem: Value::Const(Const::Undef),
+                    ty: Type::Pointer(Box::new(ty.clone())),
+                    val: Value::Reg(arr_reg),
+                    index: 0,
+                });
+                let fat_ptr1 = cx.fresh_reg();
+                cx.emit(Inst::InsertValue {
+                    dst: fat_ptr1,
+                    elem: Value::Reg(fat_ptr0),
+                    ty: Type::Int32,
+                    val: Value::Const(Const::Int32(n as i32)),
+                    index: 1,
+                });
+                Value::Reg(fat_ptr1)
+            }
+        }
+
         ExprNode::Slice(elements) => {
             let (ty, is_fixed) = match cx.node_types[&expr.id].clone() {
                 Type::Slice(inner) => (*inner, false),

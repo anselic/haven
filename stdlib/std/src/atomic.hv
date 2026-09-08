@@ -1,0 +1,238 @@
+/// std/atomic: unsigned integers that threads can read and update atomically.
+///
+/// Share a pointer to the same `AtomicU32` or `AtomicU64` between threads.
+/// All operations are `@alloc(false)`. Before using them in an audio callback,
+/// check `is_lock_free()` on the target so they do not rely on a runtime lock.
+///
+/// The method name tells you how the operation orders other memory accesses:
+/// * `_relaxed` only makes the integer access atomic. Use it for a standalone
+///   value, such as a statistics counter.
+/// * A `_release` store publishes earlier writes. An `_acquire` load that reads
+///   that store makes those writes visible to the reader. For example, write a
+///   buffer first, then publish its index with a release store.
+/// * `_seqcst` also places the operation in a single order shared by all
+///   sequentially consistent operations. You still need a correct sharing protocol.
+///
+/// `fetch_add`, `fetch_sub`, `fetch_and`, `fetch_or`, and `exchange` use
+/// acquire-release ordering unless their name says otherwise.
+///
+/// There is no `AtomicF32` wrapper. To share a float, reinterpret its bits as a
+/// `u32`, store them in `AtomicU32`, and reinterpret the loaded bits as a float.
+
+// These functions are implemented in std/c/atomic.c using C11 atomics.
+// Each ordering has its own function, so the C compiler knows it at compile time.
+// The allocation checker trusts the `@alloc(false)` annotations on these externs.
+@alloc(false) extern rt_atomic_load_relaxed_u32(p: *u32) u32;
+@alloc(false) extern rt_atomic_load_acquire_u32(p: *u32) u32;
+@alloc(false) extern rt_atomic_load_seqcst_u32(p: *u32) u32;
+@alloc(false) extern rt_atomic_store_relaxed_u32(p: *u32, v: u32) void;
+@alloc(false) extern rt_atomic_store_release_u32(p: *u32, v: u32) void;
+@alloc(false) extern rt_atomic_store_seqcst_u32(p: *u32, v: u32) void;
+@alloc(false) extern rt_atomic_fetch_add_relaxed_u32(p: *u32, v: u32) u32;
+@alloc(false) extern rt_atomic_fetch_add_acqrel_u32(p: *u32, v: u32) u32;
+@alloc(false) extern rt_atomic_fetch_sub_acqrel_u32(p: *u32, v: u32) u32;
+@alloc(false) extern rt_atomic_fetch_and_acqrel_u32(p: *u32, v: u32) u32;
+@alloc(false) extern rt_atomic_fetch_or_acqrel_u32(p: *u32, v: u32) u32;
+@alloc(false) extern rt_atomic_exchange_acqrel_u32(p: *u32, v: u32) u32;
+@alloc(false) extern rt_atomic_cas_u32(p: *u32, expected: *u32, desired: u32) i32;
+@alloc(false) extern rt_atomic_is_lock_free_u32() i32;
+
+@alloc(false) extern rt_atomic_load_relaxed_u64(p: *u64) u64;
+@alloc(false) extern rt_atomic_load_acquire_u64(p: *u64) u64;
+@alloc(false) extern rt_atomic_load_seqcst_u64(p: *u64) u64;
+@alloc(false) extern rt_atomic_store_relaxed_u64(p: *u64, v: u64) void;
+@alloc(false) extern rt_atomic_store_release_u64(p: *u64, v: u64) void;
+@alloc(false) extern rt_atomic_store_seqcst_u64(p: *u64, v: u64) void;
+@alloc(false) extern rt_atomic_fetch_add_relaxed_u64(p: *u64, v: u64) u64;
+@alloc(false) extern rt_atomic_fetch_add_acqrel_u64(p: *u64, v: u64) u64;
+@alloc(false) extern rt_atomic_fetch_sub_acqrel_u64(p: *u64, v: u64) u64;
+@alloc(false) extern rt_atomic_fetch_and_acqrel_u64(p: *u64, v: u64) u64;
+@alloc(false) extern rt_atomic_fetch_or_acqrel_u64(p: *u64, v: u64) u64;
+@alloc(false) extern rt_atomic_exchange_acqrel_u64(p: *u64, v: u64) u64;
+@alloc(false) extern rt_atomic_cas_u64(p: *u64, expected: *u64, desired: u64) i32;
+@alloc(false) extern rt_atomic_is_lock_free_u64() i32;
+
+@alloc(false) extern rt_atomic_fence_acquire() void;
+@alloc(false) extern rt_atomic_fence_release() void;
+@alloc(false) extern rt_atomic_fence_seqcst() void;
+
+/// A `u32` shared through atomic operations.
+///
+/// Threads must use pointers to the same instance. Copying the struct creates a
+/// separate value; it does not create another handle to the same atomic.
+/// Do not copy the struct while another thread is updating it.
+pub struct AtomicU32 {
+    v: u32,  /// access through the atomic methods after construction
+
+    /// Create an atomic holding `v`. Finish construction before sharing its pointer.
+    @alloc(false)
+    pub proc new(v: u32) AtomicU32 { return AtomicU32 { v: v }; }
+
+    /// Read the value without ordering accesses to other memory.
+    @alloc(false)
+    pub proc load_relaxed(*self) u32 { return rt_atomic_load_relaxed_u32(&self.v); }
+    /// Read the value with acquire ordering. If it reads a release store,
+    /// that thread's writes before the store are visible after this load.
+    @alloc(false)
+    pub proc load_acquire(*self) u32 { return rt_atomic_load_acquire_u32(&self.v); }
+    /// Read the value, participating in the global sequentially consistent order.
+    @alloc(false)
+    pub proc load_seqcst(*self) u32 { return rt_atomic_load_seqcst_u32(&self.v); }
+
+    /// Write `v` without ordering accesses to other memory.
+    @alloc(false)
+    pub proc store_relaxed(*self, v: u32) void { rt_atomic_store_relaxed_u32(&self.v, v); }
+    /// Write `v` with release ordering, making earlier writes visible to a
+    /// thread that reads this store with acquire ordering.
+    @alloc(false)
+    pub proc store_release(*self, v: u32) void { rt_atomic_store_release_u32(&self.v, v); }
+    /// Write `v`, participating in the global sequentially consistent order.
+    @alloc(false)
+    pub proc store_seqcst(*self, v: u32) void { rt_atomic_store_seqcst_u32(&self.v, v); }
+
+    /// Add `v` and return the previous value, with relaxed ordering.
+    @alloc(false)
+    pub proc fetch_add_relaxed(*self, v: u32) u32 {
+        return rt_atomic_fetch_add_relaxed_u32(&self.v, v);
+    }
+    /// Add `v` and return the previous value, with acquire-release ordering.
+    @alloc(false)
+    pub proc fetch_add(*self, v: u32) u32 {
+        return rt_atomic_fetch_add_acqrel_u32(&self.v, v);
+    }
+    /// Subtract `v` and return the previous value, with acquire-release ordering.
+    @alloc(false)
+    pub proc fetch_sub(*self, v: u32) u32 {
+        return rt_atomic_fetch_sub_acqrel_u32(&self.v, v);
+    }
+    /// Keep only the bits also set in `v` and return the previous value.
+    /// Uses acquire-release ordering.
+    @alloc(false)
+    pub proc fetch_and(*self, v: u32) u32 {
+        return rt_atomic_fetch_and_acqrel_u32(&self.v, v);
+    }
+    /// Set the bits set in `v` and return the previous value.
+    /// Uses acquire-release ordering.
+    @alloc(false)
+    pub proc fetch_or(*self, v: u32) u32 {
+        return rt_atomic_fetch_or_acqrel_u32(&self.v, v);
+    }
+    /// Write `v` and return the previous value in one atomic operation.
+    /// Uses acquire-release ordering.
+    @alloc(false)
+    pub proc exchange(*self, v: u32) u32 {
+        return rt_atomic_exchange_acqrel_u32(&self.v, v);
+    }
+
+    /// If the value equals `*expected`, write `desired` and return `true`.
+    /// Otherwise, write the observed value into `*expected` and return `false`.
+    /// This updates `expected` for the next attempt in a retry loop:
+    ///
+    ///     let cur: u32 = a.load_relaxed();
+    ///     while (!a.compare_exchange(&cur, f(cur))) { }
+    ///
+    /// Uses acquire-release ordering on success and acquire ordering on failure.
+    /// This is a strong comparison: it fails only when the values differ.
+    @alloc(false)
+    pub proc compare_exchange(*self, expected: *u32, desired: u32) bool {
+        return rt_atomic_cas_u32(&self.v, expected, desired) == 1;
+    }
+
+    /// Whether this target provides lock-free operations for this integer width.
+    /// Check during setup if the calling thread must never wait on a lock.
+    @alloc(false)
+    pub proc is_lock_free(*self) bool { return rt_atomic_is_lock_free_u32() == 1; }
+}
+
+/// A `u64` with the same sharing and ordering rules as `AtomicU32`.
+/// Check `is_lock_free()` for this width on the target you use.
+pub struct AtomicU64 {
+    v: u64,  /// access through the atomic methods after construction
+
+    /// Create an atomic holding `v`. Finish construction before sharing its pointer.
+    @alloc(false)
+    pub proc new(v: u64) AtomicU64 { return AtomicU64 { v: v }; }
+
+    /// Read the value without ordering accesses to other memory.
+    @alloc(false)
+    pub proc load_relaxed(*self) u64 { return rt_atomic_load_relaxed_u64(&self.v); }
+    /// Read the value, with acquire ordering.
+    @alloc(false)
+    pub proc load_acquire(*self) u64 { return rt_atomic_load_acquire_u64(&self.v); }
+    /// Read the value, with sequentially consistent ordering.
+    @alloc(false)
+    pub proc load_seqcst(*self) u64 { return rt_atomic_load_seqcst_u64(&self.v); }
+
+    /// Write `v` without ordering accesses to other memory.
+    @alloc(false)
+    pub proc store_relaxed(*self, v: u64) void { rt_atomic_store_relaxed_u64(&self.v, v); }
+    /// Write `v`, with release ordering.
+    @alloc(false)
+    pub proc store_release(*self, v: u64) void { rt_atomic_store_release_u64(&self.v, v); }
+    /// Write `v`, with sequentially consistent ordering.
+    @alloc(false)
+    pub proc store_seqcst(*self, v: u64) void { rt_atomic_store_seqcst_u64(&self.v, v); }
+
+    /// Add `v` and return the previous value, with relaxed ordering.
+    @alloc(false)
+    pub proc fetch_add_relaxed(*self, v: u64) u64 {
+        return rt_atomic_fetch_add_relaxed_u64(&self.v, v);
+    }
+    /// Add `v` and return the previous value, with acquire-release ordering.
+    @alloc(false)
+    pub proc fetch_add(*self, v: u64) u64 {
+        return rt_atomic_fetch_add_acqrel_u64(&self.v, v);
+    }
+    /// Subtract `v` and return the previous value, with acquire-release ordering.
+    @alloc(false)
+    pub proc fetch_sub(*self, v: u64) u64 {
+        return rt_atomic_fetch_sub_acqrel_u64(&self.v, v);
+    }
+    /// Keep only the bits also set in `v` and return the previous value.
+    /// Uses acquire-release ordering.
+    @alloc(false)
+    pub proc fetch_and(*self, v: u64) u64 {
+        return rt_atomic_fetch_and_acqrel_u64(&self.v, v);
+    }
+    /// Set the bits set in `v` and return the previous value.
+    /// Uses acquire-release ordering.
+    @alloc(false)
+    pub proc fetch_or(*self, v: u64) u64 {
+        return rt_atomic_fetch_or_acqrel_u64(&self.v, v);
+    }
+    /// Write `v` and return the previous value in one atomic operation.
+    /// Uses acquire-release ordering.
+    @alloc(false)
+    pub proc exchange(*self, v: u64) u64 {
+        return rt_atomic_exchange_acqrel_u64(&self.v, v);
+    }
+    /// Compare-and-swap; see `AtomicU32::compare_exchange`.
+    @alloc(false)
+    pub proc compare_exchange(*self, expected: *u64, desired: u64) bool {
+        return rt_atomic_cas_u64(&self.v, expected, desired) == 1;
+    }
+    /// Whether 64-bit operations are lock-free on this target.
+    @alloc(false)
+    pub proc is_lock_free(*self) bool { return rt_atomic_is_lock_free_u64() == 1; }
+}
+
+/// An acquire fence for reads that follow a relaxed atomic load.
+///
+/// For example, a writer fills a buffer, calls `fence_release`, then stores a
+/// ready flag with relaxed ordering. The reader loads that flag with relaxed
+/// ordering, calls `fence_acquire`, then reads the buffer. The load must read
+/// the publishing store for the fences to synchronize.
+///
+/// Use acquire loads and release stores when the ordering can go directly on
+/// the atomic operation, as it does in `std/spsc`.
+@alloc(false)
+pub proc fence_acquire() void { rt_atomic_fence_acquire(); }
+
+/// A release fence for writes before a publishing atomic store.
+/// It needs a matching atomic read on the other thread; see `fence_acquire`.
+@alloc(false)
+pub proc fence_release() void { rt_atomic_fence_release(); }
+
+/// A fence that participates in the global sequentially consistent order.
+@alloc(false)
+pub proc fence_seqcst() void { rt_atomic_fence_seqcst(); }

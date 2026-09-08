@@ -1,0 +1,60 @@
+// Forwarding a `const` generic parameter *by name* into a generic struct's
+// turbofish, from inside a generic proc: `C::<N> { .. }` where `N` is the
+// enclosing proc's own const param.
+//
+// Nothing in the grammar separates a type name from a const parameter's name, so
+// a bare-ident argument always parses as `GenericArg::Type(Type::Param("N"))`.
+// Only the enclosing instance's bindings can tell the two apart, so the
+// correction belongs in mono. `subst_targ` (a *call*'s turbofish) always had it,
+// which is why `simd_load::<f32, N>` worked; `subst_ty`'s `Named` branch (a
+// struct/enum *type*'s args, which is what a struct literal collapses to) did
+// not, so the forwarded const reached the instance builder still kinded as a
+// type and hit its `unreachable!("struct generic param/arg kind mismatch")`.
+// Both now route through one `concrete_targ` helper.
+//
+// A literal argument (`C::<4>`) never reproduced it, and neither did a direct
+// construction at a concrete call site - only forwarding through a generic
+// proc's own const param, which is exactly what a fixed-capacity container's
+// constructor does.
+
+// const param alone, forwarded.
+struct C<const N: u64> { n: u64 }
+proc mk_c<const N: u64>() C<N> { return C::<N> { n: N }; }
+
+// type param and const param together - the mixed-kind zip that ICE'd.
+struct G<T, const N: u64> { a: T, n: u64 }
+proc mk_g<T, const N: u64>(x: T) G<T, N> { return G::<T, N> { a: x, n: N }; }
+
+// a `[T; N]` field, whose element type and length are substituted from the two
+// forwarded params at once. Passing the array by value is fine in its own right
+// - `test_array_by_value.hv` covers that end to end - so what this pins is only
+// the substitution of both params into one field type.
+struct Fixed<T, const N: u64> { s: [T; N], len: u64 }
+proc mk_fixed<T, const N: u64>(init: [T; N]) Fixed<T, N> {
+    return Fixed::<T, N> { s: init, len: N };
+}
+
+// forwarding into a generic *enum*'s turbofish takes the same path.
+enum E<T, const N: u64> { V(T) }
+proc mk_e<T, const N: u64>(x: T) E<T, N> { return E::<T, N>::V(x); }
+
+@export
+proc main() i32 {
+    println(mk_c::<8>().n);            // 8
+    println(mk_c::<3>().n);            // 3   (a distinct instance)
+
+    let g: G<i32, 4> = mk_g::<i32, 4>(7);
+    println(g.a);                      // 7
+    println(g.n);                      // 4
+
+    let a: [i32; 4] = [10, 20, 30, 40];
+    let f: Fixed<i32, 4> = mk_fixed::<i32, 4>(a);
+    println(f.s[2u64]);                // 30
+    println(f.len);                    // 4
+
+    match (mk_e::<i32, 2>(5)) {
+        E::V(v) -> { println(v); }   // 5
+    }
+
+    return 0;
+}

@@ -1,0 +1,53 @@
+// std/atomic: loads, stores, read-modify-writes and compare-exchange at each
+// ordering. The CAS cases pin the in/out behaviour of `expected` - refreshed to
+// the value actually found on failure, which is what makes a retry loop work.
+import std/atomic { AtomicU32, AtomicU64, fence_acquire, fence_release }
+
+@alloc(false)
+proc audio_read(g: *AtomicU32) u32 { return g.load_acquire(); }
+
+@export
+proc main() i32 {
+    let a: AtomicU32 = AtomicU32::new(10u32);
+    println(a.is_lock_free());
+    println(a.load_relaxed());
+    a.store_release(42u32);
+    println(audio_read(&a));
+    println(a.fetch_add(5u32));      // 42 (previous)
+    println(a.load_seqcst());        // 47
+    println(a.fetch_sub(7u32));      // 47
+    println(a.load_relaxed());       // 40
+    println(a.exchange(1u32));       // 40
+    println(a.load_relaxed());       // 1
+
+    a.store_relaxed(0xf0u32);
+    println(a.fetch_or(0x0fu32));    // 240
+    println(a.load_relaxed());       // 255
+    println(a.fetch_and(0x3cu32));   // 255
+    println(a.load_relaxed());       // 60
+
+    // CAS: success, then failure with `expected` refreshed
+    a.store_relaxed(5u32);
+    let exp: u32 = 5u32;
+    println(a.compare_exchange(&exp, 9u32));   // true
+    println(a.load_relaxed());                 // 9
+    let bad: u32 = 100u32;
+    println(a.compare_exchange(&bad, 0u32));   // false
+    println(bad);                              // refreshed to 9
+
+    // a CAS retry loop
+    let cur: u32 = a.load_relaxed();
+    while (!a.compare_exchange(&cur, cur * 3u32)) { }
+    println(a.load_relaxed());                 // 27
+
+    let b: AtomicU64 = AtomicU64::new(0u64);
+    println(b.is_lock_free());
+    b.store_release(0x123456789abcdefu64);
+    println(b.load_acquire());
+    println(b.fetch_add_relaxed(1u64));
+    println(b.load_relaxed());
+
+    fence_release(); fence_acquire();
+    println(0);
+    return 0;
+}

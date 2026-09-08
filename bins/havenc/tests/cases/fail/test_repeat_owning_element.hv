@@ -1,0 +1,20 @@
+// `[value; N]` with an owning element and N > 1.
+//
+// A repeat literal copies one value into every slot. For a `Copy` element that is
+// meaningless duplication of bits; for an owner it would give N slots the same
+// resource, and the array's drop glue would then release it N times. The literal
+// offers nowhere to put the `.clone()` calls the other N-1 slots would need - it
+// has exactly one element expression - so this is refused outright rather than
+// accepted and miscompiled.
+//
+// The check is `is_copy` on the *monomorphized* element type, so it lands here
+// and not on some generic definition.
+//@ error: cannot repeat a
+//@ error: it owns a resource
+
+@export
+proc main() i32 {
+    let s: String = String::from_str("hi");
+    let a: [String; 3] = [s; 3];
+    return numerical_cast::<i32>(a[0u64].len());
+}

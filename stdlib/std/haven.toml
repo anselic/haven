@@ -5,5 +5,5 @@ kind = ["lib"]
 provides-prelude = true
 
 [[c]]
-files = ["c/env.c", "c/fs.c", "c/process.c", "c/rt.c"]
+files = ["c/atomic.c", "c/env.c", "c/fs.c", "c/process.c", "c/rt.c"]
 libs = ["m"]

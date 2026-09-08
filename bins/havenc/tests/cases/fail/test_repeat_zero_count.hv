@@ -1,0 +1,13 @@
+// `[value; 0]`. haven has no zero-length array type, so a repeat count of 0 has
+// no result type to give.
+//
+// The range check lives in typecheck rather than the parser on purpose: a parse
+// failure here would backtrack into the comma-separated array literal, which then
+// reports its own parse error about an expected `,` and buries the real reason.
+//@ error: repeat count must be at least 1
+
+@export
+proc main() i32 {
+    let a: [i32; 1] = [0; 0];
+    return a[0];
+}

@@ -570,10 +570,8 @@ impl<'p, 'a> Mono<'p, 'a> {
             // Whether it is a struct or an enum is decided by template-table
             // membership; either way the result is a no-arg `Named`.
             Type::Named { def, args } if !args.is_empty() => {
-                let cargs: Vec<ConcreteArg<'a>> = args.iter().map(|a| match a {
-                    GenericArg::Type(t) => ConcreteArg::Type(self.subst_ty(t, b)),
-                    GenericArg::Const(cv) => ConcreteArg::Const(subst_cv(cv, b).expect_lit()),
-                }).collect();
+                let cargs: Vec<ConcreteArg<'a>> = args.iter()
+                    .map(|a| self.concrete_targ(a, b)).collect();
                 let inst = if self.enum_templates.contains_key(def) {
                     self.request_enum(*def, cargs)
                 } else {
@@ -635,6 +633,26 @@ impl<'p, 'a> Mono<'p, 'a> {
                 GenericArg::Const(ConstVal::Lit(b.consts[n].val)),
             GenericArg::Type(t) => GenericArg::Type(self.subst_ty(t, b)),
             GenericArg::Const(cv) => GenericArg::Const(subst_cv(cv, b)),
+        }
+    }
+
+    /// [`Self::subst_targ`] followed by the collapse to a [`ConcreteArg`], for
+    /// the generic *type* args of a `Named` (a struct/enum instance) rather than
+    /// a call's turbofish. Both paths need the same fixup: a bare-ident const
+    /// argument (`Ring<T, N>`, `C::<N> { .. }`) parses as a type, because nothing
+    /// in the grammar separates a type name from a const parameter's name, so a
+    /// forwarded const param arrives here as `GenericArg::Type(Type::Param(n))`.
+    /// Only the enclosing instance's bindings can tell the two apart, which is
+    /// why the correction lands in mono and not in the parser.
+    ///
+    /// Going through `subst_targ` rather than matching inline is what keeps the
+    /// two in step: routing a `Named`'s args around it is how `C::<N> { .. }`
+    /// used to reach the kind-mismatch `unreachable!` in the instance builder
+    /// while the identical `f::<N>()` went through fine.
+    fn concrete_targ(&mut self, ga: &GenericArg<'a>, b: &Bindings<'a>) -> ConcreteArg<'a> {
+        match self.subst_targ(ga, b) {
+            GenericArg::Type(t) => ConcreteArg::Type(t),
+            GenericArg::Const(cv) => ConcreteArg::Const(cv.expect_lit()),
         }
     }
 
@@ -873,6 +891,13 @@ impl<'p, 'a> Mono<'p, 'a> {
             }
             ExprNode::Slice(elems) =>
                 ExprNode::Slice(elems.iter().map(|e| self.rebuild_expr(e, b)).collect()),
+            // the repeat count may be this instance's own const param (`[x; N]`
+            // inside an `f<const N>`), so substitute it the same way an array
+            // *type*'s length is substituted.
+            ExprNode::Repeat { value, count } => ExprNode::Repeat {
+                value: Box::new(self.rebuild_expr(value, b)),
+                count: subst_cv(count, b),
+            },
             ExprNode::Struct { name, type_args, fields } => {
                 let new_fields: Vec<(&'a str, Expr<'a>)> =
                     fields.iter().map(|(f, e)| (*f, self.rebuild_expr(e, b))).collect();
@@ -893,10 +918,8 @@ impl<'p, 'a> Mono<'p, 'a> {
                     // instance and rewrite the literal's enum segment to it
                     // (`Result$i32$str::Ok`), dropping the turbofish. The name to
                     // request against is the enum segment, not the whole path.
-                    let cargs: Vec<ConcreteArg<'a>> = type_args.iter().map(|ga| match ga {
-                        GenericArg::Type(t) => ConcreteArg::Type(self.subst_ty(t, b)),
-                        GenericArg::Const(cv) => ConcreteArg::Const(subst_cv(cv, b).expect_lit()),
-                    }).collect();
+                    let cargs: Vec<ConcreteArg<'a>> = type_args.iter()
+                        .map(|ga| self.concrete_targ(ga, b)).collect();
                     let inst = self.request_enum(name.def, cargs);
                     let mut new_name = name.clone();
                     new_name.def = inst;

@@ -1,0 +1,211 @@
+/// std/bits: count, rotate, reverse, and round unsigned integer bit patterns.
+///
+/// These helpers do not allocate. Use them for tasks such as counting set bits,
+/// finding a free slot in a bitset, or rounding a buffer size to a power of two.
+/// Names end in `_u32` or `_u64` to identify the input width; byte swaps also
+/// include a `_u16` version.
+///
+///     let n: u64 = next_power_of_two_u64(frames);
+///     let stages: u32 = log2_floor_u64(n);
+///     let j: u32 = bit_reverse_u32(i, stages);
+///
+/// Shifts must stay below the integer width. The zero-case guards in rotations
+/// and bit reversal prevent shifts by 32 or 64 bits.
+
+// These implementations use shifts and masks directly in Haven, with no C shim
+// or compiler intrinsic. Keep the steps recognizable when changing them.
+
+/// Count the 1 bits in `x`.
+///
+/// Sum bits in groups of 2, then 4, then 8. The multiply adds the byte counts
+/// into the top byte, which holds the total.
+@alloc(false)
+pub proc popcount_u64(x: u64) u32 {
+    let v: u64 = x;
+    v = v - ((v >> 1u64) & 0x5555555555555555u64);
+    v = (v & 0x3333333333333333u64) + ((v >> 2u64) & 0x3333333333333333u64);
+    v = (v + (v >> 4u64)) & 0x0f0f0f0f0f0f0f0fu64;
+    return numerical_cast::<u32>((v * 0x0101010101010101u64) >> 56u64);
+}
+
+/// The number of 1 bits in `x`.
+@alloc(false)
+pub proc popcount_u32(x: u32) u32 {
+    return popcount_u64(numerical_cast::<u64>(x));
+}
+
+/// Count leading zero bits. Returns 64 for zero and 0 when the top bit is set.
+///
+/// Fill every bit below the highest set bit, then subtract the number of set
+/// bits from 64. The bits left above that region are the leading zeros.
+@alloc(false)
+pub proc leading_zeros_u64(x: u64) u32 {
+    let v: u64 = x;
+    v = v | (v >> 1u64);
+    v = v | (v >> 2u64);
+    v = v | (v >> 4u64);
+    v = v | (v >> 8u64);
+    v = v | (v >> 16u64);
+    v = v | (v >> 32u64);
+    return 64u32 - popcount_u64(v);
+}
+
+/// The number of leading zero bits in `x`: 32 when `x` is 0.
+@alloc(false)
+pub proc leading_zeros_u32(x: u32) u32 {
+    // Widening adds 32 leading zeros, so subtract them from the count.
+    return leading_zeros_u64(numerical_cast::<u64>(x)) - 32u32;
+}
+
+/// Count trailing zero bits. Returns 64 for zero and 0 when bit 0 is set.
+///
+/// `x & (0 - x)` keeps only the lowest set bit. Subtracting 1 sets all bits
+/// below it, so their count gives the original number of trailing zeros.
+@alloc(false)
+pub proc trailing_zeros_u64(x: u64) u32 {
+    if (x == 0u64) { return 64u32; }
+    return popcount_u64((x & (0u64 - x)) - 1u64);
+}
+
+/// The number of trailing zero bits in `x`: 32 when `x` is 0.
+@alloc(false)
+pub proc trailing_zeros_u32(x: u32) u32 {
+    if (x == 0u32) { return 32u32; }
+    return popcount_u64((numerical_cast::<u64>(x) & (0u64 - numerical_cast::<u64>(x))) - 1u64);
+}
+
+/// Rotate `x` left by `n` positions, wrapping the high bits to the low end.
+/// The shift count is taken modulo 64.
+@alloc(false)
+pub proc rotate_left_u64(x: u64, n: u32) u64 {
+    let s: u64 = numerical_cast::<u64>(n) & 63u64;
+    // Return early so the other shift, `64 - s`, never equals 64.
+    if (s == 0u64) { return x; }
+    return (x << s) | (x >> (64u64 - s));
+}
+
+/// Rotate `x` right by `n` bit positions. `n` is taken modulo 64.
+@alloc(false)
+pub proc rotate_right_u64(x: u64, n: u32) u64 {
+    let s: u64 = numerical_cast::<u64>(n) & 63u64;
+    if (s == 0u64) { return x; }
+    return (x >> s) | (x << (64u64 - s));
+}
+
+/// Rotate `x` left by `n` bit positions. `n` is taken modulo 32.
+@alloc(false)
+pub proc rotate_left_u32(x: u32, n: u32) u32 {
+    let s: u32 = n & 31u32;
+    if (s == 0u32) { return x; }
+    return (x << s) | (x >> (32u32 - s));
+}
+
+/// Rotate `x` right by `n` bit positions. `n` is taken modulo 32.
+@alloc(false)
+pub proc rotate_right_u32(x: u32, n: u32) u32 {
+    let s: u32 = n & 31u32;
+    if (s == 0u32) { return x; }
+    return (x >> s) | (x << (32u32 - s));
+}
+
+/// Reverse the byte order of `x`, for example when decoding data stored
+/// with a different byte order.
+@alloc(false)
+pub proc bswap_u16(x: u16) u16 {
+    return numerical_cast::<u16>(((numerical_cast::<u32>(x) >> 8u32) & 0x00ffu32)
+                               | ((numerical_cast::<u32>(x) << 8u32) & 0xff00u32));
+}
+
+/// Reverse the byte order of `x`.
+@alloc(false)
+pub proc bswap_u32(x: u32) u32 {
+    return ((x >> 24u32) & 0x000000ffu32)
+         | ((x >>  8u32) & 0x0000ff00u32)
+         | ((x <<  8u32) & 0x00ff0000u32)
+         | ((x << 24u32) & 0xff000000u32);
+}
+
+/// Reverse the byte order of `x`.
+@alloc(false)
+pub proc bswap_u64(x: u64) u64 {
+    // Swap neighboring bytes, then 2-byte groups, then 4-byte groups.
+    let v: u64 = x;
+    v = ((v >>  8u64) & 0x00ff00ff00ff00ffu64) | ((v & 0x00ff00ff00ff00ffu64) <<  8u64);
+    v = ((v >> 16u64) & 0x0000ffff0000ffffu64) | ((v & 0x0000ffff0000ffffu64) << 16u64);
+    return (v >> 32u64) | (v << 32u64);
+}
+
+/// Reverse all 32 bits: bit 0 becomes bit 31, and so on.
+/// Swap neighboring bits, then groups of 2, 4, 8, and 16 bits.
+@alloc(false)
+pub proc reverse_bits_u32(x: u32) u32 {
+    let v: u32 = x;
+    v = ((v >> 1u32) & 0x55555555u32) | ((v & 0x55555555u32) << 1u32);
+    v = ((v >> 2u32) & 0x33333333u32) | ((v & 0x33333333u32) << 2u32);
+    v = ((v >> 4u32) & 0x0f0f0f0fu32) | ((v & 0x0f0f0f0fu32) << 4u32);
+    v = ((v >> 8u32) & 0x00ff00ffu32) | ((v & 0x00ff00ffu32) << 8u32);
+    return (v >> 16u32) | (v << 16u32);
+}
+
+/// Reverse the order of all 64 bits of `x`.
+@alloc(false)
+pub proc reverse_bits_u64(x: u64) u64 {
+    let v: u64 = x;
+    v = ((v >> 1u64) & 0x5555555555555555u64) | ((v & 0x5555555555555555u64) << 1u64);
+    v = ((v >> 2u64) & 0x3333333333333333u64) | ((v & 0x3333333333333333u64) << 2u64);
+    v = ((v >> 4u64) & 0x0f0f0f0f0f0f0f0fu64) | ((v & 0x0f0f0f0f0f0f0f0fu64) << 4u64);
+    return bswap_u64(v);
+}
+
+/// Reverse the low `width` bits of `x` and discard the rest.
+/// Useful for bit-reversed FFT indices. Returns 0 for width 0 and treats
+/// widths above 32 as 32. The guards keep all shifts below 32 bits.
+@alloc(false)
+pub proc bit_reverse_u32(x: u32, width: u32) u32 {
+    if (width == 0u32) { return 0u32; }
+    let w: u32 = width;
+    if (w > 32u32) { w = 32u32; }
+    if (w == 32u32) { return reverse_bits_u32(x); }
+    return reverse_bits_u32(x) >> (32u32 - w);
+}
+
+/// Whether `x` has exactly one set bit. Returns false for zero.
+/// `x & (x - 1)` clears the lowest set bit; a power of two has no others.
+@alloc(false)
+pub proc is_power_of_two_u64(x: u64) bool {
+    return x != 0u64 && (x & (x - 1u64)) == 0u64;
+}
+
+/// Return the smallest power of two at least as large as `x`.
+/// Returns 1 for 0 or 1, and 0 on overflow (`x > 2^63`).
+///
+/// Start with `x - 1` so exact powers of two stay unchanged. Fill the bits
+/// below its highest set bit, then add 1 to reach the next power of two.
+@alloc(false)
+pub proc next_power_of_two_u64(x: u64) u64 {
+    if (x <= 1u64) { return 1u64; }
+    let v: u64 = x - 1u64;
+    v = v | (v >> 1u64);
+    v = v | (v >> 2u64);
+    v = v | (v >> 4u64);
+    v = v | (v >> 8u64);
+    v = v | (v >> 16u64);
+    v = v | (v >> 32u64);
+    return v + 1u64;
+}
+
+/// Return the index of the highest set bit, or 0 when `x` is zero.
+/// For positive inputs this is floor(log2(x)): for example, 1024 gives 10.
+@alloc(false)
+pub proc log2_floor_u64(x: u64) u32 {
+    if (x == 0u64) { return 0u32; }
+    return 63u32 - leading_zeros_u64(x);
+}
+
+/// The ceiling of the base-2 logarithm of `x`: the smallest `k` with
+/// `2^k >= x`. Returns 0 for `x` of 0 or 1.
+@alloc(false)
+pub proc log2_ceil_u64(x: u64) u32 {
+    if (x <= 1u64) { return 0u32; }
+    return log2_floor_u64(x - 1u64) + 1u32;
+}

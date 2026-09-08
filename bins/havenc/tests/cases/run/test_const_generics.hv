@@ -1,5 +1,6 @@
-// FIXME: fixed arrays passed *by value* (`[T; N]` params) are a separate,
-// pre-existing codegen gap and are intentionally avoided here.
+// Fixed arrays passed *by value* used to be a codegen gap, which this fixture
+// avoided; that is fixed, and `test_array_by_value.hv` now covers it directly.
+// This one stays focused on const params, so it still does not use them.
 
 import std/simd { simd_splat, simd_load, simd_store }
 

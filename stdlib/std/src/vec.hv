@@ -6,6 +6,12 @@
 /// `v.get`/`v.get_ptr`, and walk it with `v.for_each`/`v.map` or a `for` loop
 /// over `v.iter()`.
 ///
+/// A `Vec` is also the fixed-capacity container: reserve the capacity you need
+/// with `with_capacity`, then push with `push_within_capacity`, which refuses
+/// rather than growing and so never allocates. That is the combination an audio
+/// callback needs - see that method for why plain `push` cannot be made to work
+/// there no matter how much capacity you reserve first.
+///
 /// A `Vec` owns its heap allocation and frees it for you: it implements `Delete`,
 /// so the buffer is released when the Vec goes out of scope, and each element is
 /// destroyed first (a no-op for elements that own nothing). There is no manual
@@ -93,6 +99,75 @@ pub struct Vec<T> {
         self.len = self.len + 1u64;
     }
 
+    /// Append `value` **only if there is already room**, handing it back when
+    /// there is not: `none` on success, `some(value)` when the Vec is full.
+    ///
+    /// This is the push that a real-time thread can call. Ordinary `push` is not,
+    /// and no amount of `reserve` makes it so: the alloc checker is static, so
+    /// `reserve` sits in `push`'s call graph whether or not it can be reached at
+    /// run time, and an `@alloc(false)` caller is rejected with
+    /// `'Vec$push' -> 'Vec$reserve' -> 'realloc' -> 'rt_realloc'`. Reserving
+    /// capacity in setup and calling this in the callback is how you get a push
+    /// the compiler will certify:
+    ///
+    ///     let v: Vec<Voice> = Vec::<Voice>::with_capacity(16u64);   // setup
+    ///     ...
+    ///     @alloc(false)
+    ///     proc note_on(v: *Vec<Voice>, n: Voice) bool {
+    ///         return v.push_within_capacity(n).is_none();
+    ///     }
+    ///
+    /// The result reads backwards at first - `none` means it went in - but that
+    /// is what makes this work for every `T`. Returning the rejected value rather
+    /// than dropping it means no path here destroys anything, so nothing reaches
+    /// the allocator even when `T` owns something, and the caller decides what
+    /// becomes of a value that would not fit. Discarding the result is what
+    /// destroys it, and that happens at the call site where it is visible.
+    ///
+    /// One wrinkle when `T` owns something: the returned `Option<T>` owns it too,
+    /// so it cannot be chained off. `v.push_within_capacity(s).is_none()` borrows
+    /// a temporary that belongs to no scope, and the ownership pass rejects it -
+    /// rightly, since the rejected value would leak. Bind it first:
+    ///
+    ///     let slot: Option<String> = v.push_within_capacity(s);
+    ///     if (slot.is_none()) { ... }   // `slot` is destroyed at end of scope
+    ///
+    /// A `T` that owns nothing has no such problem and chains fine, which is the
+    /// `.is_none()` in the example above.
+    @alloc(false)
+    pub proc push_within_capacity(*self, value: T) Option<T> {
+        if (self.len >= self.cap) {
+            return Option::Some(value);
+        }
+        // room already reserved, so the slot is fresh capacity - uninitialized,
+        // which is what `ptr_write` is for. No `reserve`, hence no allocation on
+        // any path, hence the mark above holds.
+        ptr_write::<T>(&self.data[self.len], value);
+        self.len = self.len + 1u64;
+        return Option::None;
+    }
+
+    /// Whether `push_within_capacity` would refuse: `len == cap`. Says nothing
+    /// about `push`, which grows.
+    @alloc(false)
+    pub proc is_full(*self) bool { return self.len >= self.cap; }
+
+    /// How many more elements fit before the buffer would have to grow.
+    @alloc(false)
+    pub proc remaining(*self) u64 { return self.cap - self.len; }
+
+    /// Shorten to `len` elements, destroying those dropped. Given a length at or
+    /// above the current one, this does nothing.
+    ///
+    /// Not marked `@alloc(false)`: destroying an element calls its `delete`, and
+    /// freeing is an allocator call like any other. It still comes out clean for
+    /// a `T` that owns nothing, since there is then no destructor to run.
+    pub proc truncate(*self, len: u64) {
+        if (len >= self.len) { return; }
+        drop_in_place::<T>(&self.data[len], self.len - len);
+        self.len = len;
+    }
+
     /// Read the element at `i` by value, or `none` when `i` is out of bounds.
     /// This copies the element out, so it is for a `Copy` `T` (an integer, a
     /// plain struct); for an owning `T` it would duplicate ownership, and
@@ -117,8 +192,16 @@ pub struct Vec<T> {
     /// The raw base pointer of the buffer (element 0), or null when the Vec has
     /// never allocated. Unlike `get_ptr`, this is not bounds-checked and does not
     /// depend on `len`: it hands back the buffer's address for callers that need
-    /// to walk the raw bytes (an FFI `argv`, a byte view). Invalidated by the next
-    /// push or free.
+    /// to walk the raw bytes (an FFI `argv`, a byte view).
+    ///
+    /// Invalidated by any `push` that grows the buffer, and by the free. Note
+    /// what that means if you hand this pointer to another thread: staying
+    /// within the reserved capacity keeps the buffer where it is, so a Vec only
+    /// ever pushed through `push_within_capacity` never moves - but nothing
+    /// enforces that, and one ordinary `push` from anywhere leaves the other
+    /// thread holding a dangling pointer. Reserve once and use
+    /// `push_within_capacity` throughout if a raw pointer to the buffer has
+    /// escaped.
     pub proc as_ptr(*self) *T {
         return self.data;
     }

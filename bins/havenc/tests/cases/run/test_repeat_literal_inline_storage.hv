@@ -1,0 +1,58 @@
+// The reason `[value; N]` exists: a fixed-capacity container with *inline*
+// storage - a `[T; N]` field, no pointer, no heap - whose constructor does not
+// require the caller to write N literals.
+//
+// Before the repeat literal there was no way to bring an N-element field into
+// existence from inside a generic constructor, so std's `Array`/`Ring`/`Spsc`
+// allocate a buffer once instead. Here the storage is a real `[T; N]` field
+// (`{ [8 x float], i64 }` in the IR) and `process` - marked `@alloc(false)` -
+// constructs, fills and drains one without the allocator being reachable at all,
+// which is what the mark proves.
+//
+// `new` still takes a fill value, because a repeat literal initializes. Dropping
+// that argument, and the N stores it implies, needs a way to name *uninitialized*
+// inline storage; that does not exist yet.
+
+struct FixedVec<T, const N: u64> {
+    s: [T; N],
+    len: u64,
+
+    @alloc(false)
+    pub proc new(fill: T) FixedVec<T, N> {
+        return FixedVec::<T, N> { s: [fill; N], len: 0u64 };
+    }
+    @alloc(false)
+    pub proc len(*self) u64 { return self.len; }
+    @alloc(false)
+    pub proc push(*self, v: T) bool {
+        if (self.len >= N) { return false; }
+        self.s[self.len] = v;
+        self.len = self.len + 1u64;
+        return true;
+    }
+    @alloc(false)
+    pub proc get(*self, i: u64) T { return self.s[i]; }
+}
+
+// the whole lifecycle inside a callback that may not allocate
+@alloc(false)
+proc process(x: f32) f32 {
+    let v: FixedVec<f32, 8> = FixedVec::<f32, 8>::new(0.0f32);
+    let i: u64 = 0u64;
+    while (v.push(x * numerical_cast::<f32>(i))) { i = i + 1u64; }
+    let sum: f32 = 0.0f32;
+    let j: u64 = 0u64;
+    while (j < v.len()) { sum = sum + v.get(j); j = j + 1u64; }
+    return sum;
+}
+
+@export
+proc main() i32 {
+    let v: FixedVec<i32, 4> = FixedVec::<i32, 4>::new(0);
+    println(v.push(10)); println(v.push(20));
+    println(v.len()); println(v.get(0u64)); println(v.get(1u64));
+    println(v.push(30)); println(v.push(40));
+    println(v.push(50));            // false: capacity is the const param
+    println(process(2.0f32));       // 2 * (0+1+...+7) = 56
+    return 0;
+}

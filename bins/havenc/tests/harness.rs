@@ -55,13 +55,24 @@ fn std_meta() -> &'static Path {
         let std_dir = repo.join("stdlib/std");
         let tmp = tempfile::tempdir().expect("temp dir for std.hvmeta");
         let meta = tmp.path().join("std.hvmeta");
-        let status = Command::new(COMPILER_BIN)
-            .arg(std_dir.join("src/lib.hv"))
-            .args(["--lib", "--package-name", "std", "--prelude", "std"])
-            .arg("--c-file").arg(std_dir.join("c/rt.c"))
-            .arg("--c-file").arg(std_dir.join("c/env.c"))
-            .arg("--c-file").arg(std_dir.join("c/fs.c"))
-            .arg("--c-file").arg(std_dir.join("c/process.c"))
+        // every `.c` in the package's `c/` directory, discovered rather than
+        // listed: a hardcoded list silently drops a newly added runtime file,
+        // and the resulting failure is a link error in whichever fixture happens
+        // to use it rather than anything pointing back at this function.
+        let mut c_files: Vec<PathBuf> = std::fs::read_dir(std_dir.join("c"))
+            .expect("std package c/ directory")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "c"))
+            .collect();
+        c_files.sort();
+        assert!(!c_files.is_empty(), "no .c files found in the std package");
+        let mut cmd = Command::new(COMPILER_BIN);
+        cmd.arg(std_dir.join("src/lib.hv"))
+            .args(["--lib", "--package-name", "std", "--prelude", "std"]);
+        for f in &c_files {
+            cmd.arg("--c-file").arg(f);
+        }
+        let status = cmd
             .args(["--link-lib", "m"])
             .arg("-o").arg(&meta)
             .output()

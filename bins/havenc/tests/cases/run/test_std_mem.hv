@@ -1,0 +1,41 @@
+// std/mem: element-counted copies, fills and comparisons over raw buffers,
+// including the overlapping case `copy` is not allowed to handle, and a
+// `@alloc(false)` block copy of the shape a process callback does.
+import std/mem
+
+@alloc(false)
+proc process(out: *f32, inp: *f32, n: u64) void {
+    mem::copy::<f32>(out, inp, n);
+}
+
+@export
+proc main() i32 {
+    let a: [i32; 6] = [1, 2, 3, 4, 5, 6];
+    let b: [i32; 6] = [0, 0, 0, 0, 0, 0];
+    mem::copy::<i32>(&b[0u64], &a[0u64], 6u64);
+    println(b[5]);
+    println(mem::equal::<i32>(&a[0u64], &b[0u64], 6u64));
+
+    // overlapping: shift left by one within the same buffer
+    mem::copy_overlapping::<i32>(&a[0u64], &a[1u64], 5u64);
+    println(a[0]); println(a[4]);
+
+    mem::set::<i32>(&b[0u64], 9, 3u64);
+    println(b[0]); println(b[2]); println(b[3]);
+
+    mem::zero::<i32>(&b[0u64], 6u64);
+    println(b[0]); println(b[5]);
+
+    let x: i32 = 1; let y: i32 = 2;
+    mem::swap::<i32>(&x, &y);
+    println(x); println(y);
+    println(mem::replace::<i32>(&x, 100));
+    println(x);
+    println(mem::size_of::<i32>());
+
+    let s: [f32; 3] = [1.5f32, 2.5f32, 3.5f32];
+    let d: [f32; 3] = [0.0f32, 0.0f32, 0.0f32];
+    process(&d[0u64], &s[0u64], 3u64);
+    println(d[2]);
+    return 0;
+}

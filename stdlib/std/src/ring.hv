@@ -1,0 +1,240 @@
+/// std/ring: a circular queue with fixed capacity.
+///
+/// Push adds at the back and pop removes from the front. Indices wrap around
+/// the buffer, so elements do not need to shift. A full ring rejects new values;
+/// `push_overwrite` instead drops the oldest value to keep a rolling history.
+///
+/// Capacity is rounded up to a power of two: requesting 48 slots gives 64.
+/// This lets indexing wrap with `index & (cap - 1)`. Use your own length limit
+/// if you need an exact maximum. A zero-capacity ring cannot accept values.
+///
+/// This type has no thread synchronization. Use `std/spsc` to pass values
+/// between one producer thread and one consumer thread.
+///
+/// The ring owns its buffer and live elements. It never grows after construction,
+/// but destroying elements can call the allocator. For that reason, `push`,
+/// `push_overwrite`, and `clear` have no `@alloc(false)` annotation; the checker
+/// uses the element type to determine whether a caller can use them.
+/// `try_push` returns rejected values without destroying them and is always
+/// `@alloc(false)`. Cloning or formatting a ring can allocate.
+
+import alloc { alloc, dealloc }
+import bits { next_power_of_two_u64 }
+import option { Option }
+import iter { Iterator }
+
+/// A queue whose indices wrap around a fixed buffer.
+pub struct Ring<T> {
+    data: *T,  /// storage for `cap` elements; null when capacity is zero
+    head: u64, /// buffer index of the front element
+    len: u64,  /// number of live elements starting at `head`
+    mask: u64, /// mask used to wrap buffer indices
+    cap: u64,  /// slot count; zero or a power of two
+
+    /// Create an empty ring, rounding `cap` up to a power of two.
+    /// Allocates the buffer. A capacity of 0 allocates nothing and accepts nothing.
+    pub proc with_capacity(cap: u64) Ring<T> {
+        if (cap == 0u64) {
+            return Ring::<T> {
+                data: null::<*T>(), head: 0u64, len: 0u64, mask: 0u64, cap: 0u64 };
+        }
+        let n: u64 = next_power_of_two_u64(cap);
+        return Ring::<T> {
+            data: alloc::<T>(n).unwrap(), head: 0u64, len: 0u64, mask: n - 1u64, cap: n };
+    }
+
+    /// The number of live elements.
+    @alloc(false)
+    pub proc len(*self) u64 { return self.len; }
+    /// The allocated slot count: zero or a power of two.
+    @alloc(false)
+    pub proc cap(*self) u64 { return self.cap; }
+    /// Whether the ring is empty.
+    @alloc(false)
+    pub proc is_empty(*self) bool { return self.len == 0u64; }
+    /// Whether the next `push` will fail.
+    @alloc(false)
+    pub proc is_full(*self) bool { return self.len >= self.cap; }
+
+    /// Return the slot `i` elements after the front, wrapping at the buffer end.
+    /// Does not check bounds.
+    @alloc(false)
+    proc slot(*self, i: u64) *T {
+        return &self.data[(self.head + i) & self.mask];
+    }
+
+    /// Append `value`. Return `true` on success, or destroy it and return `false`
+    /// if full. There is no `@alloc(false)` annotation because destroying `T`
+    /// may call the allocator.
+    pub proc push(*self, value: T) bool {
+        if (self.len >= self.cap) {
+            return false;
+        }
+        // This slot is unused or was removed by `pop`. Initialize it without
+        // trying to destroy its old contents.
+        ptr_write::<T>(self.slot(self.len), value);
+        self.len = self.len + 1u64;
+        return true;
+    }
+
+    /// Append `value`, returning `None` on success or `Some(value)` if full.
+    /// Does not destroy the value, so it is `@alloc(false)` for every `T`.
+    @alloc(false)
+    pub proc try_push(*self, value: T) Option<T> {
+        if (self.len >= self.cap) {
+            return Option::Some(value);
+        }
+        ptr_write::<T>(self.slot(self.len), value);
+        self.len = self.len + 1u64;
+        return Option::None;
+    }
+
+    /// Append `value`, dropping the oldest element if full. Return `true` if no
+    /// element was dropped, or `false` otherwise. Useful for a rolling history.
+    /// Dropping an element may call the allocator.
+    pub proc push_overwrite(*self, value: T) bool {
+        if (self.len < self.cap) {
+            ptr_write::<T>(self.slot(self.len), value);
+            self.len = self.len + 1u64;
+            return true;
+        }
+        // Drop the front, then advance `head` so its old slot becomes the back.
+        drop_in_place::<T>(self.slot(0u64), 1u64);
+        self.head = (self.head + 1u64) & self.mask;
+        ptr_write::<T>(self.slot(self.len - 1u64), value);
+        return false;
+    }
+
+    /// Remove the front element and return a pointer to its slot, or `None`
+    /// if empty. Read it before the next push, which may reuse the slot.
+    /// The removed value is not destroyed or tracked by the ring anymore; for an
+    /// owning `T`, the caller must handle its cleanup before the slot is reused.
+    @alloc(false)
+    pub proc pop(*self) Option<*T> {
+        if (self.len == 0u64) {
+            return Option::None;
+        }
+        let p: *T = self.slot(0u64);
+        self.head = (self.head + 1u64) & self.mask;
+        self.len = self.len - 1u64;
+        return Option::Some(p);
+    }
+
+    /// A pointer to the front element without removing it, or `none` when empty.
+    @alloc(false)
+    pub proc peek(*self) Option<*T> {
+        if (self.len == 0u64) {
+            return Option::None;
+        }
+        return Option::Some(self.slot(0u64));
+    }
+
+    /// Return a pointer to element `i`, counting from the front, or `None`
+    /// if out of bounds. The back is `len - 1`. For a sample history maintained
+    /// by `push_overwrite`, `get_ptr(len - 1 - d)` reads `d` samples back.
+    @alloc(false)
+    pub proc get_ptr(*self, i: u64) Option<*T> {
+        if (i >= self.len) {
+            return Option::None;
+        }
+        return Option::Some(self.slot(i));
+    }
+
+    /// Copy element `i`, counting from the front, or return `None` if out of bounds.
+    /// Requires a `Copy` element type because it reads through a pointer.
+    @alloc(false)
+    pub proc get(*self, i: u64) Option<T> {
+        if (i >= self.len) {
+            return Option::None;
+        }
+        return Option::Some(*self.slot(i));
+    }
+
+    /// Destroy all live elements and empty the ring, keeping its buffer.
+    /// Has no `@alloc(false)` annotation because element cleanup may allocate.
+    pub proc clear(*self) {
+        let i: u64 = 0u64;
+        while (i < self.len) {
+            // The live elements may wrap past the buffer end, so drop them
+            // individually instead of treating them as one contiguous range.
+            drop_in_place::<T>(self.slot(i), 1u64);
+            i = i + 1u64;
+        }
+        self.head = 0u64;
+        self.len = 0u64;
+    }
+
+    /// Iterate the live elements by pointer, front to back:
+    /// `for (p in r.iter()) { ... *p ... }`.
+    @alloc(false)
+    pub proc iter(*self) RingIter<T> {
+        return RingIter::<T> { ring: self, pos: 0u64 };
+    }
+}
+
+/// Walk a ring from front to back by pointer. The ring must outlive this
+/// iterator. Do not push, pop, or clear the ring while iterating.
+pub struct RingIter<T> {
+    ring: *Ring<T>,  /// ring being iterated
+    pos: u64,        /// next element, counted from the front
+}
+
+extend RingIter<T>: Iterator {
+    type Item = *T;
+    @alloc(false)
+    proc next(*self) Option<*T> {
+        if (self.pos >= self.ring.len()) {
+            return Option::None;
+        }
+        let p: *T = self.ring.get_ptr(self.pos).unwrap();
+        self.pos = self.pos + 1u64;
+        return Option::Some(p);
+    }
+}
+
+/// Destroy the remaining elements and free the buffer.
+/// Drop each element separately because the live region may wrap.
+extend Ring<T>: Delete {
+    proc delete(*self) {
+        let i: u64 = 0u64;
+        while (i < self.len) {
+            drop_in_place::<T>(&self.data[(self.head + i) & self.mask], 1u64);
+            i = i + 1u64;
+        }
+        if (self.cap != 0u64) {
+            dealloc::<T>(self.data);
+        }
+    }
+}
+
+/// Clone the elements into a new ring with the same capacity and order.
+/// The new ring starts at slot 0. Requires `T: Clone`.
+extend Ring<T>: Clone where T: Clone {
+    proc clone(*self) Ring<T> {
+        let out: Ring<T> = Ring::<T>::with_capacity(self.cap());
+        let i: u64 = 0u64;
+        while (i < self.len()) {
+            out.push(self.get_ptr(i).unwrap().clone());
+            i = i + 1u64;
+        }
+        return out;
+    }
+}
+
+/// Format as `[front, .., back]`, following queue order.
+extend Ring<T>: Display where T: Display {
+    proc display(*self) String {
+        let s: String = String::from_str("[");
+        let n: u64 = self.len();
+        let i: u64 = 0u64;
+        while (i < n) {
+            if (i > 0u64) { s.push_str(", "); }
+            let ep: *T = self.get_ptr(i).unwrap();
+            let part: String = ep.display();
+            s.push_str(part.as_str());
+            i = i + 1u64;
+        }
+        s.push_byte(93u8); // ']'
+        return s;
+    }
+}

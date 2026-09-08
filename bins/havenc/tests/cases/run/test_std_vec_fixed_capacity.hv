@@ -1,0 +1,71 @@
+// `Vec` used as a *fixed-capacity* container: reserve in setup, then push from a
+// thread that may not allocate.
+//
+// This is the whole reason `push_within_capacity` exists. Reserving capacity does
+// not make ordinary `push` callable from an `@alloc(false)` function - the alloc
+// checker is static, so `Vec$push -> Vec$reserve -> realloc -> rt_realloc` is in
+// the call graph whether or not the growth branch can be reached at run time.
+// `push_within_capacity` never calls `reserve` at all, so it is clean by
+// construction, and `fill` below (marked, and calling it in a loop) is what pins
+// that.
+//
+// It hands a rejected value *back* rather than dropping it, which is what makes
+// it `@alloc(false)` for an owning `T` too: no path destroys anything, so nothing
+// reaches the allocator. The `String` case covers that - the rejected string
+// comes back intact rather than being freed inside the callback.
+//
+// `truncate` is the opposite case and is deliberately not marked: it destroys the
+// elements it drops, and destroying an owner frees.
+
+import std/fmt { display_println }
+
+@alloc(false)
+proc fill(v: *Vec<i32>) u64 {
+    let n: u64 = 0u64;
+    while (v.push_within_capacity(numerical_cast::<i32>(n)).is_none()) { n = n + 1u64; }
+    return n;
+}
+
+@export
+proc main() i32 {
+    let v: Vec<i32> = Vec::<i32>::with_capacity(4u64);
+    println(v.cap()); println(v.is_full()); println(v.remaining());
+
+    println(fill(&v));            // 4 accepted, then refused
+    println(v.len()); println(v.is_full()); println(v.remaining());
+    display_println::<Vec<i32>>(&v);            // [0, 1, 2, 3]
+
+    // the refusal hands the value back
+    let back: Option<i32> = v.push_within_capacity(99);
+    println(back.is_some()); println(back.unwrap());
+
+    // ordinary `push` still grows, and capacity moves with it
+    v.push(4);
+    println(v.len()); println(v.cap() >= 5u64); println(v.is_full());
+
+    v.truncate(2u64);
+    display_println::<Vec<i32>>(&v);            // [0, 1]
+
+    // an owning element: the rejected String is returned, not freed.
+    // `with_capacity` reserves *at least* what is asked - `Vec::reserve` starts at
+    // 4 slots and doubles - so fill to the real capacity rather than assuming it.
+    //
+    // Note the `let`: for an owning `T` the returned `Option<T>` owns a resource,
+    // so it cannot be chained off (`...push_within_capacity(x).is_none()` borrows
+    // a temporary that belongs to no scope, and the ownership pass rejects it).
+    // Binding it is what gives the rejected value a scope to be destroyed in.
+    let s: Vec<String> = Vec::<String>::with_capacity(2u64);
+    let room: u64 = s.remaining();
+    let k: u64 = 0u64;
+    while (k < room) {
+        let slot: Option<String> = s.push_within_capacity(String::from_str("kept"));
+        println(slot.is_none());
+        k = k + 1u64;
+    }
+    println(s.len() == s.cap()); println(s.is_full());
+    let rej: Option<String> = s.push_within_capacity(String::from_str("rejected"));
+    println(rej.is_some());
+    display_println::<String>(&rej.unwrap());
+    println(s.len());
+    return 0;
+}

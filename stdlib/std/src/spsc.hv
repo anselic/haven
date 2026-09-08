@@ -1,0 +1,161 @@
+/// std/spsc: a fixed-capacity queue for one producer and one consumer thread.
+///
+/// Only the producer may push, and only the consumer may pop or peek. Each end
+/// has one writer, so no retry loop is needed. The operations do not grow the
+/// buffer. Use a `Copy` element type: `pop` copies the value before allowing
+/// the producer to reuse its slot.
+///
+/// Create the queue during setup and share a pointer to it. Check that
+/// `AtomicU64` is lock-free on the target before using the queue on a thread
+/// that must not block. Both threads must stop using it before it is destroyed.
+///
+/// The head counts pops and the tail counts pushes. `tail - head` gives the
+/// number of queued elements; `cursor & mask` selects a slot. Capacity is a
+/// power of two so indexing can use a mask. The `u64` counters wrap eventually.
+///
+/// The cursor updates also protect the buffer contents:
+/// * The producer writes a value, then release-stores the new tail. The consumer
+///   acquire-loads the tail before reading that value.
+/// * The consumer copies the value, then release-stores the new head. The producer
+///   acquire-loads the head before reusing the slot.
+///
+/// Each thread can load its own cursor with relaxed ordering because it is the
+/// only writer. Keep acquire and release ordering on the shared handoff: the
+/// buffer accesses themselves are not atomic.
+
+import alloc { alloc, dealloc }
+import atomic { AtomicU64 }
+import bits { next_power_of_two_u64 }
+import option { Option }
+
+/// A queue with exactly one producer and one consumer.
+/// Padding spaces the head and tail 64 bytes apart to reduce cache contention
+/// on targets with 64-byte cache lines.
+pub struct Spsc<T> {
+    data: *T,      /// storage for `cap` elements; null when capacity is zero
+    mask: u64,     /// mask used to wrap buffer indices
+    cap: u64,      /// slot count; zero or a power of two
+    pad0: [u64; 5],  /// padding before the consumer cursor
+
+    head: AtomicU64, /// total pops; written only by the consumer
+    pad1: [u64; 7],  /// spacing between the two cursors
+
+    tail: AtomicU64, /// total pushes; written only by the producer
+    pad2: [u64; 7],  /// padding after the producer cursor
+
+    /// Create an empty queue, rounding `cap` up to a power of two.
+    /// Allocate during setup, then share a pointer with both threads.
+    /// A capacity of 0 allocates nothing; pushes fail and pops return `None`.
+    pub proc with_capacity(cap: u64) Spsc<T> {
+        let n: u64 = 0u64;
+        let buf: *T = null::<*T>();
+        if (cap != 0u64) {
+            n = next_power_of_two_u64(cap);
+            buf = alloc::<T>(n).unwrap();
+        }
+        let m: u64 = 0u64;
+        if (n != 0u64) { m = n - 1u64; }
+        return Spsc::<T> {
+            data: buf, mask: m, cap: n,
+            pad0: [0u64, 0u64, 0u64, 0u64, 0u64],
+            head: AtomicU64::new(0u64),
+            pad1: [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64],
+            tail: AtomicU64::new(0u64),
+            pad2: [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64],
+        };
+    }
+
+    /// The allocated slot count: zero or a power of two.
+    @alloc(false)
+    pub proc cap(*self) u64 { return self.cap; }
+
+    /// Estimate the number of queued elements from either participating thread.
+    /// The cursor loads are separate, so this is not a snapshot. The producer
+    /// may see fewer free slots, and the consumer may see fewer available values,
+    /// than there are by the time the call returns. Do not use it from a third
+    /// thread while the queue is active; the two reads may give an invalid count.
+    @alloc(false)
+    pub proc len(*self) u64 {
+        return self.tail.load_acquire() - self.head.load_acquire();
+    }
+
+    /// Whether `len()` reports zero. On the consumer, `false` means an element
+    /// is available. On the producer, the result may already be out of date.
+    @alloc(false)
+    pub proc is_empty(*self) bool { return self.len() == 0u64; }
+
+    /// Producer only: append `value`. Return `true` on success, or destroy it
+    /// and return `false` if full. Cleanup may call the allocator for an owning
+    /// `T`, so this has no `@alloc(false)` annotation. Use `try_push` to keep
+    /// a rejected value.
+    pub proc push(*self, value: T) bool {
+        return self.try_push(value).is_none();
+    }
+
+    /// Producer only: append `value`, returning `None` on success or
+    /// `Some(value)` if full. No value is destroyed, so this is `@alloc(false)`.
+    @alloc(false)
+    pub proc try_push(*self, value: T) Option<T> {
+        // Only the producer writes `tail`, so a relaxed load is enough.
+        let tail: u64 = self.tail.load_relaxed();
+        // Acquire the head so we reuse a slot only after the consumer has
+        // finished reading it.
+        let head: u64 = self.head.load_acquire();
+        if (tail - head >= self.cap) {
+            return Option::Some(value);
+        }
+        // Initialize a free slot without destroying its previous contents.
+        ptr_write::<T>(&self.data[tail & self.mask], value);
+        // Publish the value to the consumer, which loads `tail` with acquire.
+        self.tail.store_release(tail + 1u64);
+        return Option::None;
+    }
+
+    /// Consumer only: remove and return the front value, or `None` if empty.
+    /// Requires a `Copy` type. Read the value before releasing its slot; the
+    /// producer may overwrite the slot as soon as the head advances.
+    @alloc(false)
+    pub proc pop(*self) Option<T> {
+        let head: u64 = self.head.load_relaxed();
+        // Acquire the tail so the producer's value is visible before we read it.
+        let tail: u64 = self.tail.load_acquire();
+        if (head == tail) {
+            return Option::None;
+        }
+        let value: T = self.data[head & self.mask];
+        // Tell the producer we have finished reading and it may reuse this slot.
+        self.head.store_release(head + 1u64);
+        return Option::Some(value);
+    }
+
+    /// Consumer only: return a pointer to the front value, or `None` if empty.
+    /// The pointer is valid until the next `pop` or destruction of the queue.
+    /// The producer cannot reuse this slot until the consumer advances the head.
+    @alloc(false)
+    pub proc peek(*self) Option<*T> {
+        let head: u64 = self.head.load_relaxed();
+        let tail: u64 = self.tail.load_acquire();
+        if (head == tail) {
+            return Option::None;
+        }
+        return Option::Some(&self.data[head & self.mask]);
+    }
+}
+
+/// Destroy any queued values and free the buffer.
+/// Both threads must have stopped using the queue before this runs.
+/// The caller is responsible for that lifetime; the queue does not enforce it.
+extend Spsc<T>: Delete {
+    proc delete(*self) {
+        let head: u64 = self.head.load_relaxed();
+        let tail: u64 = self.tail.load_relaxed();
+        // Drop one slot at a time because the queued region may wrap.
+        while (head != tail) {
+            drop_in_place::<T>(&self.data[head & self.mask], 1u64);
+            head = head + 1u64;
+        }
+        if (self.cap != 0u64) {
+            dealloc::<T>(self.data);
+        }
+    }
+}

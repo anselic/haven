@@ -670,6 +670,14 @@ pub enum ExprNode<'a> {
     /// whose `def` is the enum and whose `variant()` is the variant.
     Path(NameRef<'a>),
     Slice(Vec<Expr<'a>>),
+    /// A repeated array literal, `[value; N]`: `N` copies of one element,
+    /// yielding a `[T; N]`.
+    ///
+    /// Distinct from `Slice` rather than sugar for it, because `N` may be a
+    /// const generic parameter and so is not known until monomorphization -
+    /// there is no element list to expand into at parse time. `value` is
+    /// evaluated exactly once, however large `N` is.
+    Repeat { value: Box<Expr<'a>>, count: ConstVal<'a> },
 
     Struct {
         /// The type being constructed: a one-segment path for a struct literal,
@@ -748,6 +756,7 @@ impl<'a> Display for ExprNode<'a> {
                     .join(", ");
                 write!(f, "[{}]", elements_str)
             },
+            ExprNode::Repeat { value, count } => write!(f, "[{}; {}]", value.value, count),
             ExprNode::Access { base, field } => write!(f, "{}.{}", base.value, field),
 
             ExprNode::Struct { name, type_args, fields } => {
