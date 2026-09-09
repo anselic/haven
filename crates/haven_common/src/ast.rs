@@ -328,17 +328,8 @@ impl<'a> Display for ConstVal<'a> {
     }
 }
 
-/// A `::`-separated name exactly as written: `String`, `geo::Point`,
-/// `Status::Ready`, `dsp::osc::Osc`.
-///
-/// The parser once joined these into one `&str` (via `Box::leak`) and every
-/// consumer split them again with `split_once("::")`, which dropped everything
-/// past the second segment. Keeping the segments means a name's shape survives
-/// parsing, so resolution can tell what each segment denotes (module, type,
-/// value, variant) instead of guessing from a string.
-///
-/// Pre-resolution only. Name resolution replaces every `Path` with what it
-/// refers to; nothing downstream of `haven_front::module` should see one.
+/// A `::`-separated source name, such as `geo::Point` or `Status::Ready`.
+/// Used only before name resolution.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Path<'a> {
     /// At least one segment. `["geo", "Point"]` for `geo::Point`.
@@ -425,21 +416,11 @@ pub enum Type<'a> {
     /// "struct" was a lie roughly a third of the time and both typecheck and
     /// monomorphization had to re-disambiguate it independently.
     Path { path: Path<'a>, args: Vec<GenericArg<'a>> },
-    /// FRONT + MID: a named type, identified by the definition it refers to.
+    /// A resolved named type. Its definition records whether it is a struct,
+    /// enum, or synthetic payload type.
     ///
-    /// This is the resolved form of `Path`, and the only named type the resolver,
-    /// the typechecker and monomorphization ever see. Whether it is a struct, an
-    /// enum or an enum's synthetic payload struct is a property of the *definition*
-    /// (`Defs::get(def).kind`), not of the type — which is the whole point: two
-    /// modules may each declare a `Buf`, and a private `Option` in one module no
-    /// longer reserves that name program-wide, because nothing compares names to
-    /// decide whether two types are the same.
-    ///
-    /// `args` is always empty after monomorphization, which rewrites a generic use
-    /// to a freshly minted instance `DefId` with no arguments.
-    ///
-    /// MIL lowering converts these to `Struct`/`Enum` (see `mil::ctx::lower_ty`);
-    /// no stage after that seam sees a `Named`.
+    /// Monomorphization replaces generic arguments with an instance `DefId`.
+    /// MIL lowering then converts this to `Struct` or `Enum`.
     Named { def: DefId, args: Vec<GenericArg<'a>> },
     /// A generic type parameter, e.g. `T`, and `Self` inside a trait method
     /// signature. Produced by name resolution for a path naming a type parameter
@@ -537,21 +518,9 @@ pub struct Unified<'a> {
     pub consts: std::collections::HashMap<&'a str, ConstVal<'a>>,
 }
 
-/// Match `concrete` against `pattern`, whose free names are `params`, binding
-/// each parameter to whatever `concrete` has in that position. `Vec<T>` against
-/// `Vec<i32>` binds `T = i32`; `[T]` against `[[u8]]` binds `T = [u8]`.
-///
-/// This is what makes a structural `extend` dispatch: [`TyHead`] narrows a
-/// receiver to one impl, and this recovers the arguments the head threw away.
-/// One-directional by design - only the pattern may contain parameters, and a
-/// parameter in `concrete` (an unsubstituted `T` inside a generic body) matches
-/// nothing, which is correct: such a call is checked against the *bound*, not
-/// against an impl.
-///
-/// A parameter appearing twice must bind consistently, so `extend Pair<T, T>`
-/// rejects `Pair<i32, f32>`.
-///
-/// [`TyHead`]: crate::defs::TyHead
+/// Bind the free `params` in `pattern` by matching it against `concrete`.
+/// For example, `Vec<T>` matched with `Vec<i32>` binds `T = i32`.
+/// Repeated parameters must bind to the same type.
 pub fn unify<'a>(
     pattern: &Type<'a>,
     concrete: &Type<'a>,
@@ -634,16 +603,9 @@ pub enum ExprNode<'a> {
     Int8(i8), Int16(i16), Int32(i32), Int64(i64),
     Uint8(u8), Uint16(u16), Uint32(u32), Uint64(u64),
     Float32(f32), Float64(f64),
-    /// An integer literal written without a width suffix, e.g. `0` in
-    /// `let n: i64 = 0;`. Unlike the variants above it names no width of its
-    /// own: `check_expr` gives it whatever numeric type the context expects
-    /// (after verifying the value fits), and `infer` falls back to `i32` where
-    /// there is no expectation - which is what a bare `0` meant before this
-    /// existed. A *suffixed* literal keeps its exact type, so `0i32` in an
-    /// `i64` position is still an error.
-    ///
-    /// The chosen type lands in `node_types` under this node's id, and that -
-    /// not the variant - is what MIL lowering reads to emit the constant.
+    /// An integer literal without a width suffix. Context chooses its type;
+    /// without context it defaults to `i32`. MIL reads the chosen type from
+    /// `node_types`.
     IntLit(i128),
     /// A float literal written without a width suffix, e.g. `1.5`. Takes its
     /// type from context exactly like [`IntLit`], defaulting to `f32`; an
@@ -805,16 +767,8 @@ pub type Expr<'a> = Metadata<ExprNode<'a>>;
 /// `const N: u32` in `proc foo<T, const N: u32>(...)`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GenericParam<'a> {
-    /// A type parameter, e.g. `T`, optionally with trait bounds (`T: Display` or
-    /// `T: A + B`). `bounds` lists the traits the concrete argument must
-    /// implement; empty for an unbounded param. A bounded param's method calls
-    /// resolve through the trait in the typechecker, and monomorphization picks
-    /// the concrete impl (static dispatch).
-    ///
-    /// A bound names a trait, so it resolves to that trait's identity — which is
-    /// what the conformance table is keyed by. Without that, a bound could only
-    /// be checked by comparing trait *names*, and a `Display` declared in two
-    /// modules would satisfy each other's bounds.
+    /// A type parameter and its resolved trait bounds. The typechecker uses the
+    /// bounds for method lookup; monomorphization selects the concrete impl.
     Type { name: &'a str, bounds: Vec<NameRef<'a>> },
     /// A compile-time constant parameter, e.g. `const N: u32`.
     Const(&'a str, Type<'a>),
@@ -1098,20 +1052,8 @@ pub struct AttrSpec {
     targets: &'static [AttrTarget],
 }
 
-/// Every attribute the compiler acts on.
-///
-/// Anything not listed here is rejected. An unrecognized attribute never did
-/// anything, but it also never *said* anything: a typo (`@expont`), a
-/// misplacement (`@alloc` on a struct) and a wrong shape (`@alloc` with no
-/// value, which neither `is_true` nor `is_false` matches) all parsed happily
-/// and then read downstream as "no attribute at all". For `@export` that is a
-/// symbol that silently fails to link; for `@alloc` it is the difference
-/// between a checked allocation contract and no check.
-///
-/// One table serves both spellings: an `@!name` is checked against
-/// [`AttrTarget::Module`], so an item attribute written `@!export` and a module
-/// attribute written `@prelude` are both caught by the ordinary target rule
-/// rather than by a second set of checks.
+/// Attributes recognized by the compiler, including their allowed targets and
+/// value syntax. Module attributes use the same table with a module target.
 pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
     AttrSpec {
         name: LANG_ATTR, value: AttrValue::Always, values: Some(crate::defs::LANG_ITEMS),
@@ -1302,26 +1244,9 @@ pub fn bounds_hold<'a>(
     })
 }
 
-/// Whether `ty` implements `trait_`: some impl's target unifies with it *and*
-/// that impl's own `where` clause holds.
-///
-/// The clause is what makes conformance **conditional**, which is the whole
-/// point of bounding an inferred impl parameter. `extend Vec<T>: Delete where T:
-/// Delete` says a `Vec<Res>` owns something and a `Vec<u8>` does not — and
-/// deciding that requires asking the same question of `T`, hence the recursion.
-/// It terminates because each step asks about a strict subterm of the type it
-/// was handed, and a type is finite.
-///
-/// Ignoring the clause here is not a conservative approximation but a wrong
-/// answer in both directions: it would give `Vec<u8>` a destructor whose body
-/// calls `u8::delete`, and would let `Pair<f64>` satisfy a `Display` bound its
-/// impl cannot actually provide.
-///
-/// A still-symbolic type parameter is answered from `scope` instead: no impl
-/// covers a parameter, so without this the recursion bottoms out at "no" the
-/// moment a conditional impl's argument is itself a parameter - and a generic
-/// function could not pass its own parameter on to anything asking for the very
-/// bound it already declared.
+/// Test whether an impl target unifies with `ty` and its `where` clause holds.
+/// Symbolic parameters use the bounds in `scope`. Conditional impls recurse into
+/// their arguments, which are strict subterms of the original type.
 pub fn implements<'a>(
     impls: &[ImplDecl<'a>],
     scope: &ParamBounds<'a>,

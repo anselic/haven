@@ -1,8 +1,6 @@
-/// std/fmt: `Display`, a trait for rendering a value as an owned `String`.
+/// Render a value as an owned `String`.
 ///
-/// `import fmt { Display }` and every type here gains a `.display()` that
-/// returns a fresh `String` you own (and that is dropped for you). Implement it
-/// for your own types to make them printable the same way:
+/// Implement `Display` for custom printable types:
 ///
 ///     extend Point: Display {
 ///         proc display(*self) String {
@@ -14,9 +12,8 @@
 ///         }
 ///     }
 ///
-/// This is an ordinary trait, not a lang item: nothing in the compiler knows its
-/// name. It is implemented here for the primitive integer types, `bool`, `str`,
-/// `String`, and `Vec<T>` (whenever `T: Display`).
+/// Implementations are provided for integers, `bool`, `str`, `String`, and
+/// `Vec<T>` when `T: Display`.
 
 import string { String }
 import vec { Vec }

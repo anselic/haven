@@ -1,14 +1,8 @@
-//! monomorphization: rewrite generic (type-param) functions into concrete ones.
+//! Rewrite generic functions and types into concrete instances.
 //!
-//! runs AST -> AST after the first typecheck (which tells us which functions are
-//! generic) and before MIL lowering. every distinct instantiation reachable from
-//! a concrete call site becomes its own function with a mangled name
-//! (`id::<i32>` -> `id$i32`), and the call site is rewritten to call it directly.
-//! the result gets re-typechecked so node_types is filled in for the new nodes.
-//! MIL never sees a generic.
-//!
-//! type params only. const generics on user functions are rejected back in
-//! typecheck, so they never get here.
+//! This runs after the first typecheck and before MIL. Each reachable set of
+//! arguments gets a mangled instance, and call sites are rewritten to use it.
+//! The result is typechecked again; MIL never sees generics.
 
 use std::collections::{HashMap, VecDeque};
 

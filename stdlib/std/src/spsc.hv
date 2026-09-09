@@ -1,27 +1,11 @@
-/// std/spsc: a fixed-capacity queue for one producer and one consumer thread.
+/// A fixed-capacity queue for one producer and one consumer.
 ///
-/// Only the producer may push, and only the consumer may pop or peek. Each end
-/// has one writer, so no retry loop is needed. The operations do not grow the
-/// buffer. Use a `Copy` element type: `pop` copies the value before allowing
-/// the producer to reuse its slot.
+/// Only the producer may push, and only the consumer may pop or peek. Create it
+/// before starting either thread and use a `Copy` element type. Check that
+/// `AtomicU64` is lock-free if either thread must not block.
 ///
-/// Create the queue during setup and share a pointer to it. Check that
-/// `AtomicU64` is lock-free on the target before using the queue on a thread
-/// that must not block. Both threads must stop using it before it is destroyed.
-///
-/// The head counts pops and the tail counts pushes. `tail - head` gives the
-/// number of queued elements; `cursor & mask` selects a slot. Capacity is a
-/// power of two so indexing can use a mask. The `u64` counters wrap eventually.
-///
-/// The cursor updates also protect the buffer contents:
-/// * The producer writes a value, then release-stores the new tail. The consumer
-///   acquire-loads the tail before reading that value.
-/// * The consumer copies the value, then release-stores the new head. The producer
-///   acquire-loads the head before reusing the slot.
-///
-/// Each thread can load its own cursor with relaxed ordering because it is the
-/// only writer. Keep acquire and release ordering on the shared handoff: the
-/// buffer accesses themselves are not atomic.
+/// Head and tail updates use acquire-release ordering to protect slot contents;
+/// the slots themselves are not atomic.
 
 import alloc { alloc, dealloc }
 import atomic { AtomicU64 }

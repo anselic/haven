@@ -1,11 +1,7 @@
 //! `havendoc`: turn `.hv` source into mdBook-ready Markdown.
 //!
-//! The lexer discards comments as padding (see `parse::lexer`), so doc text
-//! never reaches the AST. Rather than thread doc tokens through the whole
-//! grammar, it parses each file for *real* signatures (generics, types,
-//! attributes all rendered via the AST's `Display` impls) and recovers the
-//! `///` doc bodies straight from the source bytes, keyed by each item's `Span`.
-//! Same result as attaching docs to the AST.
+//! Signatures come from the parsed AST. Since the lexer discards comments, doc
+//! bodies are read from the source and matched to items by span.
 //!
 //! Output layout, given `havendoc std -o docs`:
 //! ```text

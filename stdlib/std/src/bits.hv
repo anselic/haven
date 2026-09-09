@@ -1,16 +1,5 @@
-/// std/bits: count, rotate, reverse, and round unsigned integer bit patterns.
-///
-/// These helpers do not allocate. Use them for tasks such as counting set bits,
-/// finding a free slot in a bitset, or rounding a buffer size to a power of two.
-/// Names end in `_u32` or `_u64` to identify the input width; byte swaps also
-/// include a `_u16` version.
-///
-///     let n: u64 = next_power_of_two_u64(frames);
-///     let stages: u32 = log2_floor_u64(n);
-///     let j: u32 = bit_reverse_u32(i, stages);
-///
-/// Shifts must stay below the integer width. The zero-case guards in rotations
-/// and bit reversal prevent shifts by 32 or 64 bits.
+/// Bit counting, rotation, reversal, and power-of-two helpers for unsigned
+/// integers. These functions do not allocate.
 
 // These implementations use shifts and masks directly in Haven, with no C shim
 // or compiler intrinsic. Keep the steps recognizable when changing them.

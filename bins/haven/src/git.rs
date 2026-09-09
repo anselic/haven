@@ -1,16 +1,6 @@
-//! Fetching git dependencies into a global cache.
-//!
-//! A `{ git = "<url>", rev/tag/branch = "..." }` dependency has to become a
-//! directory on disk before the rest of the build can treat it like any other
-//! package. That is all this module does: it clones the repository once per URL,
-//! resolves the requested ref to a concrete commit, and checks that commit out
-//! into its own directory, returning the path. Everything downstream - loading
-//! the manifest, validating name/kind, walking the transitive graph - is shared
-//! verbatim with path dependencies (see [`crate::config::Project::dependencies`]).
+//! Fetch git dependencies into a global cache.
 //!
 //! # Cache layout
-//!
-//! Everything lives under `~/.haven/git/`, shared across all projects:
 //!
 //! ```text
 //! ~/.haven/git/
@@ -19,16 +9,9 @@
 //!     <commit-sha>/    a checked-out worktree, one per resolved commit
 //! ```
 //!
-//! Keying the checkout by *commit* (not by the ref that named it) is what makes a
-//! `rev`/`tag` dependency reuse across projects and skip the network on a warm
-//! cache: the commit is resolved from the existing clone with a local
-//! `rev-parse`, and if its directory is already there nothing is fetched.
-//!
-//! # Reproducibility
-//!
-//! `rev` and `tag` name an immutable commit, so a build is reproducible. `branch`
-//! (and the bare-URL default) resolve the branch tip afresh on every build and so
-//! are not; [`checkout`] prints a warning for those.
+//! Checkouts are keyed by commit, so different refs that resolve to the same
+//! commit share a worktree. Branch dependencies are refreshed on every build;
+//! revision and tag dependencies reuse the cached clone when possible.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

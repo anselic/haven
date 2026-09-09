@@ -1,16 +1,9 @@
-/// std/iter: the `Iterator` trait — the protocol a `for` loop consumes.
-///
-/// A type is an iterator when it can hand out its elements one at a time via
-/// `next`: it yields `Some(item)` until exhausted, then `None` forever after.
-/// `Item` is the element type, declared as an associated type so each iterator
-/// fixes its own without a type parameter on the trait.
+/// The iterator protocol used by `for` loops. `next` returns `Some(item)` until
+/// exhausted, then `None`. Each implementation defines its associated `Item`.
 ///
 ///     for (x in it) { ... }
 ///
-/// desugars to a loop that calls `it.next()` and binds each `Some` payload to
-/// `x`, stopping at the first `None`. The iterand is any expression; it is
-/// evaluated once into a hidden local before the loop, so `for (x in xs.iter())`
-/// builds a single iterator rather than a fresh one each step.
+/// The iterand is evaluated once, then `next` is called until it returns `None`.
 
 import option { Option }
 

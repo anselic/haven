@@ -462,27 +462,11 @@ fn artifact_path(base: &Path, output: Output) -> PathBuf {
 // post-build script
 // ---------------------------------------------------------------------------
 
-/// Compile (when stale) and run the project's `build` script, once the build's
-/// artifact is on disk.
+/// Compile a stale build script and run it after the project artifact is ready.
 ///
-/// The contract is deliberately generic. `haven` knows only "run this program
-/// after the artifact exists" and describes what it just did through the
-/// environment; everything domain-specific - staging a `.clap` or `.vst3`
-/// bundle, stamping a version, code-signing, copying into a plugin directory -
-/// is the script's business. That is the whole point: the build tool does not
-/// learn about plugin formats, and a format it has never heard of costs it
-/// nothing.
-///
-/// The script is an ordinary Haven program compiled against `std` **alone**. The
-/// project's own `[dependencies]` are deliberately not visible to it: it runs
-/// beside the build rather than inside it, and a packaging step wants `std/fs`,
-/// `std/env` and `std/process`, not the library the project happens to link.
-/// (Cargo draws the same line with `[build-dependencies]`.)
-///
-/// A nonzero exit fails the build. The script's stdout and stderr are inherited,
-/// so what it prints reaches the terminal interleaved with `haven`'s own lines -
-/// a packaging step is doing work the user asked for and should be able to say
-/// so, unlike Cargo's `build.rs`, whose output is swallowed by default.
+/// Build scripts receive artifact details through the environment and compile
+/// against `std` only, without the project's dependencies. A nonzero exit fails
+/// the build; stdout and stderr are inherited.
 fn run_build_script(
     project: &Project,
     script: &Path,
@@ -707,16 +691,9 @@ fn cwd() -> Result<PathBuf, String> {
     std::env::current_dir().map_err(|e| format!("cannot determine current directory: {}", e))
 }
 
-/// Locate a sibling tool (`havenc`, `havendoc`). Prefer one next to the running
-/// `haven` binary - in a workspace build all three live in the same
-/// `target/<profile>/` dir - and fall back to the bare name so a `PATH` install
-/// still works.
-/// `havenc`'s exit, as the build's verdict. A diagnostic exit (1) was already
-/// explained on stderr by the compiler, so `failed` stays a one-liner. 101 is
-/// Rust's exit for a panic - the compiler *crashed*, which is a bug in it and
-/// not in the project, and the report it printed says where to file that. The
-/// distinction matters: "compilation failed" sends a user back to their code,
-/// which is the wrong place to look.
+/// Find `havenc` or `havendoc` next to the current executable, falling back to
+/// `PATH`. Exit code 101 is reported as a compiler crash; other failures are
+/// ordinary compilation errors.
 fn havenc_outcome(exit: std::process::ExitStatus, failed: impl Into<String>) -> Result<(), String> {
     if exit.success() {
         return Ok(());

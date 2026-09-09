@@ -8,18 +8,9 @@ use std::collections::HashMap;
 use haven_common::defs::DefId;
 use crate::layout::{self, TypeTable, TypeInfo, EnumRepr};
 
-/// A symbol as LLVM will accept it after a `%`/`@` sigil, quoted if it has to be.
-///
-/// LLVM's bare identifier is `[-a-zA-Z$._][-a-zA-Z$._0-9]*`; anything else needs
-/// the quoted form. A **leading digit** is the case that actually bites: `%2_gain`
-/// does not parse as a badly-named type, it parses as the *unnamed value* `%2`
-/// followed by garbage, so the whole module is rejected by the IR parser with no
-/// mention of the name that caused it.
-///
-/// Symbols are mangled from the package name, which comes from `--package-name`
-/// or, failing that, the entry file's stem - so they can begin with whatever a
-/// file may be called. `examples/4_gain_plug.hv` was enough to produce IR clang
-/// would not read.
+/// Quote a symbol when it is not a valid bare LLVM identifier.
+/// Package names may begin with a digit, which LLVM would otherwise parse as an
+/// unnamed value number.
 fn ir_symbol(name: &str) -> Cow<'_, str> {
     fn bare(c: char) -> bool {
         c.is_ascii_alphanumeric() || matches!(c, '-' | '$' | '.' | '_')
@@ -710,23 +701,9 @@ fn unsigned_narrow_index(ty: &Type<'_>) -> Option<u32> {
 
 /// The `, align N` suffix for a `load`/`store`/`alloca`, or nothing at all.
 ///
-/// Nothing is the interesting case. Omitted, LLVM uses the type's ABI alignment
-/// from the target data layout - the alignment haven's layout model already
-/// assumes everywhere else: aggregates are emitted unpacked (`%Name = type
-/// { .. }`), so LLVM computes their offsets and padding; `Sizeof` asks the data
-/// layout; and an enum's payload blob picks an `[N x i64/i32/i8]` chunk so its
-/// ABI alignment covers the widest variant.
-///
-/// The previous `align.unwrap_or(1)` therefore did not describe a packed layout,
-/// it just declined to describe the real one - and cost every access for it.
-/// `align 1` on a vector load is an unaligned move, and it blocks any transform
-/// that needs a known alignment. An explicit `Some(n)` still wins, for a caller
-/// that knows better than the type does.
-///
-/// Deliberately *not* used by `emit_struct_to_regs`/`emit_regs_to_struct` below,
-/// which keep their hardcoded `align 1`: those read and write an eightbyte at a
-/// time through a struct whose own alignment may well be 4, so 1 is the true
-/// bound there rather than a missing one.
+/// When omitted, LLVM derives alignment from the target data layout. Explicit
+/// alignment wins. The ABI pack/unpack helpers keep `align 1` because they may
+/// access eightbytes through a less-aligned struct.
 fn align_suffix(align: Option<usize>) -> String {
     align.map(|n| format!(", align {n}")).unwrap_or_default()
 }

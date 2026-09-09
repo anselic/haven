@@ -1,22 +1,8 @@
-/// std/process: spawn a child program and wait for it, for build scripts and tooling.
+/// Spawn a child program and wait for it.
 ///
-/// Two ways to run a program (found on `PATH`) with a list of arguments:
-///
-///   - `run` lets the child inherit this process's stdout/stderr - its output
-///     streams straight to the terminal - and hands back the exit code. Use it
-///     to shell out to `havenc` and watch it work.
-///   - `capture` redirects the child's stdout and stderr into owned `String`s and
-///     hands them back alongside the exit code, bundled in an `Output`. Use it
-///     when you want to inspect or post-process what the child printed.
-///
-/// Both take the program name and its arguments *separately* - `args` holds only
-/// the arguments, not the program itself (that is prepended for you), so no shell
-/// is involved and no quoting is needed.
-///
-/// A nonzero exit code is NOT an error: a child that runs to completion yields
-/// `Ok` regardless of what it returns, and you inspect `code`/`success()`. The
-/// `Err(ProcError)` case is reserved for the launch itself failing - program not
-/// found, out of memory - carrying the underlying C `errno`.
+/// `run` inherits the current stdout and stderr; `capture` returns both streams
+/// in an `Output`. Arguments are passed directly without a shell. A nonzero child
+/// exit is still `Ok`; `Err` means the process could not be launched.
 ///
 ///     import process { run, capture, Output }
 ///     import result { Result }

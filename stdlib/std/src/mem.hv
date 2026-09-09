@@ -1,18 +1,11 @@
-/// std/mem: copy, fill, and compare memory through typed pointers.
-///
-/// Counts are in elements, not bytes. Each wrapper uses `sizeof::<T>()` to
-/// calculate the byte count. None of these operations allocate.
+/// Copy, fill, and compare memory through typed pointers. Counts are in elements,
+/// not bytes. These operations do not allocate or perform bounds checks.
 ///
 ///     mem::copy::<f32>(out, input, frames);
 ///     mem::zero::<f32>(tail, frames);
 ///
-/// There are no bounds checks. Callers must provide valid pointers and enough
-/// readable or writable storage, and ensure the byte count does not overflow.
-///
-/// Raw byte operations do not manage ownership or destroy overwritten values.
-/// Copying an owning value can create two owners of the same allocation;
-/// overwriting one can leak it. Container code must track which slots are live
-/// and which values need destruction. `@alloc(false)` does not check this.
+/// Raw memory operations do not manage ownership. Callers must provide valid,
+/// sufficiently large storage and must not copy or overwrite owning values.
 /// `set`, `swap`, and `replace` require a `Copy` element type.
 
 // libc takes untyped pointers and byte counts. The wrappers below convert

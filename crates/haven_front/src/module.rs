@@ -1,22 +1,8 @@
-//! module loading, name mangling and merging.
+//! Load modules, resolve names, and merge them into one program.
 //!
-//! sits between parsing and typechecking. given an entry file it:
-//!
-//!   1. transitively loads every imported module (`import std/...` -> an embedded
-//!      stdlib source; any other path -> an `.hv` file relative to the
-//!      *importing* file's dir);
-//!   2. gives each module a package-anchored mangling prefix and renames its
-//!      top-level defs (`bar` in `pkg`'s `geo.hv` -> `pkg.geo$bar`), leaving
-//!      `extern` link names and `@export`ed items alone (the driver `@export`s
-//!      the entry `main`, so it too keeps its spelling);
-//!   3. rewrites every reference (call targets, struct literals, struct types)
-//!      per that module's imports;
-//!   4. concatenates all modules into one flat program, no imports left.
-//!
-//! everything downstream (typecheck, mono, mil, ...) then sees one flat namespace
-//! exactly like before modules existed. lifetimes stay trivial: every module's
-//! source, tokens and freshly-minted (mangled) names go into one bumpalo arena
-//! owned by the caller, and the returned AST borrows it for `'a`.
+//! Imports are loaded transitively relative to the importing file. Each module
+//! receives a package-based symbol prefix, references are resolved through its
+//! imports, and the resulting items are merged into a flat AST.
 //!
 //! ## import forms
 //!
@@ -25,57 +11,22 @@
 //! * `import std/math { sinf }`   - selective, the named symbols visible
 //!   unqualified as `sinf`.
 //!
-//! the prelude is an implicit import into every user module, with its `pub`
-//! symbols visible unqualified (it has no qualifier spelling). which module *is*
-//! the prelude is found by the `@!prelude` mark it carries, not by its key or
-//! name (see [`PreludeSource`]): a bound dependency that advertises one supplies
-//! it, else the embedded stdlib's `std/prelude` serves by default. Either way it
-//! is an *ordinary* module - loaded under its own key like any other - so writing
-//! `import std/prelude` explicitly (when the embedded tree is the prelude)
-//! resolves to the same already-loaded module rather than a second copy of every
-//! prelude type under its own identities.
+//! The `@!prelude` module is imported implicitly into user modules. A dependency
+//! may provide it; otherwise the standard prelude is used.
 //!
 //! ## visibility
 //!
-//! top-level items are module-private by default; prefix an item with `pub` to
-//! make it importable by other modules. privacy is enforced purely at import
-//! resolution: a non-`pub` item never enters another module's `SymTab`, so it
-//! can't be named through a whole-module (`qual::sym`) or selective import, nor
-//! pulled in by the implicit prelude import. a module always sees all of its own
-//! items regardless of `pub`. `pub` is orthogonal to the `@export` attribute,
-//! which controls LLVM linkage / name mangling, not cross-module visibility.
+//! Top-level items are private unless marked `pub`. `@export` controls linker
+//! visibility separately.
 //!
 //! ## unresolved names
 //!
-//! a name that resolves to nothing is an error *here*, not a silent passthrough.
-//! letting one through used to leave the source spelling in the AST, where it
-//! then failed far downstream as a mismatch against some other module's mangled
-//! name - e.g. a `String` in a prelude trait signature, unresolved because the
-//! prelude imports no `String`, reported three stages later as an impl whose
-//! signature "does not match the trait".
-//!
-//! three things legitimately don't resolve through a module scope, and each is an
-//! explicit branch rather than a fallthrough: compiler intrinsics (`sizeof`,
-//! `__simd_*` - in no symbol table), `Self` in a trait method signature
-//! (substituted per impl by typecheck), and generic parameters of the enclosing
-//! item - including *const* params, which the parser can't tell from type
-//! arguments inside a turbofish.
-//!
-//! ## namespacing
-//!
-//! every kind of top-level item is namespaced by its module. structs, enums and
-//! traits alike are emitted as `<module slug>$<name>`, so two modules may declare
-//! the same type name and a private one reserves nothing program-wide.
-//!
-//! for enums and traits that only holds because *every* reference to them is
-//! rewritten: an `Enum::Variant` path in call, value, struct-literal and match
-//! pattern position (see `variant_path`), and a bare `T: Trait` bound (see
-//! `bounds`). leaving any one of those unrewritten is why both used to be emitted
-//! unmangled, and therefore had to be globally unique.
+//! Unknown names are diagnosed here. Intrinsics, `Self`, and generic parameters
+//! are the only names resolved outside a module symbol table.
 //!
 //! ## known v1 limitations
 //!
-//! * visibility is item-level only; struct *fields* are always public.
+//! * Visibility is item-level only; struct fields are always public.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 // `Path` is `ast::Path` here - a `::`-separated name. The filesystem one is
@@ -156,18 +107,13 @@ fn is_export(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| a.value.name == "export")
 }
 
-/// Whether an item keeps its source spelling as its emitted symbol, or gets the
-/// module slug prefixed. One rule, one place - this used to be re-derived by
-/// three near-identical `final_*_name` helpers, of which only the fn one knew
-/// about `extern`.
+/// Choose fixed or mangled linkage for an item.
 ///
 /// * `extern` - the name *is* the C link symbol.
 /// * `@export` - a host looks the symbol up by that name.
 ///
-/// The entry module is *not* special: its items mangle under the package
-/// namespace like any other module's, so a package is reproducible whether it is
-/// rooted at `main.hv` or `lib.hv`. `main` still links because the driver injects
-/// `@export` onto it before this runs, which routes it through `is_export`.
+/// Other items use the module namespace. The driver marks `main` as exported
+/// before this runs.
 fn linkage_of<'a>(name: &'a str, attrs: &[Attribute], is_extern: bool) -> Linkage<'a> {
     if is_extern || is_export(attrs) {
         Linkage::Fixed(name)
@@ -429,19 +375,8 @@ enum WhereOwner<'x, 'a> {
     Proc(&'x str),
 }
 
-/// Merge a `where` clause onto the parameters it bounds, so `extend Vec<T>:
-/// Display where T: Display` leaves `T` carrying the bound that lets the body
-/// call `self.a.display()` - and likewise for `proc f<T>(..) where T: Display`.
-///
-/// A clause naming something the binder does not bind is an error rather than a
-/// silent no-op: `where U: Display` on `extend Vec<T>` binds nothing, and the
-/// method body would then fail much later with "no method on type parameter",
-/// pointing at the call instead of at the typo. The check also catches the
-/// tempting `where Vec: Display` - a *bound on the target itself*, which is not
-/// a thing an impl can state.
-///
-/// `reported` deduplicates: an `extend` clause is copied onto every method of
-/// its block, so without it a one-line typo would produce one error per method.
+/// Apply a `where` clause to the parameters it names. Unknown parameters are
+/// reported once; `reported` suppresses duplicates from desugared methods.
 fn apply_where_bounds<'a>(
     generics: &mut [GenericParam<'a>],
     where_bounds: &[GenericParam<'a>],
@@ -602,29 +537,16 @@ fn alias_deps_ready<'a>(
     }
 }
 
-/// The type and const parameters an `extend` target binds implicitly, in
-/// first-appearance order.
-///
-/// Haven has no binder for them - the user writes `extend [T]`, not
-/// `extend<T> [T]` - so they are recovered from the target itself. A name is a
-/// parameter when it is all three of:
+/// Infer an `extend` target's type and const parameters in first-use order.
+/// A name is a parameter when it is:
 ///
 ///   * a single-segment, argument-less path (`T`, never `geo::Point` or
 ///     `Vec<T>`),
 ///   * a *proper subterm* of the target, and
 ///   * not a type in scope, per `known`.
 ///
-/// The last two each matter. Without "proper subterm", a typo'd `extend Poitn`
-/// would become a blanket impl over a parameter `Poitn` instead of the
-/// unknown-type error it should be - so a bare `extend T` is always a named
-/// type, and blanket impls do not exist yet. Without `known`, `extend *Point`
-/// would read its own element type as a parameter. A `ConstVal::Param` in an
-/// array or SIMD length is a const parameter by the same reasoning.
-///
-/// `decl` yields the declared parameters of a type path's head, and is what
-/// makes a `const` argument recognisable - see [`TypeParams`]. It may answer
-/// `None` (an unresolvable head, which pass 2 reports), in which case every
-/// argument falls back to being read as a type.
+/// Bare targets are always treated as named types, so blanket impls are not
+/// supported. `decl` identifies const argument positions when available.
 fn impl_generics<'a, 'd>(
     target: &Type<'a>,
     known: &dyn Fn(&str) -> bool,
@@ -771,24 +693,9 @@ fn target_key(ty: &Type<'_>) -> String {
     }
 }
 
-/// Rewrite every `Self` written inside a desugared `extend` method to the block's
-/// target type. `extend` is desugared before name resolution, so `Self` is still
-/// a plain single-segment `Path` (in type position) or path head (in expression
-/// position), and the target is the type exactly as written after `extend`. After
-/// this runs the synthesized free function names the concrete type only, so name
-/// resolution and typecheck treat it like any hand-written function.
-///
-/// Without it, `Self` survives resolution as an unbound `Type::Param("Self")`
-/// (which has no definition), and a method like `proc new() Self` fails to unify
-/// its concrete `return` value against that opaque param. The receiver's own
-/// `self` type is handled separately at desugar time; this covers every *other*
-/// occurrence: return/param types, `let x: Self`, turbofish (`null::<Self>()`),
-/// `Self { .. }` struct literals, and `Self::assoc()` paths.
-///
-/// `head` is the target's path (its segments replace a leading `Self` in an
-/// expression path); it is `None` when the target is not a nominal path (a
-/// primitive, slice, or pointer), for which an expression-position `Self` is
-/// meaningless anyway — type positions are still substituted with the full type.
+/// Replace `Self` in a desugared `extend` method with the block's target type.
+/// `head` replaces `Self` at the start of expression paths and is absent for
+/// structural targets; type positions always receive the full target.
 fn self_subst_type<'a>(ty: &mut Type<'a>, target: &Type<'a>, assoc: &[(&'a str, Type<'a>)]) {
     match ty {
         Type::Path { path, args } => {

@@ -1,10 +1,5 @@
-/// std/simd: portable wrappers over the compiler's SIMD intrinsics.
-///
-/// A `simd<T, N>` type is a fixed-width vector of `N` lanes of the numeric
-/// scalar `T` (`iN`/`uN`/`fN`); arithmetic on it is applied lane-wise and lowers
-/// to hardware vector instructions. The lane count `N` is a `const` generic
-/// resolved at monomorphization, so every vector width is a distinct concrete
-/// type with no runtime shape.
+/// Portable wrappers over the compiler's SIMD intrinsics. `simd<T, N>` is a
+/// fixed-width numeric vector with lane-wise arithmetic.
 ///
 /// Constraints shared by every proc here:
 ///   - `T` must be a numeric scalar (`iN`, `uN`, or `fN`) - the valid SIMD
@@ -13,11 +8,7 @@
 ///   - The width-changing ops (`simd_concat`, `simd_low`, `simd_high`)
 ///     additionally require even lane counts.
 ///
-/// Load/store come in two buffer forms, because the underlying intrinsic accepts
-/// either a slice or a raw pointer but haven has no overloading and no slice/
-/// pointer coercion, so one proc can't take both: `simd_load`/`simd_store` over a
-/// bounds-carrying `[T]` slice, and `simd_load_ptr`/`simd_store_ptr` over a raw
-/// `*T` (for DSP loops that already hold a bare pointer, e.g. from `alloc`).
+/// Slice and pointer loads have separate names because Haven has no overloading.
 
 // each proc is a one-line forward to the corresponding `__simd_*` intrinsic; the
 // intrinsic is what the middle-end recognizes and lowers, the wrapper only gives

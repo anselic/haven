@@ -1,14 +1,5 @@
-/// std/fs: filesystem operations, for build scripts and tooling.
-///
-/// A small, portable set of file and directory operations - read/write a whole
-/// file, copy, make/remove a directory, rename, existence queries, and `join` to
-/// build a path out of pieces - enough to drive a post-build `build.hv`. Paths
-/// are plain `str`s.
-///
-/// Fallible calls return a `Result`: the value on `Ok`, or an `FsError` carrying
-/// the underlying C `errno` on `Err`. Ask an `FsError` for its `message()` (a
-/// human-readable string) or its raw `errno()`. The pure queries `exists` and
-/// `is_dir` can't meaningfully fail, so they just return a `bool`.
+/// Portable file and directory operations. Paths are plain `str`s.
+/// Fallible calls return an `FsError` containing the underlying C `errno`.
 ///
 ///     import fs
 ///     import result { Result }
@@ -188,23 +179,8 @@ proc is_sep(b: u8) bool {
 ///     fs::join("dist/", "VERSION")    // "dist/VERSION" - not "dist//VERSION"
 ///     fs::join("", "VERSION")         // "VERSION"      - no leading separator
 ///
-/// Both sides are `str`, which is what a literal is and what `String::as_str`
-/// hands back, so a path built from a mixture of the two composes without a
-/// `String` per step. The result is owned, and is the input to the next `join`
-/// via `.as_str()`.
-///
-/// The inserted separator is `/`, the separator this module uses throughout and
-/// the one `mkdir_all` splits on; Windows accepts it everywhere. Separators
-/// already present are **not** rewritten, so joining onto a `\`-spelled path
-/// yields a mixed-separator result - ugly to read, accepted by every API that
-/// takes it, and the only safe choice: normalizing would corrupt the `\\?\`
-/// verbatim prefix Windows uses for long paths, which is meaningless with
-/// forward slashes.
-///
-/// An empty side contributes nothing and no separator, so joining onto an empty
-/// accumulator is a safe way to start a path. Otherwise a separator is inserted
-/// only when neither side already carries one, which makes the call idempotent
-/// with respect to trailing and leading slashes.
+/// The result is owned. Existing separators are preserved, including backslashes
+/// and Windows verbatim paths. Empty inputs add no separator.
 pub proc join(base: str, leaf: str) String {
     let head: String = String::from_str(base);
     let tail: String = String::from_str(leaf);

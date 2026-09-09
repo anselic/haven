@@ -37,16 +37,8 @@ pub struct Manifest {
     pub project: ProjectTable,
     #[serde(default)]
     pub dependencies: BTreeMap<String, DepSpec>,
-    /// `[[c]]` native-code tables: C sources this package ships and the native
-    /// libraries they need linked. Empty when the manifest declares none.
-    ///
-    /// An *array* of tables (`[[c]]`) rather than a single `[c]` so a package can
-    /// group its C by concern (`files = [...]` for one subsystem, another block
-    /// for another) if it wants; they are flattened by [`Project::c_source_files`]
-    /// and [`Project::link_libs`]. `deny_unknown_fields` above is what makes a
-    /// mistyped table name (`[[cc]]`) or key an error instead of silently dropped
-    /// - the trap `[dependencies]` used to have, and the reason a `.hvmeta` could
-    /// be built with no native code and fail to link with no explanation.
+    /// Native C sources and libraries declared in `[[c]]` tables.
+    /// Multiple tables are allowed and flattened by the accessors below.
     #[serde(default)]
     pub c: Vec<CTable>,
 }
@@ -75,18 +67,9 @@ pub struct CTable {
 /// remote_lib  = { git = "https://example.com/remote_lib.git", tag = "v1.2.0" }
 /// ```
 ///
-/// An inline *table* rather than a bare string deliberately: it is the shape that
-/// can grow a `version`/registry field later without breaking manifests written
-/// today. Anything else is captured by [`DepSpec::Other`] so the error can quote
-/// what was actually written instead of a serde type mismatch.
-///
-/// `untagged` picks the variant by which keys are present: `path` -> [`Path`],
-/// `git` -> [`Git`], anything else -> [`Other`]. `Other` must stay last, as it
-/// matches any value.
-///
-/// [`Path`]: DepSpec::Path
-/// [`Git`]: DepSpec::Git
-/// [`Other`]: DepSpec::Other
+/// Inline tables leave room for future dependency fields. With `untagged`, serde
+/// selects a variant from its keys; `Other` must remain last because it matches
+/// any value and exists only to improve error messages.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum DepSpec {
@@ -267,23 +250,10 @@ impl Project {
         })
     }
 
-    /// Locate, load and validate every direct dependency, in manifest order.
+    /// Load and validate direct dependencies in manifest order.
     ///
-    /// Each entry must name a Haven library (`kind = ["lib"]`, the kind that
-    /// emits a `.hvmeta`) whose own `[project].name` equals the key it is bound
-    /// to. That last rule is not bureaucracy: the bound name is what anchors the
-    /// library's emitted symbols, so binding `example_lib` under some other key
-    /// would compile its items under a namespace that disagrees with the
-    /// library's own build. `havenc` enforces the same rule; catching it here
-    /// just makes the message point at the manifest.
-    ///
-    /// This returns the **direct** dependencies only; a dependency that declares
-    /// its own is walked by the build tool (`build_project` in `main.rs`), which
-    /// builds the whole closure and binds every transitive artifact at the leaf.
-    /// The graph is knowable only from manifests (a `.hvmeta` records no
-    /// dependency list), so the walk resolves path deps directly with no version
-    /// arbitration, and a diamond is deduped by package name. Cycle detection
-    /// lives in the walk, not here.
+    /// Each dependency must be a library whose project name matches its manifest
+    /// key. The build graph walker handles transitive dependencies and cycles.
     pub fn dependencies(&self) -> Result<Vec<ResolvedDep>, String> {
         let mut out = Vec::new();
         for (name, spec) in &self.dependencies {

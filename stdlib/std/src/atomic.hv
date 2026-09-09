@@ -1,23 +1,9 @@
-/// std/atomic: unsigned integers that threads can read and update atomically.
+/// Atomic `u32` and `u64` values.
 ///
-/// Share a pointer to the same `AtomicU32` or `AtomicU64` between threads.
-/// All operations are `@alloc(false)`. Before using them in an audio callback,
-/// check `is_lock_free()` on the target so they do not rely on a runtime lock.
-///
-/// The method name tells you how the operation orders other memory accesses:
-/// * `_relaxed` only makes the integer access atomic. Use it for a standalone
-///   value, such as a statistics counter.
-/// * A `_release` store publishes earlier writes. An `_acquire` load that reads
-///   that store makes those writes visible to the reader. For example, write a
-///   buffer first, then publish its index with a release store.
-/// * `_seqcst` also places the operation in a single order shared by all
-///   sequentially consistent operations. You still need a correct sharing protocol.
-///
-/// `fetch_add`, `fetch_sub`, `fetch_and`, `fetch_or`, and `exchange` use
-/// acquire-release ordering unless their name says otherwise.
-///
-/// There is no `AtomicF32` wrapper. To share a float, reinterpret its bits as a
-/// `u32`, store them in `AtomicU32`, and reinterpret the loaded bits as a float.
+/// Share pointers to atomic values between threads and check `is_lock_free()`
+/// before using them where blocking is forbidden. Names ending in `_relaxed`,
+/// `_acquire`, `_release`, and `_seqcst` state their memory ordering; the other
+/// read-modify-write operations use acquire-release ordering.
 
 // These functions are implemented in std/c/atomic.c using C11 atomics.
 // Each ordering has its own function, so the C compiler knows it at compile time.

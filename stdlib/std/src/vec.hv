@@ -1,34 +1,9 @@
-/// std/vec: a growable, heap-backed array.
-///
-/// `Vec<T>` is a dynamic array: push elements and it grows its backing buffer
-/// for you, in amortized O(1) per push. Create one with `Vec::<T>::new` (or
-/// `Vec::<T>::with_capacity` to pre-size), append with `v.push`, read with
-/// `v.get`/`v.get_ptr`, and walk it with `v.for_each`/`v.map` or a `for` loop
-/// over `v.iter()`.
-///
-/// A `Vec` is also the fixed-capacity container: reserve the capacity you need
-/// with `with_capacity`, then push with `push_within_capacity`, which refuses
-/// rather than growing and so never allocates. That is the combination an audio
-/// callback needs - see that method for why plain `push` cannot be made to work
-/// there no matter how much capacity you reserve first.
-///
-/// A `Vec` owns its heap allocation and frees it for you: it implements `Delete`,
-/// so the buffer is released when the Vec goes out of scope, and each element is
-/// destroyed first (a no-op for elements that own nothing). There is no manual
-/// free to call. A fresh `Vec::<T>::new` allocates nothing, so an empty Vec is
-/// cheap and the first push performs the initial allocation.
+/// A growable, heap-backed array. It owns its buffer and destroys its elements
+/// when dropped. Use `with_capacity` and `push_within_capacity` when growth must
+/// not allocate.
 
-// layout is a three-word triple (data/len/cap). growth doubles `cap` via
-// `realloc` once `len` would exceed it, so N pushes cost O(N) total. because
-// rt_realloc(null, n) behaves like malloc(n), a null `data` makes the first
-// reserve a plain allocation with no special-casing.
-//
-// element ownership: `push`/`set` initialize a slot with `ptr_write`
-// rather than `*p = value`, because the slot is fresh (or being overwritten in
-// place, which the ownership pass forbids for an owning `T`). Destruction goes
-// the other way: the `Delete` impl runs `drop_in_place` over the live prefix,
-// which the ownership pass expands into one `T::delete` per element - and into
-// nothing when `T` owns nothing, so a `Vec<i32>` pays for none of this.
+// Growth doubles the capacity. `ptr_write` initializes unused slots without
+// trying to destroy their old contents.
 
 import alloc { alloc, realloc, dealloc }
 import option { Option }
@@ -99,16 +74,8 @@ pub struct Vec<T> {
         self.len = self.len + 1u64;
     }
 
-    /// Append `value` **only if there is already room**, handing it back when
-    /// there is not: `none` on success, `some(value)` when the Vec is full.
-    ///
-    /// This is the push that a real-time thread can call. Ordinary `push` is not,
-    /// and no amount of `reserve` makes it so: the alloc checker is static, so
-    /// `reserve` sits in `push`'s call graph whether or not it can be reached at
-    /// run time, and an `@alloc(false)` caller is rejected with
-    /// `'Vec$push' -> 'Vec$reserve' -> 'realloc' -> 'rt_realloc'`. Reserving
-    /// capacity in setup and calling this in the callback is how you get a push
-    /// the compiler will certify:
+    /// Append without growing. Returns `None` on success or `Some(value)` when
+    /// the Vec is full. This is safe to call from an `@alloc(false)` function:
     ///
     ///     let v: Vec<Voice> = Vec::<Voice>::with_capacity(16u64);   // setup
     ///     ...
@@ -117,31 +84,17 @@ pub struct Vec<T> {
     ///         return v.push_within_capacity(n).is_none();
     ///     }
     ///
-    /// The result reads backwards at first - `none` means it went in - but that
-    /// is what makes this work for every `T`. Returning the rejected value rather
-    /// than dropping it means no path here destroys anything, so nothing reaches
-    /// the allocator even when `T` owns something, and the caller decides what
-    /// becomes of a value that would not fit. Discarding the result is what
-    /// destroys it, and that happens at the call site where it is visible.
-    ///
-    /// One wrinkle when `T` owns something: the returned `Option<T>` owns it too,
-    /// so it cannot be chained off. `v.push_within_capacity(s).is_none()` borrows
-    /// a temporary that belongs to no scope, and the ownership pass rejects it -
-    /// rightly, since the rejected value would leak. Bind it first:
+    /// For an owning `T`, bind the result so a rejected value has a scope in
+    /// which it can be destroyed:
     ///
     ///     let slot: Option<String> = v.push_within_capacity(s);
     ///     if (slot.is_none()) { ... }   // `slot` is destroyed at end of scope
-    ///
-    /// A `T` that owns nothing has no such problem and chains fine, which is the
-    /// `.is_none()` in the example above.
     @alloc(false)
     pub proc push_within_capacity(*self, value: T) Option<T> {
         if (self.len >= self.cap) {
             return Option::Some(value);
         }
-        // room already reserved, so the slot is fresh capacity - uninitialized,
-        // which is what `ptr_write` is for. No `reserve`, hence no allocation on
-        // any path, hence the mark above holds.
+        // The slot is reserved but uninitialized.
         ptr_write::<T>(&self.data[self.len], value);
         self.len = self.len + 1u64;
         return Option::None;
@@ -189,19 +142,9 @@ pub struct Vec<T> {
         return Option::Some(&self.data[i]);
     }
 
-    /// The raw base pointer of the buffer (element 0), or null when the Vec has
-    /// never allocated. Unlike `get_ptr`, this is not bounds-checked and does not
-    /// depend on `len`: it hands back the buffer's address for callers that need
-    /// to walk the raw bytes (an FFI `argv`, a byte view).
-    ///
-    /// Invalidated by any `push` that grows the buffer, and by the free. Note
-    /// what that means if you hand this pointer to another thread: staying
-    /// within the reserved capacity keeps the buffer where it is, so a Vec only
-    /// ever pushed through `push_within_capacity` never moves - but nothing
-    /// enforces that, and one ordinary `push` from anywhere leaves the other
-    /// thread holding a dangling pointer. Reserve once and use
-    /// `push_within_capacity` throughout if a raw pointer to the buffer has
-    /// escaped.
+    /// Return the buffer's base pointer, or null if it has never allocated.
+    /// The pointer is not bounds-checked and is invalidated by reallocation or
+    /// destruction.
     pub proc as_ptr(*self) *T {
         return self.data;
     }
@@ -256,23 +199,14 @@ pub struct Vec<T> {
         return result;
     }
 
-    /// A by-pointer iterator over the elements, front to back, for driving a
-    /// `for` loop. Like `for_each`, each element is yielded as a `*T` rather than
-    /// by value, so an owning `T` is borrowed in place and never moved out of the
-    /// Vec. Drive it directly: `for (p in v.iter()) { ... *p ... }`. The iterator
-    /// holds a pointer back to this Vec and re-reads its length every step, so it must
-    /// not outlive the Vec, and pushing during iteration (which may reallocate the
-    /// buffer) still reads live elements but visits any newly pushed ones too.
+    /// Iterate front to back by pointer. The iterator borrows this Vec, reads its
+    /// length on every step, and must not outlive it.
     pub proc iter(*self) VecIter<T> {
         return VecIter::<T> { vec: self, pos: 0u64 };
     }
 }
 
-/// The iterator returned by `Vec::iter`: a pointer back to the source Vec and a
-/// cursor. It reaches each element through `Vec::get_ptr` and re-reads the Vec's
-/// length every step, so it always reflects the Vec's current state rather than a
-/// snapshot taken when `iter` was called. It borrows the Vec and must not outlive
-/// it.
+/// The iterator returned by `Vec::iter`.
 pub struct VecIter<T> {
     vec: *Vec<T>,  /// the Vec being walked
     pos: u64,      /// index of the next element to yield
@@ -290,13 +224,7 @@ extend VecIter<T>: Iterator {
     }
 }
 
-// `Vec<T>` is `Clone` exactly when its elements are. Each element is cloned
-// through a borrow (`get_ptr` gives a `*T`, and `clone` takes `*self`), so an
-// owning element is duplicated, never moved out of the source Vec. There is no
-// `*T: Clone` blanket to lean on the way `Display` has one - its `Self` would be
-// `*T`, but a pointer clone that returns the pointer is an alias, so `*T` is left
-// un-`Clone` and `p.clone()` on the `*T` from `get_ptr` dispatches straight to
-// `T`'s own impl through the `T: Clone` bound.
+// Clone each element through a borrow, leaving the source Vec intact.
 extend Vec<T>: Clone where T: Clone {
     proc clone(*self) Vec<T> {
         let out: Vec<T> = Vec::<T>::with_capacity(self.len());
@@ -309,23 +237,14 @@ extend Vec<T>: Clone where T: Clone {
     }
 }
 
-/// Read an element as an owned, independent clone - the owning-`T` counterpart
-/// to `get`. Where `get` copies the bits out (a move out of an index the Vec
-/// still owns, which the ownership pass rejects for an owner), `get_cloned`
-/// borrows the element and deep-copies it, leaving the Vec's own copy in place.
-/// A method-level bound can't be written (`where` attaches only to `extend`), so
-/// this lives in its own `extend Vec<T> where T: Clone` block rather than the
-/// struct body. Out-of-bounds is undefined; guard with len.
+/// Clone the element at `i` without removing it. Out-of-bounds is undefined.
 extend Vec<T> where T: Clone {
     pub proc get_cloned(*self, i: u64) T {
         return self.get_ptr(i).unwrap().clone();
     }
 }
 
-/// The destructor: destroy every element, then release the buffer. Called for
-/// you when the Vec goes out of scope - never by hand. `drop_in_place` expands to
-/// one `delete` per element (and to nothing when `T` owns nothing), and the
-/// `cap != 0` guard leaves an unallocated (freshly `new`'d) Vec untouched.
+/// Destroy every element, then release the buffer.
 extend Vec<T>: Delete {
     proc delete(*self) {
         drop_in_place::<T>(self.data, self.len);

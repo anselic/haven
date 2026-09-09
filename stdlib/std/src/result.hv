@@ -1,16 +1,5 @@
-/// std/result: a value or an error, backed by a real (data-carrying) enum.
-///
-/// `Result<T, E>` holds either a success value (`Ok(T)`) or an error (`Err(E)`),
-/// for any `T` and `E`. It is the idiom for a fallible operation that wants to
-/// say *why* it failed - where `Option<T>` only says *that* it did. Test it with
-/// `is_ok`/`is_err` (which borrow), then take a value out with `unwrap`/`expect`/
-/// `unwrap_or`/`unwrap_err` (which consume the `Result`), or transform it with
-/// `map`/`map_err`/`and_then`.
-///
-/// Taking a value out is a by-value move: the contained value is handed to the
-/// caller and the `Result` is spent. `unwrap`/`expect` have nothing to return on
-/// `Err` (and `unwrap_err` nothing on `Ok`), so they `abort` - guard with
-/// `is_ok`/`is_err` (or use `unwrap_or`) when the wrong variant is possible.
+/// A success value (`Ok(T)`) or an error (`Err(E)`). Methods that extract a value
+/// consume the `Result`; `unwrap` and `expect` abort on the wrong variant.
 
 pub enum Result<T, E> {
     Ok(T),

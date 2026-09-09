@@ -1,27 +1,13 @@
-//! Definition identities.
+//! Definition identities and emitted symbol names.
 //!
-//! Every top-level item a program declares gets one [`DefId`] here, allocated
-//! once while its module is being resolved. A `Def` records where the item came
-//! from, what kind it is, and — crucially — how its emitted symbol name is
-//! derived. [`Defs::symbol`] is the *only* place a symbol name is constructed.
-//!
-//! Definition identity is no longer a mangled string. A resolved named type is
-//! `Type::Named { def, .. }`, a resolved variant reference is a `NameRef`, and
-//! every table that has anything to say about a definition - its fields, its
-//! members, its conformances, its instances - is keyed by `DefId`. Nothing
-//! between name resolution and MIL lowering compares, constructs or parses a
-//! name; mangling is load-bearing only for linking.
-//!
-//! MIL lowering is the seam. It asks for [`Defs::symbols`] once, and everything
-//! downstream of it works in emitted names - which is all the backend wants,
-//! since by then monomorphization has flattened every generic and no two types
-//! can share a name anyway.
+//! Name resolution assigns a [`DefId`] to every top-level item. Compiler tables
+//! use that identity until MIL lowering converts definitions to emitted names.
+//! [`Defs::symbol`] is the only place that constructs those names.
 //!
 //! ## symbol scheme
 //!
-//! An item that must keep a stable spelling — an `extern`'s C link name or an
-//! `@export`ed item — is [`Linkage::Fixed`] and is emitted verbatim. Everything
-//! else is [`Linkage::Mangled`] and comes out as `<module slug>$<source name>`:
+//! Fixed-linkage items keep their source spelling. Other items use
+//! `<module slug>$<source name>`:
 //!
 //! ```text
 //! std.math$square          std/math.hv
@@ -30,22 +16,9 @@
 //! foo.dsp.osc$Osc          src/dsp/osc.hv
 //! ```
 //!
-//! The slug is a pure function of `(package name, module path relative to that
-//! package's root)`: the root module carries the bare package name, a submodule
-//! `<package>.<relpath>`, and `std` is just the package named `std`. No absolute
-//! filesystem path ever appears in a symbol, so the same package compiled from
-//! any location on any machine emits identical names — what `--shared` /
-//! `--static-lib` ABI and reproducible builds need.
-//!
-//! The slug is derived from the module's *path*, not from load order. The old
-//! scheme was `m{id}_{basename}` with `id` an enqueue index, so adding an
-//! unrelated import renamed every symbol in the program.
-//!
-//! The `$` between slug and name is a separator only - nothing takes a symbol
-//! apart to recover the item name any more. Diagnostics get the source spelling
-//! from [`Def::source_name`] instead, which is why an instance now reads as
-//! `alloc::<Vec2>` rather than being recovered by stripping everything before
-//! the last `$`.
+//! Slugs depend only on the package name and relative module path, keeping
+//! symbols stable across machines and import order. Diagnostics use
+//! [`Def::source_name`] instead of parsing mangled symbols.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -54,26 +27,11 @@ use bumpalo::Bump;
 
 use crate::ast::{FileId, GenericArg, GenericParam, Receiver, Span, Type};
 
-/// Every lang item name, as written in `@lang(...)`.
-///
-/// One list, read twice: the attribute table validates a written name against
-/// it, and the module loader matches on it to fill [`LangItems`]. Adding a lang
-/// item means adding a name here, a field below, and an arm in the loader - and
-/// the loader reports rather than panics if the last is forgotten.
+/// Names accepted by `@lang(...)`.
 pub const LANG_ITEMS: &[&str] = &["delete"];
 
-/// The definitions the compiler itself knows about.
-///
-/// Resolved once, by the module loader, out of the prelude's own symbol table -
-/// the one place that knows which module *is* the prelude, by identity rather
-/// than by re-recognizing a module key string downstream. That keying is what
-/// makes a user's own `trait Delete` in their own module an ordinary trait
-/// rather than something that quietly acquires destructor semantics, and it
-/// survives the prelude arriving by some other route than the embedded tree.
-///
-/// A field is `None` only when there is no prelude at all (`--no-prelude`): a
-/// prelude that is present but does not declare a lang item is a load error, so
-/// no later stage has to tell "absent" apart from "not found".
+/// Compiler-known definitions resolved from the prelude.
+/// Fields are `None` only when compiling without a prelude.
 #[derive(Default)]
 pub struct LangItems {
     /// `trait Delete` - marks a type as owning something, and names the
@@ -86,14 +44,7 @@ pub struct LangItems {
 pub struct DefId(pub u32);
 
 impl DefId {
-    /// The identity a parser-produced node carries until name resolution fills
-    /// it in. Resolution either overwrites every one of these or reports an
-    /// unknown-name error, so it must never reach a later stage; [`Defs::get`]
-    /// panics on it rather than returning a plausible-looking wrong answer.
-    ///
-    /// A sentinel rather than an `Option` because the alternative is unwrapping
-    /// at every one of the ~40 sites that read a resolved id, all of which would
-    /// be `expect`ing the same invariant.
+    /// Placeholder used before name resolution. [`Defs::get`] rejects it.
     pub const UNRESOLVED: DefId = DefId(u32::MAX);
 
     pub fn is_resolved(self) -> bool { self != DefId::UNRESOLVED }
@@ -144,16 +95,9 @@ pub struct Def<'a> {
 
 /// The type constructor an `extend` block dispatches on.
 ///
-/// A definition is its own head, so a struct and an enum are as distinct as two
-/// structs. Everything else in the type grammar is *structural* and has no
-/// definition to name: `[i32]`, `*Point` and `[u8; 4]` are built by applying a
-/// constructor to other types, and there are infinitely many of them, so they
-/// cannot each be given a `DefId`. They share the head of their constructor
-/// instead - every slice is `Slice` - and the argument types are recovered by
-/// unifying against the impl's written self type (see [`Member::self_ty`]).
-///
-/// A generic type's head is its *template*: `Vec<i32>` and `Vec<f32>` are both
-/// `Def(Vec)`, which is what lets one `extend Vec<T>` answer for every instance.
+/// Named types use their definition; structural types share a constructor head.
+/// A generic instance uses its template definition, so one `extend Vec<T>` can
+/// cover every `Vec` instance.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TyHead {
     /// A struct, enum or enum-payload definition, generic template included.
@@ -197,20 +141,8 @@ impl TyHead {
         })
     }
 
-    /// The head a built-in type *keyword* names, for a type-qualified path in
-    /// expression position: the `i32` of `i32::from(x)`.
-    ///
-    /// In type position the parser has already mapped these names to a
-    /// [`Type`], so [`Self::of`] suffices; in expression position a path is
-    /// just a list of identifiers and nothing has looked at them yet. The list
-    /// deliberately mirrors the scalar table in `parse_type` — these are
-    /// keywords, so one name must not mean two things depending on where it is
-    /// written.
-    ///
-    /// The structural heads have no entry: `[i32]` is not an identifier, so
-    /// there is no path that could name one. Reaching a slice's associated
-    /// functions would need a `<[i32]>::` form, which the grammar has no
-    /// production for.
+    /// Resolve a built-in type keyword used as a qualified expression path,
+    /// such as the `i32` in `i32::from(x)`. Structural types have no keyword.
     pub fn of_builtin(name: &str) -> Option<Self> {
         Some(match name {
             "void" => TyHead::Void,
@@ -296,21 +228,9 @@ pub struct Member<'a> {
 
 /// Methods and associated functions, keyed by `(receiver head, method name)`.
 ///
-/// Replaces reconstructing `format!("{}${}", type_name, method)` and hoping it
-/// hit a real symbol. That only worked because `<slug>$Point` plus `$area`
-/// happens to equal `<slug>$(Point$area)` — a coincidence of the mangling that
-/// fails for enums or `@export`ed structs, whose type names are not
-/// slug-prefixed while their methods' are. Those were silently unreachable
-/// outside the entry module.
-///
-/// Keyed by [`TyHead`] rather than by `DefId` so a method can hang off a type
-/// that has no definition to key on - a primitive or a structural type. The
-/// consequence is that the key is no longer exact: `extend [i32]` and
-/// `extend [f32]` both want `(Slice, ...)`. Rather than make every value a
-/// candidate list with an overlap check, one impl per `(head, method)` wins the
-/// slot and a second is a duplicate-method error - which forbids specializing
-/// `extend [T]` with an `extend [i32]`, exactly as Rust does without the
-/// unstable `specialization` feature.
+/// [`TyHead`] supports methods on primitives and structural types, which have no
+/// `DefId`. Only one method may occupy a `(head, name)` slot, so structural impls
+/// cannot be specialized.
 pub type MemberTable<'a> = HashMap<(TyHead, &'a str), Member<'a>>;
 
 /// What a monomorphized instance came from.
@@ -341,19 +261,8 @@ pub struct Instance<'a> {
 /// Every monomorphized instance in the program, keyed by its own identity.
 pub type Instances<'a> = HashMap<DefId, Instance<'a>>;
 
-/// Put a monomorphized instance type back into template form: the flat `Named`
-/// `Vec$i32` (no args) becomes `Vec<i32>` (`Def(Vec)` + `[i32]`).
-///
-/// Every table that answers a question *about a type* - the member table, the
-/// conformance list - is keyed on the template, because that is what the source
-/// declared: one `extend Vec<T>` covers every `Vec<i32>` there will ever be. But
-/// a type in hand after monomorphization names an instance. This is the bridge,
-/// and every such lookup has to cross it or it misses.
-///
-/// A non-generic struct is a `Named` with no args too, but is absent from
-/// `instances`, so it passes through unchanged - as does a type that is already
-/// in template form, though its *arguments* are still visited, since a nested
-/// one can be an instance (`Buf<Vec$i32>`).
+/// Convert monomorphized instances back to template form for member and
+/// conformance lookup. For example, `Vec$i32` becomes `Vec<i32>`.
 pub fn deinstance<'a>(instances: &Instances<'a>, ty: &Type<'a>) -> Type<'a> {
     let go = |t: &Type<'a>| deinstance(instances, t);
     let arg = |a: &GenericArg<'a>| match a {

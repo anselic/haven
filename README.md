@@ -46,10 +46,8 @@ crates/
 └── haven_mid/      # middle-end code (type checking, semantic analysis, etc.)
 extensions/
 └── vscode/         # VSCode extension for syntax highlighting
-std/                # haven standard library package
-├── dsp/            # DSP-related modules
-├── plug/           # CLAP plugin framework modules
-└── std/            # its modules (lib.hv is the entry point / prelude)
+stdlib/
+└── std/            # haven standard library packages
 ```
 
 ## License

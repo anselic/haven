@@ -1,22 +1,8 @@
-/// std/ring: a circular queue with fixed capacity.
+/// A fixed-capacity circular queue. Capacity is rounded up to a power of two.
 ///
-/// Push adds at the back and pop removes from the front. Indices wrap around
-/// the buffer, so elements do not need to shift. A full ring rejects new values;
-/// `push_overwrite` instead drops the oldest value to keep a rolling history.
-///
-/// Capacity is rounded up to a power of two: requesting 48 slots gives 64.
-/// This lets indexing wrap with `index & (cap - 1)`. Use your own length limit
-/// if you need an exact maximum. A zero-capacity ring cannot accept values.
-///
-/// This type has no thread synchronization. Use `std/spsc` to pass values
-/// between one producer thread and one consumer thread.
-///
-/// The ring owns its buffer and live elements. It never grows after construction,
-/// but destroying elements can call the allocator. For that reason, `push`,
-/// `push_overwrite`, and `clear` have no `@alloc(false)` annotation; the checker
-/// uses the element type to determine whether a caller can use them.
-/// `try_push` returns rejected values without destroying them and is always
-/// `@alloc(false)`. Cloning or formatting a ring can allocate.
+/// A full queue rejects `push`; `push_overwrite` drops the oldest item instead.
+/// `try_push` returns a rejected value without destroying it. This type is not
+/// synchronized; use `std/spsc` between threads.
 
 import alloc { alloc, dealloc }
 import bits { next_power_of_two_u64 }

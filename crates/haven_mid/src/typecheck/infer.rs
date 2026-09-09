@@ -25,21 +25,9 @@ pub(crate) fn receiver_member<'a>(cx: &Context<'a>, base_ty: &Type<'a>, field: &
     found.map(|(m, u)| (m.clone(), u))
 }
 
-/// A member's signature as seen at one call site: its parameter types (`self`
-/// first) and return type, fully specialized.
-///
-/// Two sources of bindings meet here. The `extend` block's own parameters come
-/// from `u`, recovered by unifying the impl's target against the receiver — the
-/// `T` of `extend [T]` is whatever `xs` turned out to be a slice of. Parameters
-/// the *method* declares beyond those are not determined by the receiver, so
-/// they come from the call's turbofish: `xs.fold::<u64>(...)`. Because the
-/// desugared function lists the impl's parameters first, the two sets are just
-/// the head and tail of one list.
-///
-/// Inferring the method's own parameters from the argument types instead would
-/// be real inference, which this compiler does nowhere (every generic call is
-/// turbofished), so an omitted turbofish is an arity error naming what is
-/// missing rather than a confusing mismatch downstream.
+/// Specialize a member signature for one call site. Receiver matching supplies
+/// the `extend` block's arguments; the call's turbofish supplies any method
+/// arguments. The desugared signature stores those groups in that order.
 fn method_signature<'a>(
     cx: &Context<'a>,
     m: &Member<'a>,
@@ -1444,19 +1432,9 @@ pub(crate) fn infer<'a>(
     Ok(ty)
 }
 
-/// Whether executing `stmt` guarantees control flow never falls through to the
-/// statement after it - i.e. it returns (or diverges) on every path. Used to
-/// verify that a non-void function cannot reach the end of its body without
-/// returning a value.
-///
-/// Conservative on loops: a `while` is assumed to possibly run zero times, so it
-/// never guarantees a return (not even `while (true)`, since there's no
-/// break analysis), and `break`/`continue` count as fall-through.
-///
-/// `node_types` lets a diverging expression statement count as a return: a bare
-/// `abort(...);` has type `!`, so control cannot fall past it - the same reason
-/// `return abort(...)` works. This is why a `match` arm may end in a plain
-/// `abort(...)` without a `return`.
+/// Whether every path through `stmt` returns or diverges. Loops are treated
+/// conservatively because there is no break analysis. Expressions typed `!`
+/// also prevent fallthrough.
 pub(crate) fn always_returns(stmt: &Stmt, node_types: &HashMap<usize, Type>) -> bool {
     match &stmt.value {
         StmtNode::Return(_) => true,

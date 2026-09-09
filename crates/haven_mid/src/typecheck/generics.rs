@@ -239,20 +239,9 @@ pub(crate) fn bind_turbofish<'a>(
     Ok((type_bindings, const_bindings))
 }
 
-/// Verify that each bounded type parameter's binding implements the traits it was
-/// declared to. Nominal: satisfaction means an `extend T: Trait` impl exists.
-///
-/// Shared by the two ways a parameter acquires a binding. A turbofish binds one
-/// positionally (`show::<f64>()`), and unifying an `extend` target against a
-/// receiver binds one by matching (`p.display()` on a `Pair<f64>`, where
-/// `extend Pair<T>: Display where T: Display`). Both have to be checked, and
-/// checking them in the same place is what makes the second produce an error
-/// about the call rather than one about the template body it would otherwise
-/// fail inside - "`f64` does not implement `Display`" instead of "cannot access
-/// field 'display' on type f64", pointing at a line the caller never wrote.
-///
-/// `who` names whatever imposed the bound, for the message: a function, a method,
-/// or an `extend` target.
+/// Check that each bound argument implements its declared traits. Bindings may
+/// come from a turbofish or from matching an `extend` target to a receiver.
+/// `who` names the function, method, or target that imposed the bound.
 pub(crate) fn check_bounds<'a>(
     cx: &Context<'a>,
     who: &str,
@@ -335,18 +324,10 @@ pub(crate) fn check_generic_call<'a>(
     Ok((return_type, inferred))
 }
 
-/// Recover the callee's type-param bindings from the argument types, for a call
-/// written without a turbofish (`printf(x)` rather than `printf::<T>(x)`). Each
-/// declared parameter type is a pattern over the callee's generics; unifying it
-/// against the inferred argument type binds whatever generics appear in it, so
-/// `arg: T` against an `str` argument binds `T = str`.
-///
-/// Unification is best-effort per argument: a param that shares no structure with
-/// its argument simply binds nothing (a generic that appears in *no* parameter is
-/// then caught by `materialize_targs`), and a structural mismatch on a param that
-/// *does* mention a generic is left for the `check_expr` pass to report against
-/// the substituted type, where the message names the concrete types rather than a
-/// bare "could not unify".
+/// Infer a callee's type arguments from ordinary call arguments. Each declared
+/// parameter type is matched as a pattern against the inferred argument type.
+/// Missing bindings are handled by `materialize_targs`; concrete mismatches are
+/// left for `check_expr` to report.
 fn infer_type_args<'a>(
     cx: &mut Context<'a>,
     name: &str,
@@ -367,24 +348,9 @@ fn infer_type_args<'a>(
     Ok((u.types, u.consts))
 }
 
-/// Recover a generic struct's type arguments from the values its literal gives
-/// its fields, for a literal written without a turbofish (`Serial { a: x, b: y }`
-/// rather than `Serial::<A, B> { .. }`).
-///
-/// The struct-literal counterpart of [`infer_type_args`], and deliberately the
-/// same shape: each declared field type is a pattern over the struct's params,
-/// and unifying it against the inferred field-value type binds whatever params
-/// appear in it. `a: A` against a `Gain` value binds `A = Gain`.
-///
-/// Best-effort per field, for the same reason: a field sharing no structure with
-/// its value binds nothing and is reported by [`materialize_targs`], while a
-/// structural mismatch is left to the `check_expr` pass below, whose message
-/// names the concrete types.
-///
-/// Fields are matched positionally against the declaration, which is what the
-/// caller enforces anyway - a literal must list every field in order - so a
-/// literal with the wrong arity or a misspelled field simply binds less and
-/// falls through to that check.
+/// Infer a generic struct's type arguments from its field values. Declared field
+/// types are matched positionally as patterns, following [`infer_type_args`].
+/// Missing bindings and concrete mismatches are reported by later checks.
 pub(crate) fn infer_struct_type_args<'a>(
     cx: &mut Context<'a>,
     name: &str,
@@ -408,24 +374,10 @@ pub(crate) fn infer_struct_type_args<'a>(
     materialize_targs(name, params, &u.types, &u.consts, TargSite::StructLit, span)
 }
 
-/// Recover a generic enum's type arguments from the values a constructor gives
-/// its variant's payload, for a constructor written without a turbofish and
-/// with nothing around it to say what it should be (`let x = Option::Some(5);`
-/// rather than `Option::Some::<i32>(5)`).
-///
-/// The enum counterpart of [`infer_struct_type_args`], and the same shape: each
-/// payload field type is a pattern over the enum's params, unified against the
-/// inferred type of the value given for it. `Some(T)` against an `i32` binds
-/// `T = i32`. `payload` pairs each declared field type with the expression
-/// written for it, in declaration order; the tuple and struct-style forms both
-/// reduce to that.
-///
-/// This is the fallback, not the main road: a constructor in a position with an
-/// expectation (`let x: Option<i64> = ..`, `return None`) takes its arguments
-/// from that type instead, which is the only thing that can determine a unit
-/// variant's, and lets a width-less literal in the payload take the width the
-/// context asks for. A unit variant reaching here has no values to look at, so
-/// every param goes unbound and the error says so.
+/// Infer a generic enum's type arguments from a constructor payload when no
+/// turbofish or expected type is available. Payload field types are matched as
+/// patterns against their expressions. Unit variants cannot infer arguments
+/// this way.
 pub(crate) fn infer_enum_type_args<'a>(
     cx: &mut Context<'a>,
     name: &str,

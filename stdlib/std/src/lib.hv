@@ -38,19 +38,11 @@ import spsc
 ///         proc delete(*self) { dealloc::<u8>(self.data, self.cap); }
 ///     }
 ///
-/// This is a *lang item*: the compiler looks this exact trait up (by name, in
-/// the prelude) and treats implementing it as a statement about ownership, not
-/// merely as conformance.
+/// `Delete` is a lang item. Implementing it makes the type non-`Copy`; passing
+/// the value transfers ownership. The compiler calls `delete` for each live
+/// owner at scope exit, before overwrite, and on return.
 ///
-///   * the type stops being `Copy`, and so does anything holding one, so
-///     assigning or passing it by value **moves** it and the source can no
-///     longer be used. That is what turns a silent aliasing bug into an error;
-///   * the compiler calls `delete` for you when an owner goes out of scope, is
-///     overwritten, or is dropped at a `return` - once, on the live owner, and
-///     never on one whose value has been moved away.
-///
-/// Never call `delete` by hand: the automatic call still happens, and the
-/// resource would be released twice.
+/// Never call `delete` directly, or the automatic call will release it twice.
 @lang(delete)
 pub trait Delete {
     proc delete(*self);

@@ -1,10 +1,5 @@
-/// std/string: an owned, growable text buffer.
-///
-/// `String` is a heap-backed, growable string, a thin wrapper over a `Vec<u8>`
-/// of bytes exactly as Rust's `String` wraps a `Vec<u8>`. Build one with
-/// `String::new` (or `String::from_str` to seed it from a literal), append with
-/// `s.push_byte`/`s.push_str`, compare with `s.eq`, and hand a borrowable C
-/// string to `print`/`println` via `s.as_str`.
+/// An owned, growable byte string backed by `Vec<u8>`. Use `as_str` to borrow it
+/// as a NUL-terminated `str`.
 ///
 /// `str` - borrowed text, what a literal is - gets an `eq` of its own here, so
 /// comparing against a literal never needs a `String` built to hold it:

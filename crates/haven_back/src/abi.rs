@@ -1,22 +1,13 @@
-//! x86-64 System V ABI classification: decides how a value crosses the C FFI
-//! boundary - passed/returned in registers as coerced "eightbyte" pieces, or via
-//! memory (a `byval` pointer argument / `sret` return slot).
-//!
-//! This is step 2 of by-value struct FFI. It only *classifies*; emitting the
-//! pack/unpack glue at call/return boundaries is a separate step. It builds on
-//! the byte geometry from [`crate::layout`].
+//! Classify values for the x86-64 System V and Microsoft C ABIs.
 //!
 //! Reference: System V AMD64 ABI, §3.2.3 "Parameter Passing". We implement the
-//! subset needed for real code: aggregates up to two eightbytes (16 bytes) of
-//! integers, floats, pointers and small SIMD. Anything larger is MEMORY. We do
+//! subset used by Haven: aggregates up to two eightbytes (16 bytes) of integers,
+//! floats, pointers and small SIMD. Larger values use memory. We do
 //! not model `__m256`/`__m512` (SSEUP) or unaligned/packed structs, since the
 //! language produces neither.
 //!
-//! On Windows we instead follow the Microsoft x64 convention, which diverges
-//! only for aggregates: a struct/array of size 1/2/4/8 bytes rides in a single
-//! *integer* register (even an all-float one like `Vector2`), and every other
-//! aggregate is passed by reference (`byval`/`sret`). Scalars are unchanged. See
-//! [`classify_win64`].
+//! Microsoft x64 passes 1-, 2-, 4-, and 8-byte aggregates in integer registers;
+//! other aggregates are passed by reference. See [`classify_win64`].
 
 use std::collections::HashMap;
 use haven_common::ast::Type;
@@ -161,22 +152,10 @@ pub fn classify_sysv<'a>(ty: &Type<'a>, types: &TypeTable<'a>, unions: &UnionTab
     Abi::Direct(regs)
 }
 
-/// Classify how `ty` is passed/returned under the Microsoft x64 convention
-/// (Windows).
+/// Classify `ty` under the Microsoft x64 convention.
 ///
-/// The rules only diverge from SysV for aggregates:
-///
-///   * A struct/array whose size is exactly 1/2/4/8 bytes rides in a single
-///     *integer* register of that width - even an all-float one like `Vector2`,
-///     which SysV would hand to an SSE register as `<2 x float>`. This is why
-///     by-value struct FFI to raylib silently misdrew on Windows before.
-///   * Any other aggregate (sizes 3/5/6/7, or larger than 8 bytes) is passed by
-///     reference: a `byval` pointer argument / `sret` return slot.
-///
-/// Scalars - including pointers and SIMD vector types - keep their natural
-/// register, exactly as under SysV, so we delegate anything that isn't a struct
-/// or array to [`classify_sysv`]. The downstream pack/unpack glue is bytewise, so
-/// coercing an all-float eightbyte to `i64` needs no other changes.
+/// Aggregates of exactly 1, 2, 4, or 8 bytes use an integer register. Other
+/// aggregates use `byval`/`sret`; scalars follow their normal SysV class.
 pub fn classify_win64<'a>(ty: &Type<'a>, types: &TypeTable<'a>, unions: &UnionTable) -> Abi {
     match ty {
         _ if is_aggregate(ty, types) =>

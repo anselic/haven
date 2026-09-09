@@ -1,30 +1,8 @@
-//! Reachability pruning: drop every function and extern that nothing can call.
+//! Remove functions and externs that cannot be reached.
 //!
-//! The module resolver puts the whole prelude, and every imported module, into
-//! one flat program. So a ten-line `main` pulls all of `std` through mono,
-//! typecheck, MIL and LLVM emission. clang's `-O3` removes the unused
-//! `internal` functions from the binary anyway, so this pass does not change
-//! the output. It is here so that the rest of the pipeline (and clang's parser)
-//! never sees the dead code, and so the emitted `.ll` stays (somewhat) readable.
-//!
-//! The pass runs after ownership and before MIL. Ownership is the last pass
-//! that adds new calls: the `delete`s it inserts. A destructor can be reachable
-//! only through one of those calls, and we must still mark it, so the walk has
-//! to see them.
-//!
-//! The analysis is a worklist over names. After mono, a reference to a function
-//! has one of two shapes. Both of them name the emitted symbol directly:
-//!
-//! - `ExprNode::Var(symbol)`. This is the shape for a call, and also for a
-//!   function used as a value, for example a function pointer kept in a local.
-//!   We mark every `Var` that names a callable, not only the ones in call
-//!   position. That is what makes address-taken functions roots instead of
-//!   false negatives.
-//! - a method call on a receiver. Its target is in `Context::method_calls`.
-//!
-//! If we keep too much, nothing bad happens, because clang removes it. If we
-//! keep too little, we get a missing symbol at link time. So when a name is not
-//! clear, for example a local that shadows a function, we keep the function.
+//! This runs after ownership, the last pass that inserts calls, and before MIL.
+//! The worklist follows callable `Var` nodes (including function values) and
+//! resolved method calls. Ambiguous names are kept conservatively.
 
 use std::collections::{HashMap, HashSet};
 

@@ -1,46 +1,21 @@
-//! Ownership: move checking and automatic `delete` insertion.
+//! Move checking and automatic `delete` insertion.
 //!
-//! A type *owns* something when it implements the prelude's `Delete` lang item,
-//! or when one of its fields does. Every other type is `Copy`: a bitwise copy of
-//! it is as good as the original, which is what every value in the language was
-//! before this pass existed. So ownership is entirely opt-in - a program that
-//! never writes `extend T: Delete` is unaffected by anything here.
-//!
-//! For an owning type two things change, and they define each other:
-//!
-//!   * **moves.** Assigning or passing the value by value transfers ownership;
-//!     the source is dead afterwards and using it is an error. Without this,
-//!     `let b = a;` on a heap-owning struct silently makes two owners of one
-//!     allocation - the aliasing bug in `sketch_uaf.hv`.
-//!   * **destruction.** The owner's `delete` is called for it: at the end of the
-//!     scope that owns it, before it is overwritten, and on the way out of a
-//!     `return`. Exactly once, and never on a value that has been moved away -
-//!     which is precisely what move checking establishes.
+//! A type owns a value when it or one of its fields implements the prelude's
+//! `Delete` lang item. Passing an owner by value moves it; live owners are
+//! destroyed at scope exit, before overwrite, and on return.
 //!
 //! ## where this runs
 //!
-//! After monomorphization *and* after the second typecheck, for the same reason
-//! trait dispatch resolves there: every type is concrete, so "is this `Copy`?"
-//! has an answer without a `Copy` bound on every generic parameter, and
-//! `node_types` already says what every expression's type is. Generic templates
-//! are skipped - they emit no code, exactly as in MIL lowering.
-//!
-//! The `delete` calls this pass synthesizes are ordinary AST calls, and it
-//! records their types and bindings into the typecheck context as it builds
-//! them, so MIL lowering can lower them with no further typecheck pass.
+//! This pass runs after monomorphization and the second typecheck, when all
+//! emitted types are concrete. Inserted calls are recorded in the existing
+//! typecheck context for MIL lowering.
 //!
 //! ## what is deliberately not handled
 //!
-//!   * **conditional drops.** A value moved on one path but not another would
-//!     need a runtime drop flag. Rather than leak or double-free, this is a
-//!     clean error at the point the drop would be emitted.
-//!   * **partial moves.** Moving one field out of an owning value is rejected;
-//!     only whole locals move.
+//! Conditional drops and partial moves are rejected. Supporting them would
+//! require runtime drop flags.
 //!
-//! Enum payloads and array elements *are* dropped: a drop path is not only a
-//! chain of field names but may also step through every element of an array or
-//! into the live variant of an enum, emitting a loop or a `match` that the rest
-//! of the path continues inside. See [`Step`].
+//! Array elements and active enum payloads are included in drop paths.
 
 use std::collections::{HashMap, HashSet};
 
@@ -453,20 +428,9 @@ impl<'a, 'c> Checker<'a, 'c> {
         }
     }
 
-    /// A `*self` method called on a temporary: `make_buf().len()`.
-    ///
-    /// Lowering gives the temporary a slot to be borrowed from, which is all a
-    /// `Copy` receiver needs. An owning one is different: the slot is not a
-    /// binding, so no scope lists it and nothing ever calls its `delete` - the
-    /// resource would leak, silently and every time.
-    ///
-    /// `hoist_stmt` spills such a temporary into a `let` dropped at the end of
-    /// the enclosing statement before this runs, so in every ordinary statement
-    /// the temporary is already a `Var` here and this is a no-op. The one place
-    /// it still fires is a `while` condition, which is not hoisted (it is
-    /// re-evaluated per iteration, so its temporary cannot be spilled to before
-    /// the loop) - there a borrowed owning temporary is still an error, and the
-    /// fix is to bind it with a `let` inside the loop body.
+    /// Check a borrowed method receiver for an unscoped owning temporary.
+    /// Ordinary statements are handled by `hoist_stmt`; `while` conditions
+    /// cannot be hoisted and are rejected here.
     fn borrowed_temp(&mut self, base: &Expr<'a>) {
         // a bare name reaches `Temp` only when it is a module-level global.
         // Lowering does copy one of those, but a constant's resource is static
@@ -486,20 +450,9 @@ impl<'a, 'c> Checker<'a, 'c> {
 
     // --- temporary lifetime extension
 
-    /// Spill any borrowed owning temporary in this statement's own expressions
-    /// into a `let` (appended to `decls`), rewriting each such temporary in
-    /// place into a reference to its spill local. The caller wraps the statement
-    /// in a block that owns those `let`s, so the block's scope-end unwind runs
-    /// each temporary's `delete` - extending its life to the end of the
-    /// enclosing statement, which is late enough that any borrow taken from it
-    /// during the statement stays valid.
-    ///
-    /// The `while` condition is deliberately not hoisted: it is re-evaluated on
-    /// every iteration, so a temporary borrowed there must be created and
-    /// destroyed *inside* the loop, which a spill to before the loop cannot
-    /// express. `borrowed_temp` still reports it. Branch and loop bodies carry
-    /// no expression of their own here - they are separate statements, hoisted
-    /// as each is processed.
+    /// Spill borrowed owning temporaries into locals that live through the
+    /// enclosing statement. `while` conditions are excluded because their
+    /// temporaries must be recreated on every iteration.
     fn hoist_stmt(&mut self, value: &mut StmtNode<'a>, decls: &mut Vec<Stmt<'a>>) {
         match value {
             StmtNode::Expr(e) => self.hoist_temps(e, decls),
@@ -954,18 +907,9 @@ impl<'a, 'c> Checker<'a, 'c> {
     ///   while ($dip_i < $dip_count) { delete(&$dip_base[$dip_i]...); $dip_i = $dip_i + 1; } }
     /// ```
     ///
-    /// Producing an ordinary AST loop rather than emitting one in MIL is what
-    /// keeps the alloc check honest: it runs after this pass and reads the call
-    /// graph off the AST, so a `@alloc(false)` function that drops elements which
-    /// free memory is caught by the machinery that already exists.
-    ///
-    /// `ptr` and `count` are bound first so each is evaluated exactly once, which
-    /// matters when they are `self.data` and `self.len` and the loop is what
-    /// mutates neither - but also simply because a call argument may have effects.
-    ///
-    /// `drops` is `T`'s non-empty drop paths; the caller keeps the call as-is
-    /// when there are none, which is the `Vec<u8>` case and is why a destructor
-    /// written once over `T` costs nothing for elements that need no destruction.
+    /// The AST loop remains visible to allocation checking. `ptr` and `count`
+    /// are bound once before the loop. The caller skips expansion when `drops`
+    /// is empty.
     fn expand_drop_in_place(&mut self, call: Expr<'a>, elem_ty: Type<'a>,
                             drops: &[DropPath<'a>], span: Span, out: &mut Vec<Stmt<'a>>) {
         let ExprNode::Call { args, .. } = call.value else { unreachable!("checked by the caller") };
