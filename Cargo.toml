@@ -20,12 +20,11 @@ haven_back = { path = "crates/haven_back" }
 haven_meta = { path = "crates/haven_meta" }
 
 ariadne = "0.6.0"
-# ariadne's own colour backend. Depended on directly so `diag` can reach yansi's
-# global switch; the version must stay compatible with ariadne's so cargo unifies
-# the two into one crate - and therefore one global - rather than linking both.
+# ariadne's colour backend. Depended on directly so diagnostics can reach yansi's
+# global switch. the version must stay compatible with ariadne
 yansi = "1.0"
 bumpalo = "3.20.3"
-chumsky = { git = "https://codeberg.org/zesterer/chumsky", rev = "dd46ce3def", features = ["pratt"] }
+chumsky = { git = "https://codeberg.org/zesterer/chumsky", rev = "b4c0054bc1", features = ["pratt"] }
 clap = { version = "4.6.1", features = ["derive"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
