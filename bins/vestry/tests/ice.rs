@@ -1,4 +1,4 @@
-//! When `havenc` crashes under `haven build`, the build must say so - "the
+//! When `havenc` crashes under `vestry build`, the build must say so - "the
 //! compiler crashed", not "compilation failed" - because the two send the user
 //! to different places: their own code, or a bug report.
 //!
@@ -9,29 +9,29 @@
 use std::process::Command;
 
 mod common;
-use common::{err, scaffold, HAVEN};
+use common::{err, scaffold, VESTRY};
 
 #[test]
 fn a_compiler_crash_is_reported_as_a_crash() {
     let dir = tempfile::tempdir().unwrap();
     scaffold(dir.path(), &[
-        ("haven.toml", "[project]\nname = \"app\"\nkind = [\"bin\"]\n"),
+        ("vestry.toml", "[project]\nname = \"app\"\nkind = [\"bin\"]\n"),
         ("src/main.hv", "proc main() i32 { return 0; }\n"),
     ]);
 
-    let o = Command::new(HAVEN)
+    let o = Command::new(VESTRY)
         .current_dir(dir.path())
         .env("HAVENC_INTERNAL_PANIC", "1")
         .env_remove("RUST_BACKTRACE")
         .arg("build")
         .output()
-        .expect("failed to spawn haven");
+        .expect("failed to spawn vestry");
     assert!(!o.status.success(), "a crashed compiler must fail the build");
 
     let e = err(&o);
     assert!(e.contains("internal compiler error"),
         "the compiler's own report reaches the user:\n{e}");
     assert!(e.contains("the compiler crashed"),
-        "and haven names it as a crash, not a build failure:\n{e}");
+        "and vestry names it as a crash, not a build failure:\n{e}");
     assert!(!e.contains("compilation failed"), "got:\n{e}");
 }

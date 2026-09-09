@@ -10,27 +10,27 @@ from pathlib import Path
 
 STD_ARTIFACT = "std.hvmeta"
 
-DEFAULT_DEST = Path.home() / ".haven"
+DEFAULT_DEST = Path.home() / ".vestry"
 
 def build_lib(source_dir, dest_dir, pkg, artifact, env=None):
     exe_ext = ".exe" if platform.system() == "Windows" else ""
-    haven = (source_dir / f"haven{exe_ext}").resolve()
+    vestry = (source_dir / f"vestry{exe_ext}").resolve()
     havenc = (source_dir / f"havenc{exe_ext}").resolve()
-    if not haven.exists() or not havenc.exists():
-        print(f"Warning: {haven} or its sibling {havenc.name} not found; cannot build "
+    if not vestry.exists() or not havenc.exists():
+        print(f"Warning: {vestry} or its sibling {havenc.name} not found; cannot build "
               f"{artifact}. Programs will need $HAVEN_STD or --dep.")
         return
     pkg_dir = (Path("stdlib") / pkg).resolve()
-    result = subprocess.run([str(haven), "build"], cwd=str(pkg_dir), env=env,
+    result = subprocess.run([str(vestry), "build"], cwd=str(pkg_dir), env=env,
                             encoding="utf-8", capture_output=True, text=True)
     if result.returncode != 0:
         print(f"Failed to build {artifact}:\n{result.stderr}")
         return
     else:
         print(result.stdout, end="")
-    built = pkg_dir / ".haven" / "target" / artifact
+    built = pkg_dir / ".vestry" / "target" / artifact
     if not built.exists():
-        print(f"Failed to build {artifact}: `haven build` produced no artifact "
+        print(f"Failed to build {artifact}: `vestry build` produced no artifact "
               f"at {built}.")
         return
     out = dest_dir / artifact
@@ -43,16 +43,16 @@ def build_lib(source_dir, dest_dir, pkg, artifact, env=None):
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
 
-    parser = argparse.ArgumentParser(description="Manage haven binaries.")
+    parser = argparse.ArgumentParser(description="Manage Haven toolchain binaries.")
     parser.add_argument("--debug", action="store_true", help="Copy debug builds instead of release.")
-    parser.add_argument("--path", type=str, help="Destination directory (default: ~/.haven, created if missing).")
+    parser.add_argument("--path", type=str, help="Destination directory (default: ~/.vestry, created if missing).")
     parser.add_argument("--uninstall", action="store_true", help="Delete the binaries instead of installing them.")
     args = parser.parse_args()
 
     is_windows = platform.system() == "Windows"
     exe_ext = ".exe" if is_windows else ""
     binaries = [
-        f"haven{exe_ext}",
+        f"vestry{exe_ext}",
         f"havenc{exe_ext}",
         f"havendoc{exe_ext}",
     ]
@@ -91,7 +91,7 @@ def main():
         print(f"Building {build_type} binaries...")
         result = subprocess.run(
             ["cargo", "build",
-            "--bin", "haven",
+            "--bin", "vestry",
             "--bin", "havenc",
             "--bin", "havendoc"]
             + (["--release"] if not args.debug else []),
@@ -100,7 +100,7 @@ def main():
             print(f"Failed to build binaries:\n{result.stderr}")
             sys.exit(1)
 
-        # Default to `~/.haven` (created if missing); `--path` overrides it.
+        # Default to `~/.vestry` (created if missing); `--path` overrides it.
         # `havenc` discovers `std.hvmeta` beside its own binary, so the binaries
         # and the stdlib artifacts live together in one directory.
         dest_dir = Path(args.path).expanduser().resolve() if args.path else DEFAULT_DEST
@@ -129,10 +129,10 @@ def main():
 
         build_lib(source_dir, dest_dir, "std", STD_ARTIFACT)
 
-        # `~/.haven` is not on `PATH` by default; nudge the user to add it.
+        # `~/.vestry` is not on `PATH` by default; nudge the user to add it.
         path_dirs = os.environ.get("PATH", "").split(os.pathsep)
         if str(dest_dir) not in path_dirs:
-            print(f"\nAdd {dest_dir} to your PATH to run haven/havenc directly, e.g.:")
+            print(f"\nAdd {dest_dir} to your PATH to run vestry/havenc directly, e.g.:")
             print(f'  export PATH="{dest_dir}:$PATH"')
 
 if __name__ == "__main__":

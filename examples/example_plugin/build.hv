@@ -1,19 +1,19 @@
 // Package a freshly-linked shared library as a `.clap` plugin bundle.
 //
-// `haven` runs this after the artifact links, because `haven.toml` says
+// `vestry` runs this after the artifact links, because `vestry.toml` says
 // `build = "build.hv"`. Nothing in the build system knows what CLAP is: the
 // format lives here, in ordinary Haven, and a second format would be a second
 // script rather than a change to the tool.
 //
-// What `haven` sets for us, from the project root as the working directory:
+// What `vestry` sets for us, from the project root as the working directory:
 //
-//     HAVEN_ARTIFACT      absolute path to the library just built
-//     HAVEN_TARGET_DIR    where it was written (.haven/target)
-//     HAVEN_PROJECT_ROOT  the directory holding haven.toml
-//     HAVEN_PKG_NAME      [project].name
-//     HAVEN_PKG_VERSION   [project].version, or empty
-//     HAVEN_OUTPUT_KIND   bin | cdylib | staticlib | lib
-//     HAVEN_TARGET_OS     windows | macos | linux
+//     VESTRY_ARTIFACT      absolute path to the library just built
+//     VESTRY_TARGET_DIR    where it was written (.vestry/target)
+//     VESTRY_PROJECT_ROOT  the directory holding vestry.toml
+//     VESTRY_PKG_NAME      [project].name
+//     VESTRY_PKG_VERSION   [project].version, or empty
+//     VESTRY_OUTPUT_KIND   bin | cdylib | staticlib | lib
+//     VESTRY_TARGET_OS     windows | macos | linux
 //
 // A `.clap` is the shared library renamed on Windows and Linux, and a macOS
 // bundle directory on macOS. Hosts search `~/.clap`, `%COMMONPROGRAMFILES%\CLAP`
@@ -31,11 +31,11 @@ import std/fs
 import std/result { Result }
 import std/string { String }
 
-/// A contract variable. Absent means this was not run by `haven build`, which is
+/// A contract variable. Absent means this was not run by `vestry build`, which is
 /// a bug rather than a user mistake - so it aborts rather than returning an
 /// `Option` no caller could do anything useful with.
 proc need(name: str) String {
-    return env::var(name).expect("build.hv: expected a HAVEN_* variable set by `haven build`");
+    return env::var(name).expect("build.hv: expected a VESTRY_* variable set by `vestry build`");
 }
 
 /// Copy, reporting the failure rather than swallowing it. Returns false on error.
@@ -118,19 +118,19 @@ proc bundle_macos(artifact: str, bundle: str, name: str, version: str) bool {
 }
 
 proc main() i32 {
-    let kind: String = need("HAVEN_OUTPUT_KIND");
+    let kind: String = need("VESTRY_OUTPUT_KIND");
     if (!kind.as_str().eq("cdylib")) {
         print("  a .clap needs a shared library, but this build produced a ");
         print(kind.as_str());
-        println(" - set `kind = [\"cdylib\"]` in haven.toml");
+        println(" - set `kind = [\"cdylib\"]` in vestry.toml");
         return 1;
     }
 
-    let os: String = need("HAVEN_TARGET_OS");
-    let artifact: String = need("HAVEN_ARTIFACT");
-    let target: String = need("HAVEN_TARGET_DIR");
-    let name: String = need("HAVEN_PKG_NAME");
-    let version: String = need("HAVEN_PKG_VERSION");
+    let os: String = need("VESTRY_TARGET_OS");
+    let artifact: String = need("VESTRY_ARTIFACT");
+    let target: String = need("VESTRY_TARGET_DIR");
+    let name: String = need("VESTRY_PKG_NAME");
+    let version: String = need("VESTRY_PKG_VERSION");
 
     // <target>/<name>.clap
     let leaf: String = String::from_str(name.as_str());

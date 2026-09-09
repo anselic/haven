@@ -9,8 +9,8 @@
 # default compiler output
 output
 
-# `haven build` output, including a build script's bundles (`.clap`, ...)
-.haven/
+# `vestry build` output, including a build script's bundles (`.clap`, ...)
+.vestry/
 
 # docs
 /docs

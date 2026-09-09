@@ -1,17 +1,17 @@
-//! `[dependencies]` wiring: `haven build`/`haven run` on a project with a path
+//! `[dependencies]` wiring: `vestry build`/`vestry run` on a project with a path
 //! dependency on a Haven library.
 
 use std::path::Path;
 
 mod common;
-use common::{err, haven, out, scaffold};
+use common::{err, vestry, out, scaffold};
 
 /// An `app` binary depending on an `example_lib` library by path — the layout the
 /// `[dependencies]` table is for. The library imports `std/math`, so this also
 /// covers std staying shared across the dependency boundary.
 fn workspace(root: &Path) {
     scaffold(root, &[
-        ("example_lib/haven.toml",
+        ("example_lib/vestry.toml",
             "[project]\nname = \"example_lib\"\nversion = \"0.1.0\"\nkind = [\"lib\"]\n"),
         ("example_lib/src/lib.hv",
             "import std/math { square }\n\
@@ -19,7 +19,7 @@ fn workspace(root: &Path) {
              \x20   return numerical_cast::<i32>(square(numerical_cast::<f64>(a)) \
              + square(numerical_cast::<f64>(b)));\n\
              }\n"),
-        ("app/haven.toml",
+        ("app/vestry.toml",
             "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\n\
              [dependencies]\nexample_lib = { path = \"../example_lib\" }\n"),
         ("app/src/main.hv",
@@ -33,7 +33,7 @@ fn workspace(root: &Path) {
 
 /// Replace `app`'s manifest, keeping the rest of the layout.
 fn set_app_manifest(root: &Path, body: &str) {
-    std::fs::write(root.join("app").join("haven.toml"), body).unwrap();
+    std::fs::write(root.join("app").join("vestry.toml"), body).unwrap();
 }
 
 #[test]
@@ -42,15 +42,15 @@ fn builds_dependency_then_program() {
     workspace(dir.path());
     let app = dir.path().join("app");
 
-    let res = haven(&app, &["build"]);
+    let res = vestry(&app, &["build"]);
     assert!(res.status.success(), "build failed: {}", err(&res));
 
-    // the library is built first, into its own `.haven/target/`, as a `.hvmeta`.
+    // the library is built first, into its own `.vestry/target/`, as a `.hvmeta`.
     let stdout = out(&res);
     let lib_at = stdout.find("Compiling example_lib").expect("library not built");
     let app_at = stdout.find("Compiling app").expect("program not built");
     assert!(lib_at < app_at, "the dependency must build first:\n{stdout}");
-    assert!(dir.path().join("example_lib/.haven/target/example-lib.hvmeta").is_file(),
+    assert!(dir.path().join("example_lib/.vestry/target/example-lib.hvmeta").is_file(),
         "dependency should emit a .hvmeta into its own target dir");
 }
 
@@ -58,13 +58,13 @@ fn builds_dependency_then_program() {
 fn runs_with_dependency() {
     let dir = tempfile::tempdir().unwrap();
     workspace(dir.path());
-    let res = haven(&dir.path().join("app"), &["run"]);
+    let res = vestry(&dir.path().join("app"), &["run"]);
     assert!(res.status.success(), "run failed: {}", err(&res));
     // 5*5 + 3*3 == 34; also proves std linked once across the boundary.
     assert!(out(&res).contains("34"), "unexpected program output:\n{}", out(&res));
 }
 
-/// A dependency may declare dependencies of its own: `haven build` walks the
+/// A dependency may declare dependencies of its own: `vestry build` walks the
 /// whole closure, builds each package once bottom-up, and binds every transitive
 /// artifact at the leaf so the intermediate library's imports resolve there too.
 #[test]
@@ -72,21 +72,21 @@ fn resolves_transitive_dependency() {
     let dir = tempfile::tempdir().unwrap();
     workspace(dir.path());
     scaffold(dir.path(), &[
-        ("deep/haven.toml",
+        ("deep/vestry.toml",
             "[project]\nname = \"deep\"\nversion = \"0.1.0\"\nkind = [\"lib\"]\n"),
         ("deep/src/lib.hv", "pub proc bonus() i32 { return 100; }\n"),
     ]);
     // `example_lib` now depends on `deep` and uses its symbol, so `deep` must be
     // bound when `example_lib` compiles *and* when `app` (the leaf) re-resolves
     // it - the transitive case a `.hvmeta`'s empty dependency list can't carry.
-    std::fs::write(dir.path().join("example_lib/haven.toml"),
+    std::fs::write(dir.path().join("example_lib/vestry.toml"),
         "[project]\nname = \"example_lib\"\nversion = \"0.1.0\"\nkind = [\"lib\"]\n\n\
          [dependencies]\ndeep = { path = \"../deep\" }\n").unwrap();
     std::fs::write(dir.path().join("example_lib/src/lib.hv"),
         "import deep { bonus }\n\
          pub proc sumsq(a: i32, b: i32) i32 { return a * a + b * b + bonus(); }\n").unwrap();
 
-    let res = haven(&dir.path().join("app"), &["run"]);
+    let res = vestry(&dir.path().join("app"), &["run"]);
     assert!(res.status.success(), "transitive build/run failed: {}", err(&res));
     // 5*5 + 3*3 + 100 == 134: proves `deep` resolved at the leaf `app`.
     assert!(out(&res).contains("134"), "unexpected program output:\n{}", out(&res));
@@ -103,7 +103,7 @@ fn rejects_name_mismatch() {
         "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\n\
          [dependencies]\nwrong_name = { path = \"../example_lib\" }\n");
 
-    let res = haven(&dir.path().join("app"), &["build"]);
+    let res = vestry(&dir.path().join("app"), &["build"]);
     assert!(!res.status.success(), "a mismatched dependency key must be rejected");
     let e = err(&res);
     assert!(e.contains("wrong_name") && e.contains("example_lib"),
@@ -116,10 +116,10 @@ fn rejects_name_mismatch() {
 fn rejects_non_lib_dependency() {
     let dir = tempfile::tempdir().unwrap();
     workspace(dir.path());
-    std::fs::write(dir.path().join("example_lib/haven.toml"),
+    std::fs::write(dir.path().join("example_lib/vestry.toml"),
         "[project]\nname = \"example_lib\"\nversion = \"0.1.0\"\nkind = [\"cdylib\"]\n").unwrap();
 
-    let res = haven(&dir.path().join("app"), &["build"]);
+    let res = vestry(&dir.path().join("app"), &["build"]);
     assert!(!res.status.success(), "a non-lib dependency must be rejected");
     assert!(err(&res).contains("not a Haven library"), "got: {}", err(&res));
 }
@@ -132,10 +132,10 @@ fn reports_missing_dependency_path() {
         "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\n\
          [dependencies]\nexample_lib = { path = \"../nowhere\" }\n");
 
-    let res = haven(&dir.path().join("app"), &["build"]);
+    let res = vestry(&dir.path().join("app"), &["build"]);
     assert!(!res.status.success(), "a missing dependency path must be reported");
     let e = err(&res);
-    assert!(e.contains("haven.toml") && e.contains("example_lib"), "got: {e}");
+    assert!(e.contains("vestry.toml") && e.contains("example_lib"), "got: {e}");
 }
 
 /// A bare string (`example_lib = "../example_lib"`) is not the supported form;
@@ -148,12 +148,12 @@ fn rejects_unsupported_dependency_form() {
         "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\n\
          [dependencies]\nexample_lib = \"../example_lib\"\n");
 
-    let res = haven(&dir.path().join("app"), &["build"]);
+    let res = vestry(&dir.path().join("app"), &["build"]);
     assert!(!res.status.success(), "a bare-string dependency must be rejected");
     assert!(err(&res).contains("path"), "should point at the path form; got: {}", err(&res));
 }
 
-/// A `[[c]]` table on a *binary* project: `haven` forwards its `files` as
+/// A `[[c]]` table on a *binary* project: `vestry` forwards its `files` as
 /// `--c-file` and `libs` as `--link-lib`, so a program can ship C glue and link a
 /// system library. Proves the manifest wiring end to end - the C symbol resolves
 /// and the program runs. (`libs = ["m"]` stands in for a real system lib like
@@ -162,7 +162,7 @@ fn rejects_unsupported_dependency_form() {
 fn binary_with_c_table_builds_and_runs() {
     let dir = tempfile::tempdir().unwrap();
     scaffold(dir.path(), &[
-        ("app/haven.toml",
+        ("app/vestry.toml",
             "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\n\
              [[c]]\nfiles = [\"c/glue.c\"]\nlibs = [\"m\"]\n"),
         ("app/c/glue.c",
@@ -175,7 +175,7 @@ fn binary_with_c_table_builds_and_runs() {
              }\n"),
     ]);
 
-    let res = haven(&dir.path().join("app"), &["run"]);
+    let res = vestry(&dir.path().join("app"), &["run"]);
     assert!(res.status.success(), "a bin with a [[c]] table must build and run: {}", err(&res));
     // hypot(3, 4) == 5: the C from `files` compiled in, and `-lm` from `libs` linked.
     assert!(out(&res).contains('5'), "unexpected program output:\n{}", out(&res));

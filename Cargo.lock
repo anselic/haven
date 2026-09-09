@@ -308,18 +308,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
-name = "haven"
-version = "0.1.0"
-dependencies = [
- "clap",
- "colored",
- "haven_common",
- "serde",
- "tempfile",
- "toml",
-]
-
-[[package]]
 name = "haven_back"
 version = "0.1.0"
 dependencies = [
@@ -712,6 +700,18 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vestry"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "colored",
+ "haven_common",
+ "serde",
+ "tempfile",
+ "toml",
+]
 
 [[package]]
 name = "windows-link"

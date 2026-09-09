@@ -5,7 +5,7 @@ use haven_common::diag;
 
 /// How `havenc` prints diagnostics. `human` is the ariadne pretty-printer;
 /// `json` emits one machine-readable object per line (NDJSON) on stderr for the
-/// LSP and the `haven` build orchestrator to consume.
+/// LSP and the `vestry` build orchestrator to consume.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum MessageFormat {
     Human,
@@ -94,7 +94,7 @@ pub struct Args {
 
     /// The package name that anchors emitted symbol names
     /// (`<package>.<module>$<item>`). Defaults to the entry file's stem, so a
-    /// bare `havenc foo.hv` names its package `foo`. The `haven` build tool
+    /// bare `havenc foo.hv` names its package `foo`. The `vestry` build tool
     /// forwards the manifest's `name` here.
     #[arg(long, value_name = "NAME")]
     pub package_name: Option<String>,
@@ -125,14 +125,14 @@ pub struct Args {
 
     /// Diagnostic output format. `human` (default) is the pretty terminal
     /// renderer; `json` emits one NDJSON diagnostic per line on stderr for
-    /// tooling (LSP, the `haven` build orchestrator) to parse.
+    /// tooling (LSP, the `vestry` build orchestrator) to parse.
     #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
     pub message_format: MessageFormat,
 
     /// Panic on purpose right after startup. Exists so the tests can exercise
     /// the internal-compiler-error report without a real bug to trip; hidden
     /// because nobody else has a use for it. `HAVENC_INTERNAL_PANIC=1` in the
-    /// environment does the same, for a caller (the `haven` tests) that cannot
+    /// environment does the same, for a caller (the `vestry` tests) that cannot
     /// add to `havenc`'s argv.
     #[arg(long, hide = true)]
     pub internal_panic: bool,

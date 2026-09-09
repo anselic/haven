@@ -121,7 +121,7 @@ fn dep_meta(pkgdir: &str, name: &str, prior: &[(String, PathBuf)]) -> PathBuf {
         cmd.arg("--dep").arg(format!("{n}={}", p.display()));
     }
     // A package's `[[c]]` native sources ride into its `.hvmeta` for a consumer's
-    // leaf to link. The harness doesn't parse `haven.toml`, so it globs
+    // leaf to link. The harness doesn't parse `vestry.toml`, so it globs
     // `<pkg>/c/*.c` - the convention every package in this repo follows.
     if let Ok(entries) = std::fs::read_dir(dir.join("c")) {
         let mut cfiles: Vec<PathBuf> = entries

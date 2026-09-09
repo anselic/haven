@@ -6,7 +6,7 @@ members = [
     "crates/haven_mid",
     "crates/haven_back",
     "crates/haven_meta",
-    "bins/haven",
+    "bins/vestry",
     "bins/havenc",
     "bins/havendoc",
 ]

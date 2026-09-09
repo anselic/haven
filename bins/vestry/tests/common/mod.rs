@@ -1,6 +1,6 @@
-//! Shared harness for the `haven` integration suites.
+//! Shared harness for the `vestry` integration suites.
 //!
-//! These drive the real `haven` binary, which locates its sibling `havenc` in the
+//! These drive the real `vestry` binary, which locates its sibling `havenc` in the
 //! same target directory - so a passing test exercises manifest parsing and the
 //! handoff to the compiler end to end.
 //!
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-pub const HAVEN: &str = env!("CARGO_BIN_EXE_haven");
+pub const VESTRY: &str = env!("CARGO_BIN_EXE_vestry");
 
 /// Write `(relative path, contents)` files under `root`, creating parent dirs.
 pub fn scaffold(root: &Path, files: &[(&str, &str)]) {
@@ -23,21 +23,21 @@ pub fn scaffold(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
-/// The `havenc` beside the `haven` under test.
+/// The `havenc` beside the `vestry` under test.
 pub fn havenc() -> PathBuf {
-    Path::new(HAVEN).with_file_name(if cfg!(windows) { "havenc.exe" } else { "havenc" })
+    Path::new(VESTRY).with_file_name(if cfg!(windows) { "havenc.exe" } else { "havenc" })
 }
 
 static STD_META: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
 
 /// Build the standalone `std` package into a discoverable `std.hvmeta`, once. The
-/// compiler embeds no std; the `haven` tool locates its sibling `havenc`, and
-/// `$HAVEN_STD` set on the `haven` process (below) propagates to that `havenc`.
-/// The build uses the same sibling `havenc`, found next to the `haven` binary.
+/// compiler embeds no std; the `vestry` tool locates its sibling `havenc`, and
+/// `$HAVEN_STD` set on the `vestry` process (below) propagates to that `havenc`.
+/// The build uses the same sibling `havenc`, found next to the `vestry` binary.
 pub fn std_meta() -> &'static Path {
     &STD_META.get_or_init(|| {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().and_then(|p| p.parent()).expect("repo root above bins/haven");
+            .parent().and_then(|p| p.parent()).expect("repo root above bins/vestry");
         let std_dir = repo.join("stdlib/std");
         let tmp = tempfile::tempdir().expect("temp dir for std.hvmeta");
         let meta = tmp.path().join("std.hvmeta");
@@ -57,19 +57,19 @@ pub fn std_meta() -> &'static Path {
     }).1
 }
 
-pub fn haven(cwd: &Path, args: &[&str]) -> std::process::Output {
-    haven_env(cwd, args, &[])
+pub fn vestry(cwd: &Path, args: &[&str]) -> std::process::Output {
+    vestry_env(cwd, args, &[])
 }
 
-/// Like [`haven`], but with extra environment variables set on the process -
-/// used by the git-dependency suite to point `HAVEN_HOME` at a disposable cache.
-pub fn haven_env(cwd: &Path, args: &[&str], envs: &[(&str, &Path)]) -> std::process::Output {
-    let mut cmd = Command::new(HAVEN);
+/// Like [`vestry`], but with extra environment variables set on the process -
+/// used by the git-dependency suite to point `VESTRY_HOME` at a disposable cache.
+pub fn vestry_env(cwd: &Path, args: &[&str], envs: &[(&str, &Path)]) -> std::process::Output {
+    let mut cmd = Command::new(VESTRY);
     cmd.current_dir(cwd).env("HAVEN_STD", std_meta());
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    cmd.args(args).output().expect("failed to spawn haven")
+    cmd.args(args).output().expect("failed to spawn vestry")
 }
 
 pub fn out(o: &std::process::Output) -> String {

@@ -1,6 +1,6 @@
-//! Loading and interpreting `haven.toml`, the per-project manifest.
+//! Loading and interpreting `vestry.toml`, the per-project manifest.
 //!
-//! A project is any directory tree with a `haven.toml` at its root. The manifest
+//! A project is any directory tree with a `vestry.toml` at its root. The manifest
 //! is deliberately small: a `[project]` table with a name, an optional `entry`,
 //! a `kind` list declaring what the project builds to (`bin`, `lib`, `cdylib`,
 //! `staticlib`) and an optional `build` script to run afterwards, plus an
@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 /// The manifest filename looked for at the project root.
-pub const MANIFEST: &str = "haven.toml";
+pub const MANIFEST: &str = "vestry.toml";
 
-/// A parsed `haven.toml` together with the directory it was found in. Every
+/// A parsed `vestry.toml` together with the directory it was found in. Every
 /// relative path in the manifest (e.g. `entry`) is resolved against `root`.
 #[derive(Debug)]
 pub struct Project {
-    /// Absolute path to the directory containing `haven.toml`.
+    /// Absolute path to the directory containing `vestry.toml`.
     pub root: PathBuf,
     pub project: ProjectTable,
     /// `[dependencies]`, keyed by the name the code imports the library as.
@@ -141,7 +141,7 @@ pub struct ProjectTable {
 
     /// A post-build script: a Haven source file, relative to the project root,
     /// compiled and run once the build's artifact exists. See
-    /// [`Project::build_script`] and `haven`'s `run_build_script`.
+    /// [`Project::build_script`] and `vestry`'s `run_build_script`.
     #[serde(default)]
     pub build: Option<String>,
 
@@ -173,7 +173,7 @@ pub enum Kind {
     Staticlib,
 }
 
-/// The single artifact a `haven build` produces, resolved from the `kind` list.
+/// The single artifact a `vestry build` produces, resolved from the `kind` list.
 /// A `havenc` invocation emits exactly one of these, which is why conflicting
 /// `kind` combinations are rejected up front (see [`Project::validate`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -198,10 +198,10 @@ impl Output {
     }
 
     /// The manifest `kind` spelling this output came from, as handed to a build
-    /// script in `HAVEN_OUTPUT_KIND`. Deliberately the manifest's vocabulary
+    /// script in `VESTRY_OUTPUT_KIND`. Deliberately the manifest's vocabulary
     /// rather than [`label`](Self::label)'s prose: a script branching on the
     /// output kind should match against the same word the author wrote in
-    /// `haven.toml`, not against a phrase that exists to read well in a
+    /// `vestry.toml`, not against a phrase that exists to read well in a
     /// progress line and is therefore free to change.
     pub fn manifest_kind(self) -> &'static str {
         match self {
@@ -214,7 +214,7 @@ impl Output {
 }
 
 impl Project {
-    /// Walk up from `start` (and its ancestors) looking for a `haven.toml`, load
+    /// Walk up from `start` (and its ancestors) looking for a `vestry.toml`, load
     /// and parse it. Errors carry a user-facing message, already contextualized.
     pub fn find_and_load(start: &Path) -> Result<Project, String> {
         let mut dir = Some(start);
@@ -226,13 +226,13 @@ impl Project {
             dir = d.parent();
         }
         Err(format!(
-            "no `{}` found in `{}` or any parent directory (run `haven new` to create a project)",
+            "no `{}` found in `{}` or any parent directory (run `vestry new` to create a project)",
             MANIFEST,
             start.display(),
         ))
     }
 
-    /// Load and parse a specific `haven.toml`.
+    /// Load and parse a specific `vestry.toml`.
     fn load(manifest_path: &Path) -> Result<Project, String> {
         let text = std::fs::read_to_string(manifest_path)
             .map_err(|e| format!("cannot read `{}`: {}", manifest_path.display(), e))?;
@@ -314,7 +314,7 @@ impl Project {
     }
 
     /// Whether this project is a library (its `kind` list has no `bin`). Governs
-    /// the default entry file and whether `haven run` is meaningful.
+    /// the default entry file and whether `vestry run` is meaningful.
     pub fn is_library(&self) -> bool {
         !self.kinds().contains(&Kind::Bin)
     }
@@ -345,7 +345,7 @@ impl Project {
         Ok(())
     }
 
-    /// The single artifact `haven build` produces for this project's `kind`.
+    /// The single artifact `vestry build` produces for this project's `kind`.
     /// `cdylib` builds shared, `staticlib` builds static, `bin` builds an
     /// executable, and a bare `lib` emits a `.hvmeta` native-library artifact.
     pub fn output_kind(&self) -> Output {
@@ -398,21 +398,21 @@ impl Project {
         self.project.build.as_ref().map(|rel| self.root.join(rel))
     }
 
-    /// The build-output directory, `.haven/target/` under the project root.
+    /// The build-output directory, `.vestry/target/` under the project root.
     pub fn target_dir(&self) -> PathBuf {
-        self.root.join(".haven").join("target")
+        self.root.join(".vestry").join("target")
     }
 
-    /// Where a compiled build script lives, `.haven/build/` under the project
+    /// Where a compiled build script lives, `.vestry/build/` under the project
     /// root. Kept out of `target/` so the script's own executable is never
     /// mistaken for the project's artifact.
     pub fn build_dir(&self) -> PathBuf {
-        self.root.join(".haven").join("build")
+        self.root.join(".vestry").join("build")
     }
 
-    /// The documentation-output directory, `.haven/doc/` under the project root.
+    /// The documentation-output directory, `.vestry/doc/` under the project root.
     pub fn doc_dir(&self) -> PathBuf {
-        self.root.join(".haven").join("doc")
+        self.root.join(".vestry").join("doc")
     }
 
     /// Display string for the manifest version (`"0.1.0"`, `0.1`, ...), or empty
@@ -427,7 +427,7 @@ impl Project {
 
     /// Binary name derived from the project name: lowercased, with any run of
     /// non-alphanumeric characters collapsed to a single `-`. `"Sample Haven
-    /// Project"` becomes `"sample-haven-project"`.
+    /// Project"` becomes `"sample-vestry-project"`.
     pub fn bin_name(&self) -> String {
         let mut out = String::new();
         let mut prev_dash = false;

@@ -12,7 +12,7 @@ use crate::ast::{Error, FileId, Span};
 ///
 /// ariadne colours by default, so a captured diagnostic carried escape codes:
 /// `install.py` reading our stderr got literal `\x1b[31m`, and CI logs too. A
-/// subprocess inherits its parent's stderr, so a `havenc` under `haven` stays
+/// subprocess inherits its parent's stderr, so a `havenc` under `vestry` stays
 /// right either way.
 ///
 /// `NO_COLOR` beats the terminal check, per <https://no-color.org>: set and
@@ -92,7 +92,7 @@ impl<'a> Files<'a> {
 
 /// How diagnostics are rendered. `Human` is the ariadne pretty-printer for a
 /// terminal; `Json` emits one machine-readable object per line (NDJSON) so an
-/// LSP server or the `haven` build orchestrator can stream-parse them.
+/// LSP server or the `vestry` build orchestrator can stream-parse them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Format {
     Human,
@@ -495,7 +495,7 @@ fn ice_note(r: &IceReport<'_>) -> String {
 ///
 /// It honours [`set_format`], which is why it lives here and not in a binary:
 /// under `--message-format json` the report is one NDJSON line with
-/// [`ICE_STAGE`] as its `stage`, so the `haven` orchestrator and an LSP keep
+/// [`ICE_STAGE`] as its `stage`, so the `vestry` orchestrator and an LSP keep
 /// parsing instead of choking on free text. Call it once at startup, after the
 /// format is chosen and before anything can panic. `tool` names the binary.
 ///

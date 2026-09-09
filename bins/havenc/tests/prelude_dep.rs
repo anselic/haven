@@ -459,7 +459,7 @@ fn dep_supplied_runtime_replaces_the_embedded_runtime() {
 /// the build was invoked. The message used to name a provider unconditionally,
 /// falling back to "std", so a stdlib built without `--prelude` was told that only
 /// 'std' may declare `@lang(delete)` *while the span pointed at std's own source*.
-/// That is a real regression path: a `haven` predating the `--prelude` flag drives
+/// That is a real regression path: a `vestry` predating the `--prelude` flag drives
 /// a newer `havenc` and reproduces exactly this.
 #[test]
 fn a_lang_item_needs_a_prelude_to_belong_to() {

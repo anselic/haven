@@ -1,15 +1,15 @@
-//! `haven`: the Haven build orchestrator, in the spirit of Cargo.
+//! `vestry`: the Haven build orchestrator, in the spirit of Cargo.
 //!
-//! A project is a directory with a `haven.toml` manifest and a `src/` tree (see
-//! `examples/example_plugin`). `haven` locates the manifest, then drives the
+//! A project is a directory with a `vestry.toml` manifest and a `src/` tree (see
+//! `examples/example_plugin`). `vestry` locates the manifest, then drives the
 //! lower-level tools - `havenc` to compile, `havendoc` to document - writing all
-//! artifacts under `.haven/` so the source tree stays clean.
+//! artifacts under `.vestry/` so the source tree stays clean.
 //!
 //! Subcommands:
 //!   new <name>   scaffold a fresh project
-//!   build        compile the entry file to `.haven/target/`
+//!   build        compile the entry file to `.vestry/target/`
 //!   run          build an executable and run it
-//!   doc          generate docs into `.haven/doc/`
+//!   doc          generate docs into `.vestry/doc/`
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ use config::{Output, Project};
 
 #[derive(Parser)]
 #[command(
-    name = "haven",
+    name = "vestry",
     about = "Haven package manager",
     version,
 )]
@@ -50,7 +50,7 @@ enum Cmd {
         bin: bool,
     },
 
-    /// Compile the project to `.haven/target/`.
+    /// Compile the project to `.vestry/target/`.
     Build {
         /// Diagnostic output format forwarded to `havenc`.
         #[arg(long, value_enum, default_value_t = MessageFormat::Human)]
@@ -73,11 +73,11 @@ enum Cmd {
         args: Vec<String>,
     },
 
-    /// Generate documentation into `.haven/doc/` via `havendoc`.
+    /// Generate documentation into `.vestry/doc/` via `havendoc`.
     Doc,
 }
 
-/// Mirrors `havenc`'s `--message-format`, so `haven` can ask for machine-readable
+/// Mirrors `havenc`'s `--message-format`, so `vestry` can ask for machine-readable
 /// diagnostics (for an LSP or editor integration) and forward them untouched.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum MessageFormat {
@@ -95,7 +95,7 @@ struct CompilerFlags {
     /// `-O3 -Wno-override-module` along unless you mean to drop them. The usual
     /// reason to reach for this is an optimization report:
     ///
-    ///     haven build -F "-O3 -Wno-override-module -Rpass=loop-vectorize \
+    ///     vestry build -F "-O3 -Wno-override-module -Rpass=loop-vectorize \
     ///                     -Rpass-missed=loop-vectorize"
     ///
     /// Unlike `havenc`'s own flag, a leading `-` in the value needs no `=` or
@@ -104,7 +104,7 @@ struct CompilerFlags {
     compiler_flags: Option<String>,
 
     /// Keep the generated LLVM IR (`.ll`) beside the artifact in
-    /// `.haven/target/`, forwarded to `havenc --emit-ir`.
+    /// `.vestry/target/`, forwarded to `havenc --emit-ir`.
     #[arg(long)]
     emit_ir: bool,
 
@@ -114,7 +114,7 @@ struct CompilerFlags {
     emit_optimized_ir: bool,
 }
 
-/// The settings one `haven build`/`haven run` applies to every `havenc` it
+/// The settings one `vestry build`/`vestry run` applies to every `havenc` it
 /// drives, threaded through the dependency walk so a leaf and its libraries are
 /// compiled alike. Grouped rather than passed one parameter at a time because
 /// the walk hands them down through four frames untouched.
@@ -151,9 +151,9 @@ impl MessageFormat {
 }
 
 fn main() -> ExitCode {
-    // `haven` prints human text only (it never speaks JSON itself), so the
+    // `vestry` prints human text only (it never speaks JSON itself), so the
     // default format is the right one for its own crash report.
-    haven_common::diag::install_ice_hook("haven");
+    haven_common::diag::install_ice_hook("vestry");
     let cli = Cli::parse();
     let result = match cli.cmd {
         Cmd::New { path, lib, .. } => cmd_new(&path, lib),
@@ -185,7 +185,7 @@ fn cmd_new(path: &Path, is_lib: bool) -> Result<(), String> {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
-        .unwrap_or("haven-project")
+        .unwrap_or("vestry-project")
         .to_string();
 
     let src_dir = path.join("src");
@@ -214,7 +214,7 @@ fn cmd_new(path: &Path, is_lib: bool) -> Result<(), String> {
     }
 
     // Keep the build directory out of version control.
-    write_new_file(&path.join(".gitignore"), "/.haven\n")?;
+    write_new_file(&path.join(".gitignore"), "/.vestry\n")?;
 
     let what = if is_lib { "library" } else { "executable" };
     status(Status::Created, format_args!("{} `{}` at `{}`", what, name, path.display()));
@@ -369,7 +369,7 @@ fn compile_project(
 
     // IR-emitting flags ride along the same walk as the compiler flags: the one
     // package that reaches LLVM drops its `.ll`/`.opt.ll` beside the artifact in
-    // `.haven/target/`. A `lib` dependency stops before codegen and ignores them.
+    // `.vestry/target/`. A `lib` dependency stops before codegen and ignores them.
     if opts.emit_ir {
         cmd.arg("--emit-ir");
     }
@@ -514,13 +514,13 @@ fn run_build_script(
     // debugger without a build to drive it.
     let exit = Command::new(&exe)
         .current_dir(&project.root)
-        .env("HAVEN_PROJECT_ROOT", &project.root)
-        .env("HAVEN_PKG_NAME", &project.project.name)
-        .env("HAVEN_PKG_VERSION", project.version_display())
-        .env("HAVEN_TARGET_DIR", project.target_dir())
-        .env("HAVEN_ARTIFACT", artifact)
-        .env("HAVEN_OUTPUT_KIND", output.manifest_kind())
-        .env("HAVEN_TARGET_OS", target_os())
+        .env("VESTRY_PROJECT_ROOT", &project.root)
+        .env("VESTRY_PKG_NAME", &project.project.name)
+        .env("VESTRY_PKG_VERSION", project.version_display())
+        .env("VESTRY_TARGET_DIR", project.target_dir())
+        .env("VESTRY_ARTIFACT", artifact)
+        .env("VESTRY_OUTPUT_KIND", output.manifest_kind())
+        .env("VESTRY_TARGET_OS", target_os())
         .status()
         .map_err(|e| format!("failed to run build script `{}`: {}", exe.display(), e))?;
     if !exit.success() {
@@ -534,10 +534,10 @@ fn run_build_script(
 
 /// Whether `exe` needs rebuilding from `src`, by modification time.
 ///
-/// Only the script's *entry* file is consulted: `haven` cannot see which modules
+/// Only the script's *entry* file is consulted: `vestry` cannot see which modules
 /// it imports without asking `havenc` to tell it, and nothing in the build tracks
 /// dependencies at that granularity yet. A script split across several files can
-/// therefore go stale - touch the entry, or delete `.haven/build/`, to force a
+/// therefore go stale - touch the entry, or delete `.vestry/build/`, to force a
 /// recompile. An unreadable time on either side answers "stale", so a missing
 /// executable (the first build) or a filesystem without mtimes recompiles rather
 /// than silently running something old.
@@ -550,7 +550,7 @@ fn is_stale(src: &Path, exe: &Path) -> bool {
 }
 
 /// The operating system a build script should package for, in the spelling Rust
-/// uses for `target_os`. Reads the *host* today because `haven` has no
+/// uses for `target_os`. Reads the *host* today because `vestry` has no
 /// cross-compilation story; it is passed explicitly all the same, so a script
 /// branches on the build's target rather than on where it happens to be running,
 /// and keeps working unchanged when one arrives.
@@ -573,7 +573,7 @@ fn target_os() -> &'static str {
 fn cmd_run(opts: BuildOpts<'_>, args: &[String]) -> Result<(), String> {
     let project = Project::find_and_load(&cwd()?)?;
     if project.is_library() {
-        return Err("cannot `haven run` a library project \
+        return Err("cannot `vestry run` a library project \
                     (its `kind` has no `bin`)"
             .to_string());
     }
@@ -686,7 +686,7 @@ fn describe(project: &Project) -> String {
 }
 
 /// `path` expressed relative to `base` when it lies inside it, so output paths
-/// print as `.haven\doc` rather than a full (possibly `\\?\`-prefixed) path.
+/// print as `.vestry\doc` rather than a full (possibly `\\?\`-prefixed) path.
 /// Falls back to `path` unchanged when it does not.
 fn relative_to(base: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(base).unwrap_or(path).to_path_buf()

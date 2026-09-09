@@ -3,7 +3,7 @@
 //! # Cache layout
 //!
 //! ```text
-//! ~/.haven/git/
+//! ~/.vestry/git/
 //!   <url-slug>-<hash>/
 //!     db/              a full clone of the repository, one per URL
 //!     <commit-sha>/    a checked-out worktree, one per resolved commit
@@ -231,17 +231,17 @@ fn fs_create_dir_all(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create `{}`: {e}", dir.display()))
 }
 
-/// The root of the git cache, `~/.haven/git/`, honoring `HAVEN_HOME` for an
+/// The root of the git cache, `~/.vestry/git/`, honoring `VESTRY_HOME` for an
 /// override (chiefly so tests get an isolated, disposable cache).
 fn cache_root() -> Result<PathBuf, String> {
-    if let Some(home) = std::env::var_os("HAVEN_HOME") {
+    if let Some(home) = std::env::var_os("VESTRY_HOME") {
         return Ok(PathBuf::from(home).join("git"));
     }
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .ok_or_else(|| "cannot locate a home directory for the git cache \
-                        (set HOME, USERPROFILE, or HAVEN_HOME)".to_string())?;
-    Ok(PathBuf::from(home).join(".haven").join("git"))
+                        (set HOME, USERPROFILE, or VESTRY_HOME)".to_string())?;
+    Ok(PathBuf::from(home).join(".vestry").join("git"))
 }
 
 /// A filesystem-safe, human-readable directory name for a repository URL: the

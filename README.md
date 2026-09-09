@@ -4,7 +4,7 @@ haven is a statically typed programming language and compiler, built specificall
 for DSP and audio plugin development.
 
 This repository includes:
-- `haven`: build system and project manager for haven projects
+- `vestry`: build system and project manager for Haven projects
 - `havenc`: the compiler for the haven programming language
 - `havendoc`: a documentation generator for haven projects, built for mdBook
 
@@ -35,7 +35,7 @@ for compiling any haven program.
 ## Directory Structure
 ```
 bins/
-├── haven/          # build system and project manager
+├── vestry/         # build system and project manager
 ├── havenc/         # compiler
 └── havendoc/       # documentation generator
 crates/

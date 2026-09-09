@@ -1,6 +1,6 @@
 // `dsp` is a standalone stdlib package, not part of the prelude. Compiling this
-// loose file (no haven.toml) needs its artifact bound explicitly, e.g.:
-//     haven build --dep dsp=<path>/dsp.hvmeta   (or `havenc 1_showcase.hv --dep dsp=...`)
+// loose file (no vestry.toml) needs its artifact bound explicitly, e.g.:
+//     vestry build --dep dsp=<path>/dsp.hvmeta   (or `havenc 1_showcase.hv --dep dsp=...`)
 import dsp/filters // filters::Biquad, filters::Biquad::lowpass, ...
 import dsp/osc     // osc::Osc, osc::Osc::new, o.square()
 

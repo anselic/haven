@@ -1,10 +1,10 @@
 [package]
-name = "haven"
+name = "vestry"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name  = "haven"
+name  = "vestry"
 path = "src/main.rs"
 
 [dependencies]

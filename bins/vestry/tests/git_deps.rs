@@ -1,16 +1,16 @@
-//! Git `[dependencies]`: `haven build`/`run` on a project that depends on a Haven
+//! Git `[dependencies]`: `vestry build`/`run` on a project that depends on a Haven
 //! library living in a git repository.
 //!
 //! No network: the "remote" is a git repo created in a tempdir and referenced by
 //! its local path, which `git clone` handles like any other transport. Each test
-//! points `HAVEN_HOME` at its own disposable directory so the global cache under
-//! the developer's real `~/.haven` is never touched.
+//! points `VESTRY_HOME` at its own disposable directory so the global cache under
+//! the developer's real `~/.vestry` is never touched.
 
 use std::path::Path;
 use std::process::Command;
 
 mod common;
-use common::{err, haven_env, out, scaffold};
+use common::{err, vestry_env, out, scaffold};
 
 /// Run `git` in `dir`, asserting success. `args` are passed after an implicit
 /// `-C <dir>`; commit-making commands carry an identity so the suite works on a
@@ -18,7 +18,7 @@ use common::{err, haven_env, out, scaffold};
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C").arg(dir)
-        .args(["-c", "user.email=test@haven", "-c", "user.name=haven test"])
+        .args(["-c", "user.email=test@vestry", "-c", "user.name=vestry test"])
         .args(args)
         .output()
         .expect("failed to run git (is it installed?)");
@@ -32,7 +32,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// SHA)`. The library imports `std/math`, mirroring the path-dependency suite.
 fn make_lib_repo(dir: &Path) -> (String, String) {
     scaffold(dir, &[
-        ("haven.toml",
+        ("vestry.toml",
             "[project]\nname = \"example_lib\"\nversion = \"0.1.0\"\nkind = [\"lib\"]\n"),
         ("src/lib.hv",
             "import std/math { square }\n\
@@ -56,7 +56,7 @@ fn make_lib_repo(dir: &Path) -> (String, String) {
 /// (the `[dependencies]` entry, sans the leading key).
 fn make_app(dir: &Path, dep_line: &str) {
     scaffold(dir, &[
-        ("haven.toml", &format!(
+        ("vestry.toml", &format!(
             "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\n\
              [dependencies]\nexample_lib = {dep_line}\n")),
         ("src/main.hv",
@@ -78,13 +78,13 @@ fn builds_and_runs_a_tagged_git_dependency() {
     make_app(&app, &format!("{{ git = \"{url}\", tag = \"v1.0.0\" }}"));
     let home = work.path().join("home");
 
-    let res = haven_env(&app, &["run"], &[("HAVEN_HOME", home.as_path())]);
+    let res = vestry_env(&app, &["run"], &[("VESTRY_HOME", home.as_path())]);
     assert!(res.status.success(), "run failed:\n{}", err(&res));
     assert!(out(&res).contains("Fetching"), "expected a Fetching line:\n{}", out(&res));
     assert!(out(&res).contains("34"), "program output missing:\n{}", out(&res));
 
-    // the cache was populated under HAVEN_HOME, not the real home dir
-    assert!(home.join("git").is_dir(), "git cache not created under HAVEN_HOME");
+    // the cache was populated under VESTRY_HOME, not the real home dir
+    assert!(home.join("git").is_dir(), "git cache not created under VESTRY_HOME");
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn pins_to_a_rev() {
     make_app(&app, &format!("{{ git = \"{url}\", rev = \"{sha}\" }}"));
     let home = work.path().join("home");
 
-    let res = haven_env(&app, &["run"], &[("HAVEN_HOME", home.as_path())]);
+    let res = vestry_env(&app, &["run"], &[("VESTRY_HOME", home.as_path())]);
     assert!(res.status.success(), "run failed:\n{}", err(&res));
     assert!(out(&res).contains("34"), "program output missing:\n{}", out(&res));
     // the checkout directory is keyed by the resolved commit
@@ -116,16 +116,16 @@ fn warm_cache_skips_the_network_for_a_pinned_ref() {
     let app = work.path().join("app");
     make_app(&app, &format!("{{ git = \"{url}\", tag = \"v1.0.0\" }}"));
     let home = work.path().join("home");
-    let env = [("HAVEN_HOME", home.as_path())];
+    let env = [("VESTRY_HOME", home.as_path())];
 
-    let first = haven_env(&app, &["build"], &env);
+    let first = vestry_env(&app, &["build"], &env);
     assert!(first.status.success(), "first build failed:\n{}", err(&first));
     assert!(out(&first).contains("Fetching"), "first build should fetch:\n{}", out(&first));
 
     // clear the build output so the second run genuinely rebuilds and re-resolves
     // the dependency, then confirm it does not touch the network again.
-    std::fs::remove_dir_all(app.join(".haven")).unwrap();
-    let second = haven_env(&app, &["build"], &env);
+    std::fs::remove_dir_all(app.join(".vestry")).unwrap();
+    let second = vestry_env(&app, &["build"], &env);
     assert!(second.status.success(), "second build failed:\n{}", err(&second));
     assert!(!out(&second).contains("Fetching"),
         "a pinned ref on a warm cache should not re-fetch:\n{}", out(&second));
@@ -143,7 +143,7 @@ fn a_branch_dependency_warns_that_it_is_not_reproducible() {
     make_app(&app, &format!("{{ git = \"{url}\", branch = \"dev\" }}"));
     let home = work.path().join("home");
 
-    let res = haven_env(&app, &["build"], &[("HAVEN_HOME", home.as_path())]);
+    let res = vestry_env(&app, &["build"], &[("VESTRY_HOME", home.as_path())]);
     assert!(res.status.success(), "build failed:\n{}", err(&res));
     assert!(err(&res).contains("not reproducible"),
         "expected a non-reproducibility warning:\n{}", err(&res));
@@ -159,7 +159,7 @@ fn a_missing_ref_is_a_clean_error() {
     make_app(&app, &format!("{{ git = \"{url}\", tag = \"v9.9.9\" }}"));
     let home = work.path().join("home");
 
-    let res = haven_env(&app, &["build"], &[("HAVEN_HOME", home.as_path())]);
+    let res = vestry_env(&app, &["build"], &[("VESTRY_HOME", home.as_path())]);
     assert!(!res.status.success(), "build should have failed for a missing tag");
     let msg = err(&res);
     assert!(msg.contains("v9.9.9") && msg.contains("could not find"),
@@ -176,7 +176,7 @@ fn rejects_more_than_one_ref() {
     make_app(&app, &format!("{{ git = \"{url}\", tag = \"v1.0.0\", rev = \"{sha}\" }}"));
     let home = work.path().join("home");
 
-    let res = haven_env(&app, &["build"], &[("HAVEN_HOME", home.as_path())]);
+    let res = vestry_env(&app, &["build"], &[("VESTRY_HOME", home.as_path())]);
     assert!(!res.status.success(), "build should reject two pinned refs");
     assert!(err(&res).contains("at most one"), "error should explain the rule:\n{}", err(&res));
 }
