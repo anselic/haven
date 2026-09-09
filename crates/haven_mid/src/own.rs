@@ -790,7 +790,7 @@ impl<'a, 'c> Checker<'a, 'c> {
         match steps.first() {
             Some(Step::Field(field, fty)) => {
                 let inner = self.expr(
-                    ExprNode::Access { base: Box::new(place), field: *field },
+                    ExprNode::Access { base: Box::new(place), field },
                     fty.clone(), span);
                 self.delete_steps(inner, fty.clone(), &steps[1..], target, span)
             }
@@ -998,15 +998,14 @@ impl<'a, 'c> Checker<'a, 'c> {
                     return false;
                 }
                 // a produced owner that is never bound has no owner to destroy it.
-                if let Some(ty) = self.ty_of(&e) {
-                    if !self.model.is_copy(&ty) && matches!(self.root(&e), Root::Temp) {
+                if let Some(ty) = self.ty_of(&e)
+                    && !self.model.is_copy(&ty) && matches!(self.root(&e), Root::Temp) {
                         let shown = self.cx.show(&ty);
                         self.push(Error::new(span, format!(
                             "this '{}' owns a resource but is discarded without an owner", shown))
                             .with_label(span, "nothing would ever destroy it")
                             .with_note("bind it with `let`"));
                     }
-                }
                 out.push(Metadata { span, id, value: StmtNode::Expr(e) });
                 false
             }
@@ -1055,8 +1054,8 @@ impl<'a, 'c> Checker<'a, 'c> {
                     _ => {
                         // the left side is read: `x.f = ...` needs a live `x`.
                         self.visit(&left);
-                        if let Some(ty) = self.ty_of(&left) {
-                            if !self.model.is_copy(&ty) {
+                        if let Some(ty) = self.ty_of(&left)
+                            && !self.model.is_copy(&ty) {
                                 let shown = self.cx.show(&ty);
                                 self.push(Error::new(span, format!(
                                     "cannot overwrite a '{}' in place", shown))
@@ -1064,7 +1063,6 @@ impl<'a, 'c> Checker<'a, 'c> {
                                     .with_note("the value being replaced would never be \
                                                 destroyed"));
                             }
-                        }
                     }
                 }
                 out.push(Metadata { span, id, value: StmtNode::Assign { left, value } });

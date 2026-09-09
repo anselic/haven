@@ -130,7 +130,7 @@ fn lower_intrinsic<'a>(
             let slice_val = lower_expr(cx, &args[0]);
             let offset_val = lower_expr(cx, &args[1]);
 
-            cx.emit(Inst::Comment(format!("simd_load")));
+            cx.emit(Inst::Comment("simd_load".to_string()));
             // extract the data pointer from the fat pointer struct, or use directly if it's already a pointer
             let data_ptr = match cx.node_types[&args[0].id] {
                 Type::Slice(_) => {
@@ -180,7 +180,7 @@ fn lower_intrinsic<'a>(
             };
             // get the element pointer with the offset
             let elem_ptr = cx.fresh_reg();
-            cx.emit(Inst::Comment(format!("simd_store")));
+            cx.emit(Inst::Comment("simd_store".to_string()));
             cx.emit(Inst::Index { dst: elem_ptr, slice: data_ptr, index: offset_val, index_ty: cx.node_types[&args[1].id].clone(), element_ty: ty.clone() });
             // store the SIMD vector to the element pointer
             cx.emit(Inst::Store { ptr: elem_ptr, val: value_val, ty: Type::Simd(Box::new(ty), ConstVal::Lit(size)), align: None });
@@ -752,15 +752,14 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             // a data-enum constructor `Msg::Note(a, b)` is not a real call: build
             // the aggregate in place. (A field-less enum "call" is impossible -
             // typecheck yields a scalar-typed variant, never `has_payload: true`.)
-            if let ExprNode::Path(path) = &func.value {
-                if let Some(c) = enum_const(&cx.enums, path) {
+            if let ExprNode::Path(path) = &func.value
+                && let Some(c) = enum_const(&cx.enums, path) {
                     let agg = cx.node_types.get(&expr.id).cloned()
                         .and_then(|t| aggregate_def(&t, &cx.enums));
                     if let Some(ename) = agg {
                         return construct_data_variant(cx, ename, path, c, args);
                     }
                 }
-            }
             cx.emit(Inst::Comment(format!("call {}(...)", func.value)));
             // a bare name that isn't a local/param/global is a top-level function
             // -> direct call. Anything else (a local holding a fn pointer, a struct
@@ -768,7 +767,7 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             let callee = match &func.value {
                 ExprNode::Var(name)
                     if !cx.resolved.contains_key(&func.id) && !cx.globals.contains_key(name) =>
-                    Callee::Direct(*name),
+                    Callee::Direct(name),
                 _ => Callee::Indirect(lower_expr(cx, func)),
             };
             // grab the callee's parameter types so we can apply array->slice coercion

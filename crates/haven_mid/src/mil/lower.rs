@@ -465,8 +465,10 @@ fn lower_const_init<'a>(
     }
 }
 
-fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>)
--> (Vec<(Register, Type<'a>)>, Option<(Register, Type<'a>)>) {
+/// A lowered function's parameter registers and optional return register.
+type LoweredSig<'a> = (Vec<(Register, Type<'a>)>, Option<(Register, Type<'a>)>);
+
+fn lower_function<'a>(cx: &mut LowerCtx<'a>, func: &TopLevel<'a>) -> LoweredSig<'a> {
     match &func.value {
         TopLevelNode::Function { attributes, params, return_type, body, .. } => {
             let entry = cx.fresh_block();

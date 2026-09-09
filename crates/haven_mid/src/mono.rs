@@ -405,7 +405,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         let display = display_name(self.defs, base, args);
         let t = self.defs.get(base);
         let (module, kind, source_name, is_pub, span) =
-            (t.module, t.kind, t.source_name, t.is_pub, t.span.clone());
+            (t.module, t.kind, t.source_name, t.is_pub, t.span);
         let def = self.defs.alloc(Def {
             module, kind, source_name, is_pub, linkage: Linkage::Fixed(mangled), span,
         });
@@ -438,7 +438,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         self.struct_seen.insert(key, (def, mangled));
         self.instantiate_destructor(base, def, &args);
         self.struct_queue.push_back(StructInstantiation {
-            base, args, def, mangled, span: self.cur_span.clone(),
+            base, args, def, mangled, span: self.cur_span,
         });
         def
     }
@@ -500,7 +500,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         // minting one anyway would specialize a body that calls `u8::delete`.
         if !self.impl_applies(m, base, args) { return; }
         let (name, receiver, is_pub, module) = (m.name, m.receiver, m.is_pub, m.module);
-        let mangled = self.request(name, args.to_vec(), self.cur_span.clone());
+        let mangled = self.request(name, args.to_vec(), self.cur_span);
         self.defs.add_member(TyHead::Def(inst), DELETE_METHOD, Member {
             name: mangled,
             receiver,
@@ -538,7 +538,7 @@ impl<'p, 'a> Mono<'p, 'a> {
             self.defs.add_payload(def, v, sym);
         }
         self.enum_queue.push_back(EnumInstantiation {
-            base, args, def, mangled, span: self.cur_span.clone(),
+            base, args, def, mangled, span: self.cur_span,
         });
         def
     }
@@ -719,7 +719,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                 GenericArg::Const(cv) => ConcreteArg::Const(cv.expect_lit()),
             });
         }
-        let mangled = self.request(m.name, cargs, span.clone());
+        let mangled = self.request(m.name, cargs, *span);
 
         // form the `self` argument. A `*self` method found directly on the
         // receiver's head takes `self: *recv_ty`, so the base is address-taken -
@@ -731,7 +731,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         let recv = if m.receiver == Receiver::Pointer && !via_deref {
             Metadata::new(
                 ExprNode::Unary { op: UnaryOp::AddrOf, operand: Box::new(recv) },
-                base.span.clone(),
+                base.span,
             )
         } else {
             recv
@@ -741,7 +741,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         args.push(recv);
         args.extend(new_args.iter().cloned());
         Some(ExprNode::Call {
-            func: Box::new(Metadata::new(ExprNode::Var(mangled), base.span.clone())),
+            func: Box::new(Metadata::new(ExprNode::Var(mangled), base.span)),
             type_args: Vec::new(),
             args,
         })
@@ -758,13 +758,12 @@ impl<'p, 'a> Mono<'p, 'a> {
                 // falls through to the ordinary paths below. A turbofish here
                 // belongs to the method's own parameters, so it goes with it
                 // rather than staying on the rewritten call.
-                if let ExprNode::Access { base, field } = &func.value {
-                    if let Some(call) =
+                if let ExprNode::Access { base, field } = &func.value
+                    && let Some(call) =
                         self.generic_method_call(base, field, type_args, &new_args, b, &expr.span)
                     {
-                        return Metadata::new(call, expr.span.clone());
+                        return Metadata::new(call, expr.span);
                     }
-                }
                 // sub type params inside the turbofish (user generic calls +
                 // intrinsics like `sizeof::<T>()`). A bare generic call carries an
                 // empty turbofish on the node; the typechecker recovered its args
@@ -786,8 +785,8 @@ impl<'p, 'a> Mono<'p, 'a> {
                             // subst_targ resolved every const param to a literal.
                             GenericArg::Const(cv) => ConcreteArg::Const(cv.expect_lit()),
                         }).collect();
-                        let mangled = self.request(name, concrete, expr.span.clone());
-                        let new_func = Metadata::new(ExprNode::Var(mangled), func.span.clone());
+                        let mangled = self.request(name, concrete, expr.span);
+                        let new_func = Metadata::new(ExprNode::Var(mangled), func.span);
                         ExprNode::Call {
                             func: Box::new(new_func),
                             type_args: Vec::new(),
@@ -821,12 +820,12 @@ impl<'p, 'a> Mono<'p, 'a> {
                                 GenericParam::Const(name, _) => ConcreteArg::Const(
                                     u.consts.get(name).expect("impl const bound").expect_lit()),
                             }).collect();
-                            self.request(m.name, cargs, expr.span.clone())
+                            self.request(m.name, cargs, expr.span)
                         } else {
                             m.name
                         };
                         ExprNode::Call {
-                            func: Box::new(Metadata::new(ExprNode::Var(name), func.span.clone())),
+                            func: Box::new(Metadata::new(ExprNode::Var(name), func.span)),
                             type_args: Vec::new(),
                             args: new_args,
                         }
@@ -845,7 +844,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                         let mut new_path = path.clone();
                         new_path.def = inst;
                         let new_func = Metadata::new(
-                            ExprNode::Path(new_path), func.span.clone());
+                            ExprNode::Path(new_path), func.span);
                         ExprNode::Call {
                             func: Box::new(new_func),
                             type_args: Vec::new(),
@@ -875,7 +874,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                         GenericArg::Type(t) => ConcreteArg::Type(t.clone()),
                         GenericArg::Const(cv) => ConcreteArg::Const(cv.expect_lit()),
                     }).collect();
-                    let mangled = self.request(fname, concrete, expr.span.clone());
+                    let mangled = self.request(fname, concrete, expr.span);
                     ExprNode::Var(mangled)
                 } else {
                     // typecheck guarantees a generic fn here; a non-template name is
@@ -995,7 +994,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                 }
             }
         };
-        Metadata::new(node, expr.span.clone())
+        Metadata::new(node, expr.span)
     }
 
     fn rebuild_stmt(&mut self, stmt: &Stmt<'a>, b: &Bindings<'a>) -> Stmt<'a> {
@@ -1041,7 +1040,7 @@ impl<'p, 'a> Mono<'p, 'a> {
             StmtNode::Continue => StmtNode::Continue,
             StmtNode::Break => StmtNode::Break,
         };
-        Metadata::new(node, stmt.span.clone())
+        Metadata::new(node, stmt.span)
     }
 
     /// Rebuild a function with type params substituted per `b`, an optional new
@@ -1058,7 +1057,7 @@ impl<'p, 'a> Mono<'p, 'a> {
 
         // any struct instance requested while substituting this function's types
         // reports against the function's span.
-        self.cur_span = tl.span.clone();
+        self.cur_span = tl.span;
         let new_params: Vec<(&'a str, Type<'a>)> =
             params.iter().map(|(pn, ty)| (*pn, self.subst_ty(ty, b))).collect();
         let new_return = self.subst_ty(return_type, b);
@@ -1078,7 +1077,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                 return_type: new_return,
                 body: new_body,
             },
-            tl.span.clone(),
+            tl.span,
         )
     }
 
@@ -1095,7 +1094,7 @@ impl<'p, 'a> Mono<'p, 'a> {
 
         // instances requested while substituting these fields report against the
         // struct's own declaration span.
-        self.cur_span = tl.span.clone();
+        self.cur_span = tl.span;
         let new_fields: Vec<(&'a str, Type<'a>)> = fields.iter()
             .map(|(fname, fty)| (*fname, self.subst_ty(fty, b)))
             .collect();
@@ -1109,7 +1108,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                 generics: Vec::new(),
                 fields: new_fields,
             },
-            tl.span.clone(),
+            tl.span,
         )
     }
 
@@ -1122,8 +1121,8 @@ impl<'p, 'a> Mono<'p, 'a> {
         let TopLevelNode::Enum { name, def, is_pub, attributes, variants, .. } = &tl.value
         else { unreachable!("rebuild_enum called on a non-enum") };
 
-        self.cur_span = tl.span.clone();
-        let new_variants: Vec<(&'a str, Option<i64>, Vec<(&'a str, Type<'a>)>)> = variants.iter()
+        self.cur_span = tl.span;
+        let new_variants: Vec<EnumVariant<'a>> = variants.iter()
             .map(|(vname, disc, payload)| (
                 *vname,
                 *disc,
@@ -1140,7 +1139,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                 generics: Vec::new(),
                 variants: new_variants,
             },
-            tl.span.clone(),
+            tl.span,
         )
     }
 }
@@ -1239,7 +1238,7 @@ pub fn monomorphize<'a>(
                         name, def: *def, is_pub: *is_pub, attributes: attributes.clone(),
                         ty: ty.clone(), value: m.rebuild_expr(value, &empty),
                     },
-                    tl.span.clone(),
+                    tl.span,
                 ));
             }
             TopLevelNode::Extern { .. } => {}
@@ -1345,7 +1344,7 @@ pub fn monomorphize<'a>(
                 }
             }
             // field types report against this instance's span while being substituted.
-            m.cur_span = inst.span.clone();
+            m.cur_span = inst.span;
             let new_fields: Vec<(&'a str, Type<'a>)> = fields.iter()
                 .map(|(fname, fty)| (*fname, m.subst_ty(fty, &bindings)))
                 .collect();
@@ -1358,7 +1357,7 @@ pub fn monomorphize<'a>(
                     generics: Vec::new(),
                     fields: new_fields,
                 },
-                tl.span.clone(),
+                tl.span,
             );
             struct_instances.entry(inst.base).or_default().push(s);
             continue;
@@ -1401,8 +1400,8 @@ pub fn monomorphize<'a>(
             // discriminants don't depend on the bound params - only payload field
             // types are substituted; field names (real or synthesized "0"/"1") and
             // discriminant values pass through unchanged.
-            m.cur_span = inst.span.clone();
-            let new_variants: Vec<(&'a str, Option<i64>, Vec<(&'a str, Type<'a>)>)> = variants.iter()
+            m.cur_span = inst.span;
+            let new_variants: Vec<EnumVariant<'a>> = variants.iter()
                 .map(|(vname, disc, payload)| (
                     *vname,
                     *disc,
@@ -1418,7 +1417,7 @@ pub fn monomorphize<'a>(
                     generics: Vec::new(),
                     variants: new_variants,
                 },
-                tl.span.clone(),
+                tl.span,
             );
             enum_instances.entry(inst.base).or_default().push(e);
             continue;

@@ -268,16 +268,16 @@ fn run_case(path: &Path, mode: Mode) -> Result<(), Failed> {
 
             // stdout must match the `.out` golden byte-for-byte, if present.
             let golden_path = path.with_extension("out");
-            if let Ok(want) = std::fs::read(&golden_path) {
-                if run.stdout != want {
-                    return Err(format!(
-                        "stdout did not match {}\n  --- expected ---\n{}\n  --- actual ---\n{}",
-                        golden_path.display(),
-                        String::from_utf8_lossy(&want),
-                        String::from_utf8_lossy(&run.stdout),
-                    )
-                    .into());
-                }
+            if let Ok(want) = std::fs::read(&golden_path)
+                && run.stdout != want
+            {
+                return Err(format!(
+                    "stdout did not match {}\n  --- expected ---\n{}\n  --- actual ---\n{}",
+                    golden_path.display(),
+                    String::from_utf8_lossy(&want),
+                    String::from_utf8_lossy(&run.stdout),
+                )
+                .into());
             }
             Ok(())
         }

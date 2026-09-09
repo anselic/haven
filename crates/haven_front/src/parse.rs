@@ -211,7 +211,6 @@ fn lexer<'a> (
         none_of("\\\"").ignored(),        // any ordinary char
     ));
     let str_ = str_char
-        .clone()
         .repeated()
         .to_slice()
         .delimited_by(just('"'), just('"'))
@@ -325,10 +324,10 @@ fn lexer<'a> (
         .collect()
 }
 
-pub fn lex<'a>(file: FileId, source: &'a str) -> (
-    Option<Vec<Metadata<Token<'a>>>>,
-    Vec<chumsky::error::Rich<'a, char, Span>>
-) {
+/// A source file's tokens and lexer errors. The tokens are `None` if lexing fails.
+pub type LexResult<'a> = (Option<Vec<Metadata<Token<'a>>>>, Vec<chumsky::error::Rich<'a, char, Span>>);
+
+pub fn lex<'a>(file: FileId, source: &'a str) -> LexResult<'a> {
     let (tks, errs) = lexer(file)
         .parse(source)
         .into_output_errors();
@@ -527,7 +526,7 @@ fn build_interp<'src>(inner: &'src str, span: Span) -> Result<Expr<'src>, String
             while let Some(t) = it.next() {
                 match (t, it.next()) {
                     (Token::Dot, Some(Token::Var(field))) => {
-                        expr = mk(ExprNode::Access { base: Box::new(expr), field: *field });
+                        expr = mk(ExprNode::Access { base: Box::new(expr), field });
                     }
                     _ => return unsupported(),
                 }
@@ -645,7 +644,7 @@ fn parse_expr<'tks, 'src: 'tks>() -> P<'tks, 'src, Expr<'src>> {
                 Token::Float64(f) => ExprNode::Float64(*f),
                 Token::IntLit(n)  => ExprNode::IntLit(*n),
                 Token::FloatLit(f)=> ExprNode::FloatLit(*f),
-                Token::Str(s)     => ExprNode::Str(*s),
+                Token::Str(s)     => ExprNode::Str(s),
             }.boxed(),
 
             // an interpolated string `f"...{expr}..."`, desugared to String-
@@ -762,7 +761,7 @@ fn parse_expr<'tks, 'src: 'tks>() -> P<'tks, 'src, Expr<'src>> {
                 .allow_trailing()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBracket), just(Token::RBracket))
-                .map(|inner| ExprNode::Slice(inner))
+                .map(ExprNode::Slice)
                 .boxed()
         ])
 
@@ -783,7 +782,7 @@ fn parse_expr<'tks, 'src: 'tks>() -> P<'tks, 'src, Expr<'src>> {
                     Metadata::new(
                         ExprNode::Access {
                             base: Box::new(base),
-                            field: *field,
+                            field,
                         },
                         e.span(),
                     )
@@ -1214,7 +1213,7 @@ fn parse_stmt<'tks, 'src: 'tks>() -> P<'tks, 'src, Stmt<'src>> {
         // each payload sub-pattern is Metadata-wrapped so a `Bind` carries a
         // unique node id (its binding identity, like a `Declare`'s local).
         let field_pat = var.map_with(|s, e| {
-            let node = if *s == "_" { PatternNode::Wildcard } else { PatternNode::Bind(*s) };
+            let node = if *s == "_" { PatternNode::Wildcard } else { PatternNode::Bind(s) };
             Metadata::new(node, e.span())
         }).boxed();
         let variant_tail = field_pat.clone()
@@ -1374,7 +1373,7 @@ fn parse_named_type<'tks, 'src: 'tks>() -> P<'tks, 'src, (&'src str, Type<'src>)
 /// parameter, whether written in a binder (`T: A + B`) or in a `where` clause.
 fn parse_trait_bounds<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<NameRef<'src>>> {
     let var = select_ref! { Token::Var(ident) => ident };
-    var.map(|s| NameRef::new(Path::single(*s)))
+    var.map(|s| NameRef::new(Path::single(s)))
         .separated_by(just(Token::BinaryOp(BinaryOp::Add)))
         .at_least(1)
         .collect::<Vec<_>>()
@@ -1855,7 +1854,7 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
             let span = e.span();
             // inherent methods on a struct/enum body become a synthesized `Extend`
             // targeting that type, emitted right after the type node.
-            let mut out = vec![Metadata::new(node, span.clone())];
+            let mut out = vec![Metadata::new(node, span)];
             if !methods.is_empty() {
                 // the target is the type *applied to its own parameters*, so a
                 // generic type's inherent methods desugar exactly as if the
@@ -1937,11 +1936,13 @@ enum FileItem<'a> {
     Items(Vec<TopLevel<'a>>),
 }
 
+/// A file's module attributes, imports, and items.
+pub type ParsedItems<'a> = (Vec<Attribute<'a>>, Vec<Import<'a>>, Vec<TopLevel<'a>>);
+/// A file's parsed contents and parser errors. The contents are `None` if parsing fails.
+pub type ParseResult<'a> = (Option<ParsedItems<'a>>, Vec<chumsky::error::Rich<'a, Token<'a>, Span>>);
+
 /// Parse one file into its module attributes, its imports, and its items.
-pub fn parse<'a>(file: FileId, len: usize, tokens: &'a [Metadata<Token<'a>>]) -> (
-    Option<(Vec<Attribute<'a>>, Vec<Import<'a>>, Vec<TopLevel<'a>>)>,
-    Vec<chumsky::error::Rich<'a, Token<'a>, Span>>,
-) {
+pub fn parse<'a>(file: FileId, len: usize, tokens: &'a [Metadata<Token<'a>>]) -> ParseResult<'a> {
     let (out, errs) = choice([
             // first: `@!` is the only file-scope construct starting with two
             // fixed tokens, so trying it here costs nothing and keeps a module

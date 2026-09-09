@@ -241,6 +241,11 @@ fn cmd_build(opts: BuildOpts<'_>) -> Result<PathBuf, String> {
 /// full dependency closure, then compile `project` against it. When
 /// `force_executable` is set (as `run` requires), the manifest's `kind` is
 /// overridden to build an executable so there is a binary to launch.
+/// A dependency's package name and the path to its built `.hvmeta` file.
+type DepBinding = (String, PathBuf);
+/// Caches each package's built `.hvmeta` file and all of its dependencies.
+type DepCache = HashMap<PathBuf, (PathBuf, Vec<DepBinding>)>;
+
 fn build_project(
     project: &Project,
     opts: BuildOpts<'_>,
@@ -250,7 +255,7 @@ fn build_project(
     // Build the whole dependency graph (each package once), then compile this
     // project against the flattened closure. The root is seeded onto the build
     // stack so a cycle back to it is caught here, not one frame down.
-    let mut cache: HashMap<PathBuf, (PathBuf, Vec<(String, PathBuf)>)> = HashMap::new();
+    let mut cache: DepCache = HashMap::new();
     let mut on_stack: Vec<PathBuf> = vec![canonical_root(project)];
     let deps = dep_closure(project, opts, &mut cache, &mut on_stack)?;
     compile_project(project, &deps, force_executable, opts)
@@ -270,9 +275,9 @@ fn canonical_root(project: &Project) -> PathBuf {
 fn dep_closure(
     project: &Project,
     opts: BuildOpts<'_>,
-    cache: &mut HashMap<PathBuf, (PathBuf, Vec<(String, PathBuf)>)>,
+    cache: &mut DepCache,
     on_stack: &mut Vec<PathBuf>,
-) -> Result<Vec<(String, PathBuf)>, String> {
+) -> Result<Vec<DepBinding>, String> {
     // BTreeMap dedups a diamond by package name and keeps the command line
     // deterministic; a direct dependency wins over the same name reached only
     // transitively.
@@ -295,9 +300,9 @@ fn dep_closure(
 fn build_dependency(
     project: &Project,
     opts: BuildOpts<'_>,
-    cache: &mut HashMap<PathBuf, (PathBuf, Vec<(String, PathBuf)>)>,
+    cache: &mut DepCache,
     on_stack: &mut Vec<PathBuf>,
-) -> Result<(PathBuf, Vec<(String, PathBuf)>), String> {
+) -> Result<(PathBuf, Vec<DepBinding>), String> {
     let key = canonical_root(project);
     if let Some(hit) = cache.get(&key) {
         return Ok(hit.clone());
@@ -711,13 +716,12 @@ fn tool_path(name: &str) -> PathBuf {
     } else {
         name.to_string()
     };
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             let sibling = dir.join(&exe_name);
             if sibling.is_file() {
                 return sibling;
             }
         }
-    }
     PathBuf::from(name)
 }

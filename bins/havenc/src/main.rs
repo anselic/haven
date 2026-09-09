@@ -56,12 +56,11 @@ fn main() {
             .unwrap_or_else(|| "pkg".to_string())
     });
     let mut default_std: Option<&str> = None;
-    if self_pkg != "std" && !deps.contains_key("std") {
-        if let Some(std_meta) = discover_std() {
+    if self_pkg != "std" && !deps.contains_key("std")
+        && let Some(std_meta) = discover_std() {
             deps.insert("std".to_string(), std_meta);
             default_std = Some("std");
         }
-    }
 
     // where the prelude comes from. `--no-prelude` and `--prelude <name>` are
     // mutually exclusive at the CLI, so the three cases are disjoint.
@@ -91,14 +90,13 @@ fn main() {
     // unmangled (see `haven_front::module`), so the only function literally named
     // "main" is the entry one; a non-entry module's `main` was mangled away.
     for item in &mut ast {
-        if let ast::TopLevelNode::Function { name: "main", attributes, .. } = &mut item.value {
-            if !attributes.iter().any(|a| a.value.name == "export") {
+        if let ast::TopLevelNode::Function { name: "main", attributes, .. } = &mut item.value
+            && !attributes.iter().any(|a| a.value.name == "export") {
                 attributes.push(ast::Metadata::new(
                     ast::AttributeNode::new("export", None),
                     ast::Span::unknown(),
                 ));
             }
-        }
     }
 
     {
@@ -145,7 +143,6 @@ fn main() {
             // checks) operates on concrete instances a lib does not have; those
             // are deferred to the leaf, where instantiation happens.
             write_lib_metadata(input, &package_name, &defs, &files, &args.c_file, &args.link_lib, &args.output);
-            return;
         } else {
             // expand generics into concrete instances, then re-typecheck the
             // now fully-concrete program so node_types is populated for the
@@ -225,7 +222,7 @@ fn main() {
                     // .arg(temp_runtime.path())
                     .arg("-S")
                     .arg("-emit-llvm")
-                    .args(&args.compiler_flags.split_whitespace().collect::<Vec<_>>())
+                    .args(args.compiler_flags.split_whitespace().collect::<Vec<_>>())
                     .arg("-o")
                     .arg(&optimized_ir_output_path)
                     .status()
@@ -243,7 +240,7 @@ fn main() {
                 let status = std::process::Command::new(&args.compiler)
                     .arg(&llvm_ir_output_path)
                     .arg("-S")
-                    .args(&args.compiler_flags.split_whitespace().collect::<Vec<_>>())
+                    .args(args.compiler_flags.split_whitespace().collect::<Vec<_>>())
                     .arg("-o")
                     .arg(&asm_output_path)
                     .status()
@@ -416,7 +413,7 @@ fn main() {
                 let obj_status = std::process::Command::new(&args.compiler)
                     .arg(&llvm_ir_output_path)
                     .arg("-c")
-                    .args(&args.compiler_flags.split_whitespace().collect::<Vec<_>>())
+                    .args(args.compiler_flags.split_whitespace().collect::<Vec<_>>())
                     .arg("-o")
                     .arg(&obj_path)
                     .status()
@@ -721,12 +718,11 @@ fn write_lib_metadata(
     };
 
     let out_path = output.with_extension("hvmeta");
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = out_path.parent()
+        && !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).unwrap_or_else(|e| fatal(format!(
                 "cannot create output directory '{}': {}", parent.display(), e)));
         }
-    }
     if let Err(e) = haven_meta::write(&out_path, &meta) {
         diag::report_plain("Error", &format!(
             "cannot write library metadata '{}': {}", out_path.display(), e));

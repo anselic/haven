@@ -4,6 +4,12 @@ use crate::intrinsics::{Intrinsic, IntrinsicSig, TyConstraint, ConstBound};
 use super::context::{Context, GenericFnSig, param_names};
 use super::infer::{check_expr, infer};
 
+/// Generic type and constant parameters mapped to their resolved values.
+pub(crate) type GenericSubst<'a> = (HashMap<&'a str, Type<'a>>, HashMap<&'a str, ConstVal<'a>>);
+/// Resolved generic values and the full argument list, including inferred arguments.
+pub(crate) type ResolvedGenerics<'a> =
+    (HashMap<&'a str, Type<'a>>, HashMap<&'a str, ConstVal<'a>>, Vec<GenericArg<'a>>);
+
 /// Resolves a turbofish type argument (generic params → `Type::Param`), checks
 /// any referenced structs exist, then checks it against the parameter's kind
 /// constraint. Type params pass kind checks optimistically - their kind is only
@@ -18,13 +24,13 @@ fn check_type_arg<'a>(
 ) -> Result<Type<'a>, Error> {
     let ty = ty.clone();
     if let Err(msg) = check_type_resolves(cx, &ty) {
-        return Err(Error::new(span.clone(), format!("{}(): {}", intrinsic, msg)));
+        return Err(Error::new(*span, format!("{}(): {}", intrinsic, msg)));
     }
     match kind {
         TyConstraint::Any => {}
         TyConstraint::Numeric => {
             if !ty.is_numeric() && !matches!(ty, Type::Param(_)) {
-                return Err(Error::new(span.clone(), format!(
+                return Err(Error::new(*span, format!(
                     "{}() expects a numeric type, got `{}`", intrinsic, cx.show(&ty))));
             }
         }
@@ -33,7 +39,7 @@ fn check_type_arg<'a>(
             // valid pointer type for `null`/`ptr_cast` (e.g. a null C string, or
             // casting a `*u8` to `str` and back).
             if !matches!(ty, Type::Pointer(_) | Type::Param(_) | Type::Str) {
-                return Err(Error::new(span.clone(), format!(
+                return Err(Error::new(*span, format!(
                     "{}() expects a pointer type, got `{}`", intrinsic, cx.show(&ty))));
             }
         }
@@ -58,7 +64,7 @@ fn check_const_arg(
         if bound.multiple_of != 1 {
             msg += &format!(" and a multiple of {}", bound.multiple_of);
         }
-        Err(Error::new(span.clone(), msg))
+        Err(Error::new(*span, msg))
     }
 }
 
@@ -77,14 +83,14 @@ pub(crate) fn bind_generics<'a>(
     let n_const = sig.const_params.len();
 
     if type_args.len() != n_type + n_const {
-        return Err(Error::new(span.clone(), format!(
+        return Err(Error::new(*span, format!(
             "{}() expects {} type argument{} in `::<...>`, got {}",
             intrinsic, n_type + n_const,
             if n_type + n_const == 1 { "" } else { "s" }, type_args.len(),
         )));
     }
     if args.len() != sig.value_arity {
-        return Err(Error::new(span.clone(), format!(
+        return Err(Error::new(*span, format!(
             "{}() takes exactly {} argument{}, got {}",
             intrinsic, sig.value_arity,
             if sig.value_arity == 1 { "" } else { "s" }, args.len(),
@@ -95,7 +101,7 @@ pub(crate) fn bind_generics<'a>(
     for (i, kind) in sig.type_params.iter().enumerate() {
         match &type_args[i] {
             GenericArg::Type(ty) => tys.push(check_type_arg(cx, intrinsic, *kind, ty, span)?),
-            GenericArg::Const(_) => return Err(Error::new(span.clone(), format!(
+            GenericArg::Const(_) => return Err(Error::new(*span, format!(
                 "{}() expects a type for type argument {}, got a const", intrinsic, i + 1))),
         }
     }
@@ -116,7 +122,7 @@ pub(crate) fn bind_generics<'a>(
             {
                 ConstVal::Param(const_param_name(ty).unwrap())
             }
-            GenericArg::Type(_) => return Err(Error::new(span.clone(), format!(
+            GenericArg::Type(_) => return Err(Error::new(*span, format!(
                 "{}() expects a const for type argument {}, got a type", intrinsic, n_type + j + 1))),
         };
         consts.push(cv);
@@ -192,7 +198,7 @@ pub(crate) fn bind_turbofish<'a>(
     generics: &[GenericParam<'a>],
     type_args: &[GenericArg<'a>],
     span: &Span,
-) -> Result<(HashMap<&'a str, Type<'a>>, HashMap<&'a str, ConstVal<'a>>), Error> {
+) -> Result<GenericSubst<'a>, Error> {
     let mut type_bindings: HashMap<&'a str, Type<'a>> = HashMap::new();
     let mut const_bindings: HashMap<&'a str, ConstVal<'a>> = HashMap::new();
     for (gp, ta) in generics.iter().zip(type_args) {
@@ -202,7 +208,7 @@ pub(crate) fn bind_turbofish<'a>(
                 // can forward its `T`), then check any structs exist.
                 let ty = ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &ty) {
-                    return Err(Error::new(span.clone(), format!("{}(): {}", name, msg)));
+                    return Err(Error::new(*span, format!("{}(): {}", name, msg)));
                 }
                 type_bindings.insert(pname, ty);
             }
@@ -216,19 +222,19 @@ pub(crate) fn bind_turbofish<'a>(
             // re-checked post-mono, exactly as for the intrinsic turbofish path.
             (GenericParam::Const(pname, _), GenericArg::Const(ConstVal::Param(fwd))) => {
                 if !cx.const_generics.contains(fwd) {
-                    return Err(Error::new(span.clone(), format!(
+                    return Err(Error::new(*span, format!(
                         "{}(): unknown const parameter '{}'", name, fwd)));
                 }
                 const_bindings.insert(pname, ConstVal::Param(fwd));
             }
-            (GenericParam::Type { name: pname, .. }, GenericArg::Const(_)) => return Err(Error::new(span.clone(), format!("{}(): expected a type argument for '{}', got a const value", name, pname))),
+            (GenericParam::Type { name: pname, .. }, GenericArg::Const(_)) => return Err(Error::new(*span, format!("{}(): expected a type argument for '{}', got a const value", name, pname))),
             (GenericParam::Const(pname, _), GenericArg::Type(ty)) => {
                 // a bare-ident turbofish arg (`N`) parses as a type; if it names an
                 // in-scope const param it's a forward (bind symbolically, as above),
                 // otherwise it's a real type wrongly placed in a const slot.
                 match const_param_name(ty).filter(|n| cx.const_generics.contains(n)) {
                     Some(fwd) => { const_bindings.insert(pname, ConstVal::Param(fwd)); }
-                    None => return Err(Error::new(span.clone(), format!(
+                    None => return Err(Error::new(*span, format!(
                         "{}(): expected a const argument for '{}', got a type", name, pname))),
                 }
             }
@@ -262,9 +268,9 @@ pub(crate) fn check_bounds<'a>(
             // Answering the two here and only the second one there is what let a
             // generic helper be rejected for a bound it plainly had.
             if !cx.implements(arg_ty, bound.def) {
-                return Err(Error::new(span.clone(), format!(
+                return Err(Error::new(*span, format!(
                     "type `{}` does not implement trait `{}`", cx.show(arg_ty), bound))
-                    .with_label(span.clone(), format!("required by `{}`", who))
+                    .with_label(*span, format!("required by `{}`", who))
                     .with_note(format!("`{}` declares the bound `{}: {}`", who, pname, bound)));
             }
         }
@@ -292,7 +298,7 @@ pub(crate) fn check_generic_call<'a>(
     // value-arg arity is the same both ways, and the inference path relies on
     // args lining up one-to-one with params, so check it once up front.
     if args.len() != sig.params.len() {
-        return Err(Error::new(span.clone(), format!("{}() expects {} argument{}, got {}",
+        return Err(Error::new(*span, format!("{}() expects {} argument{}, got {}",
             name, sig.params.len(), if sig.params.len() == 1 { "" } else { "s" }, args.len())));
     }
 
@@ -306,7 +312,7 @@ pub(crate) fn check_generic_call<'a>(
         let (tb, cb) = bind_turbofish(cx, name, &sig.generics, type_args, span)?;
         (tb, cb, None)
     } else {
-        return Err(Error::new(span.clone(), format!(
+        return Err(Error::new(*span, format!(
             "{}() expects {} generic argument{} in `::<...>`, got {}",
             name, sig.generics.len(),
             if sig.generics.len() == 1 { "" } else { "s" }, type_args.len(),
@@ -334,7 +340,7 @@ fn infer_type_args<'a>(
     sig: &GenericFnSig<'a>,
     args: &[Expr<'a>],
     span: &Span,
-) -> Result<(HashMap<&'a str, Type<'a>>, HashMap<&'a str, ConstVal<'a>>), Error> {
+) -> Result<GenericSubst<'a>, Error> {
     // the free names unify may bind are exactly the callee's own generics.
     let params = param_names(&sig.generics);
     let mut u = Unified::default();
@@ -473,9 +479,9 @@ fn materialize_targs<'a>(
                     GenericParam::Type { name, .. } => *name,
                     GenericParam::Const(name, _) => *name,
                 };
-                return Err(Error::new(span.clone(),
+                return Err(Error::new(*span,
                     format!("cannot infer type argument `{}` for `{}`", pn, name))
-                    .with_label(span.clone(), site.source())
+                    .with_label(*span, site.source())
                     .with_note(site.example(name)));
             }
         }
@@ -495,9 +501,9 @@ pub(crate) fn bind_struct_generics<'a>(
     params: &[GenericParam<'a>],
     args: &[GenericArg<'a>],
     span: &Span,
-) -> Result<(HashMap<&'a str, Type<'a>>, HashMap<&'a str, ConstVal<'a>>, Vec<GenericArg<'a>>), Error> {
+) -> Result<ResolvedGenerics<'a>, Error> {
     if args.len() != params.len() {
-        return Err(Error::new(span.clone(), format!(
+        return Err(Error::new(*span, format!(
             "struct '{}' expects {} type argument{}, got {}",
             name, params.len(),
             if params.len() == 1 { "" } else { "s" }, args.len(),
@@ -511,7 +517,7 @@ pub(crate) fn bind_struct_generics<'a>(
             (GenericParam::Type { name: pname, .. }, GenericArg::Type(ty)) => {
                 let ty = ty.clone();
                 if let Err(msg) = check_type_resolves(cx, &ty) {
-                    return Err(Error::new(span.clone(), format!("struct '{}': {}", name, msg)));
+                    return Err(Error::new(*span, format!("struct '{}': {}", name, msg)));
                 }
                 type_subst.insert(pname, ty.clone());
                 resolved.push(GenericArg::Type(ty));
@@ -527,13 +533,13 @@ pub(crate) fn bind_struct_generics<'a>(
             // its `self` is a `Buf<T, N>` whose `N` is the method's own param.
             (GenericParam::Const(pname, _), GenericArg::Const(ConstVal::Param(fwd))) => {
                 if !cx.const_generics.contains(fwd) {
-                    return Err(Error::new(span.clone(), format!(
+                    return Err(Error::new(*span, format!(
                         "struct '{}': unknown const parameter '{}'", name, fwd)));
                 }
                 const_subst.insert(pname, ConstVal::Param(fwd));
                 resolved.push(GenericArg::Const(ConstVal::Param(fwd)));
             }
-            (GenericParam::Type { name: pname, .. }, GenericArg::Const(_)) => return Err(Error::new(span.clone(), format!("struct '{}': expected a type argument for '{}', got a const value", name, pname))),
+            (GenericParam::Type { name: pname, .. }, GenericArg::Const(_)) => return Err(Error::new(*span, format!("struct '{}': expected a type argument for '{}', got a const value", name, pname))),
             (GenericParam::Const(pname, _), GenericArg::Type(ty)) => {
                 // a bare-ident arg (`N`) parses as a type; if it names an in-scope
                 // const param it's a forward (bind symbolically, as above),
@@ -543,7 +549,7 @@ pub(crate) fn bind_struct_generics<'a>(
                         const_subst.insert(pname, ConstVal::Param(fwd));
                         resolved.push(GenericArg::Const(ConstVal::Param(fwd)));
                     }
-                    None => return Err(Error::new(span.clone(), format!(
+                    None => return Err(Error::new(*span, format!(
                         "struct '{}': expected a const argument for '{}', got a type", name, pname))),
                 }
             }

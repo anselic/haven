@@ -1115,13 +1115,12 @@ pub fn check_attribute(
                 spec.values.and_then(|v| v.first()).unwrap_or(&"...")))),
         _ => {}
     }
-    if let (Some(allowed), Some(written)) = (spec.values, attr.value.as_deref()) {
-        if !allowed.contains(&written) {
+    if let (Some(allowed), Some(written)) = (spec.values, attr.value.as_deref())
+        && !allowed.contains(&written) {
             return Err((
                 format!("`@{}({})` is not a valid value", attr.name, written),
                 format!("expected {}", allowed.join(" or "))));
         }
-    }
     if !spec.targets.contains(&target) {
         let ok = spec.targets.iter().map(|t| t.label()).collect::<Vec<_>>().join(", ");
         // a module attribute misplaced onto an item is a spelling mistake more
@@ -1273,6 +1272,12 @@ pub fn implements<'a>(
     })
 }
 
+/// The fields carried by an enum variant, stored as `(name, type)` pairs.
+/// Tuple fields are named `"0"`, `"1"`, and so on.
+pub type VariantPayload<'a> = Vec<(&'a str, Type<'a>)>;
+/// An enum variant's name, optional explicit value, and payload fields.
+pub type EnumVariant<'a> = (&'a str, Option<i64>, VariantPayload<'a>);
+
 #[derive(Clone, Debug)]
 pub enum TopLevelNode<'a> {
     Function {
@@ -1336,7 +1341,7 @@ pub enum TopLevelNode<'a> {
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
         generics: Vec<GenericParam<'a>>,
-        variants: Vec<(&'a str, Option<i64>, Vec<(&'a str, Type<'a>)>)>,
+        variants: Vec<EnumVariant<'a>>,
     },
 
     /// A module-level constant, e.g. `const SR: f32 = 48000.0;`. The initializer

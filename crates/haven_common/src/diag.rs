@@ -425,7 +425,7 @@ fn random() -> usize {
     seed ^= seed << 13;
     seed ^= seed << 7;
     seed ^= seed << 13;
-    return (seed % 1_000_000) as usize;
+    (seed % 1_000_000) as usize
 }
 
 /// The multi-line human rendering. Plain text on purpose: a crash report is

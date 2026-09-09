@@ -136,7 +136,7 @@ enum FastMathFlags {
     Reassoc,
     NNaN,
     NInf,
-    NSZ,
+    NSz,
     Arcp,
     Contract,
 }
@@ -148,21 +148,21 @@ impl FastMathFlags {
             "reassoc"  => Some(FastMathFlags::Reassoc),
             "nnan"     => Some(FastMathFlags::NNaN),
             "ninf"     => Some(FastMathFlags::NInf),
-            "nsz"      => Some(FastMathFlags::NSZ),
+            "nsz"      => Some(FastMathFlags::NSz),
             "arcp"     => Some(FastMathFlags::Arcp),
             "contract" => Some(FastMathFlags::Contract),
             _ => None,
         }
     }
 
-    fn to_str(&self) -> &'static str {
+    fn to_str(self) -> &'static str {
         match self {
             FastMathFlags::None     => "",
             FastMathFlags::Fast     => "fast",
             FastMathFlags::Reassoc  => "reassoc",
             FastMathFlags::NNaN     => "nnan",
             FastMathFlags::NInf     => "ninf",
-            FastMathFlags::NSZ      => "nsz",
+            FastMathFlags::NSz      => "nsz",
             FastMathFlags::Arcp     => "arcp",
             FastMathFlags::Contract => "contract",
         }
@@ -842,11 +842,10 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
         let (_, ret_ty) = func.sret.as_ref().unwrap();
         emitln!(cx, "    {reg} = alloca {}", cx.abi_storage_ty(ret_ty));
     }
-    if has_preamble {
-        if let Some(id) = first_block {
+    if has_preamble
+        && let Some(id) = first_block {
             emitln!(cx, "    br label %{id}");
         }
-    }
 
     func.blocks.into_iter().for_each(|block| emit_block(cx, block));
     emitln!(cx, "}}");
@@ -902,7 +901,7 @@ fn abi_param_types<'a>(cx: &EmitCtx<'a>, ty: &Type<'a>) -> Vec<String> {
 fn emit_string_blob(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for &b in bytes {
-        if b == b'"' || b == b'\\' || b < 0x20 || b > 0x7e {
+        if b == b'"' || b == b'\\' || !(0x20..=0x7e).contains(&b) {
             out.push_str(&format!("\\{:02X}", b));
         } else {
             out.push(b as char);
@@ -997,7 +996,7 @@ declare i8 @llvm.fptoui.sat.i8.f64(double)
 "#;
 
 pub fn emit<'a>(module: Module<'a>) -> String {
-    let mut header = format!("; ModuleID = 'compiled_module'\n");
+    let mut header = "; ModuleID = 'compiled_module'\n".to_string();
     header.push_str(PREPEND.trim_start());
 
     // Layouts + symbols, for ABI classification and `%Name` references.

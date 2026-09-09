@@ -57,12 +57,11 @@ pub fn generate(args: &DocArgs) -> Result<(), ()> {
             }
         };
 
-        if let Some(parent) = page_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+        if let Some(parent) = page_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent) {
                 eprintln!("havendoc: cannot create {}: {}", parent.display(), e);
                 continue;
             }
-        }
         if let Err(e) = std::fs::write(&page_path, markdown) {
             eprintln!("havendoc: cannot write {}: {}", page_path.display(), e);
             continue;
@@ -232,11 +231,10 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
             node => {
                 render_item(&mut md, item, &src, &lines);
                 // a type carries its methods directly beneath its declaration.
-                if let TopLevelNode::Struct { name, .. } | TopLevelNode::Enum { name, .. } = node {
-                    if let Some(methods) = method_groups.remove(*name) {
+                if let TopLevelNode::Struct { name, .. } | TopLevelNode::Enum { name, .. } = node
+                    && let Some(methods) = method_groups.remove(*name) {
                         render_methods(&mut md, &methods, &lines);
                     }
-                }
             }
         }
     }
@@ -693,12 +691,11 @@ fn write_index_rec(src_dir: &Path, path: &str, node: &TreeNode) -> Result<(), ()
             md.push_str(&format!("- [{}]({})\n", child, link));
         }
         let page_path = src_dir.join(path).join("index.md");
-        if let Some(parent) = page_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+        if let Some(parent) = page_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent) {
                 eprintln!("havendoc: cannot create {}: {}", parent.display(), e);
                 return Err(());
             }
-        }
         write_file(&page_path, md.as_bytes())?;
     }
     for (child, child_node) in &node.children {

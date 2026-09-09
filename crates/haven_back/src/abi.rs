@@ -80,7 +80,7 @@ impl Abi {
 /// Provisional class of an eightbyte (or a leaf field) during classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
-    NoClass,
+    None,
     Integer,
     Sse,
     Memory,
@@ -92,7 +92,7 @@ fn merge(a: Class, b: Class) -> Class {
     use Class::*;
     match (a, b) {
         _ if a == b => a,
-        (NoClass, other) | (other, NoClass) => other,
+        (None, other) | (other, None) => other,
         (Memory, _) | (_, Memory) => Memory,
         (Integer, _) | (_, Integer) => Integer,
         _ => Sse,
@@ -145,7 +145,7 @@ pub fn classify_sysv<'a>(ty: &Type<'a>, types: &TypeTable<'a>, unions: &UnionTab
             // type; anything else (mixed content, narrower ints) is a plain int.
             Class::Integer if e.is_sole_pointer() => Reg::Ptr,
             // Integer, or a padding-only eightbyte (defensive: shouldn't occur).
-            Class::Integer | Class::NoClass => Reg::Int(int_width(e.used)),
+            Class::Integer | Class::None => Reg::Int(int_width(e.used)),
             Class::Memory => unreachable!("memory eightbyte handled above"),
         })
         .collect();
@@ -186,7 +186,7 @@ struct Eightbyte {
 
 impl Default for Eightbyte {
     fn default() -> Self {
-        Eightbyte { class: Class::NoClass, used: 0, has_double: false, has_ptr: false, has_nonptr: false }
+        Eightbyte { class: Class::None, used: 0, has_double: false, has_ptr: false, has_nonptr: false }
     }
 }
 
@@ -242,14 +242,14 @@ fn classify_into<'a>(ty: &Type<'a>, offset: usize, types: &TypeTable<'a>, unions
             let is_ptr = leaf_is_pointer(ty);
             let first = offset / EIGHTBYTE;
             let last = (offset + size - 1) / EIGHTBYTE;
-            for i in first..=last {
-                eb[i].class = merge(eb[i].class, class);
-                eb[i].has_double |= is_double;
-                eb[i].has_ptr |= is_ptr;
-                eb[i].has_nonptr |= !is_ptr;
+            for (i, eb) in eb.iter_mut().enumerate().take(last + 1).skip(first) {
+                eb.class = merge(eb.class, class);
+                eb.has_double |= is_double;
+                eb.has_ptr |= is_ptr;
+                eb.has_nonptr |= !is_ptr;
                 // Bytes of this leaf reaching into eightbyte `i`, capped at 8.
                 let local_end = ((offset + size) - i * EIGHTBYTE).min(EIGHTBYTE);
-                eb[i].used = eb[i].used.max(local_end);
+                eb.used = eb.used.max(local_end);
             }
         }
     }
@@ -290,7 +290,7 @@ fn leaf_class(ty: &Type) -> Class {
         // leaf. Anything named that *is* an aggregate is handled by
         // `classify_into` and never reaches here.
         Type::Named { .. } => Class::Integer,
-        Type::Void => Class::NoClass,
+        Type::Void => Class::None,
         Type::Array(..) => {
             unreachable!("aggregates are handled by classify_into, not leaf_class")
         }

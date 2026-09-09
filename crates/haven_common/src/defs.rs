@@ -401,7 +401,7 @@ impl<'a> Defs<'a> {
     pub fn add_payload(&mut self, enum_: DefId, variant: &'a str, symbol: &'a str) -> DefId {
         if let Some(&existing) = self.payloads.get(&(enum_, variant)) { return existing; }
         let def = self.get(enum_);
-        let (module, span) = (def.module, def.span.clone());
+        let (module, span) = (def.module, def.span);
         let id = self.alloc(Def {
             module,
             kind: DefKind::EnumPayload,
@@ -560,11 +560,10 @@ fn module_slug(package: &str, key: &str, root: Option<&Path>, is_root: bool) -> 
 /// keeps their symbols apart while staying identical across machines.
 fn rel_seed(key: &str, root: Option<&Path>) -> String {
     if let Some(rest) = key.strip_prefix("std/") { return rest.to_string(); }
-    if let Some(root) = root {
-        if let Ok(rel) = Path::new(key).strip_prefix(root) {
+    if let Some(root) = root
+        && let Ok(rel) = Path::new(key).strip_prefix(root) {
             return rel.to_string_lossy().into_owned();
         }
-    }
     key.to_string()
 }
 

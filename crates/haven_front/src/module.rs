@@ -414,9 +414,9 @@ fn apply_where_bounds<'a>(
                                  declares; write `proc {}<{}>(..)` if it was meant to be one",
                                 pname, wname)),
                     };
-                    errs.push(Error::new(span.clone(),
+                    errs.push(Error::new(*span,
                         format!("unbound type parameter '{}' in `where`", wname))
-                        .with_label(span.clone(), label)
+                        .with_label(*span, label)
                         .with_note(note));
                 }
             }
@@ -521,9 +521,8 @@ fn alias_deps_ready<'a>(
     let ready = |t: &Type<'a>| alias_deps_ready(t, scopes, declared, resolved);
     match ty {
         Type::Path { path, args } => {
-            if let Some(def) = type_def_of(scopes, path) {
-                if declared.contains(&def) && !resolved.contains_key(&def) { return false; }
-            }
+            if let Some(def) = type_def_of(scopes, path)
+                && declared.contains(&def) && !resolved.contains_key(&def) { return false; }
             args.iter().all(|a| match a {
                 GenericArg::Type(t) => ready(t),
                 GenericArg::Const(_) => true,
@@ -708,12 +707,11 @@ fn self_subst_type<'a>(ty: &mut Type<'a>, target: &Type<'a>, assoc: &[(&'a str, 
             // *default body* is copied into, so `assoc` carries the impl's
             // bindings; it is empty for an ordinary method, where nothing has
             // written a projection the resolver could not already handle.
-            if path.segments.len() == 2 && path.segments[0] == "Self" {
-                if let Some((_, bound)) = assoc.iter().find(|(n, _)| *n == path.segments[1]) {
+            if path.segments.len() == 2 && path.segments[0] == "Self"
+                && let Some((_, bound)) = assoc.iter().find(|(n, _)| *n == path.segments[1]) {
                     *ty = bound.clone();
                     return;
                 }
-            }
             for a in args {
                 if let GenericArg::Type(t) = a { self_subst_type(t, target, assoc); }
             }
@@ -739,13 +737,12 @@ fn self_subst_args<'a>(args: &mut [GenericArg<'a>], target: &Type<'a>, assoc: &[
 /// becomes `Gain::make()`. A no-op when the head isn't `Self` or the target has
 /// no path form.
 fn self_subst_head<'a>(path: &mut Path<'a>, head: Option<&Path<'a>>) {
-    if path.segments.first() == Some(&"Self") {
-        if let Some(h) = head {
+    if path.segments.first() == Some(&"Self")
+        && let Some(h) = head {
             let mut segs = h.segments.clone();
             segs.extend_from_slice(&path.segments[1..]);
             path.segments = segs;
         }
-    }
 }
 
 fn self_subst_expr<'a>(e: &mut Expr<'a>, target: &Type<'a>, head: Option<&Path<'a>>, assoc: &[(&'a str, Type<'a>)]) {
@@ -949,7 +946,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 trait_: tr,
                 assoc_bindings: assoc_bindings.clone(),
                 defined: methods.iter().map(|m| m.value.name).collect(),
-                span: tl.span.clone(),
+                span: tl.span,
             });
         }
         let key = target_key(target);
@@ -1003,7 +1000,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 // private unless marked `pub`.
                 is_pub: mnode.is_pub || trait_.is_some(),
                 default_of: None,
-                span: tl.span.clone(),
+                span: tl.span,
             });
             synthesized.push(Metadata::new(
                 TopLevelNode::Function {
@@ -1021,7 +1018,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                     return_type,
                     body,
                 },
-                m.span.clone(),
+                m.span,
             ));
         }
     }
@@ -1034,9 +1031,12 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
 /// lex/parse diagnostics. tokens move into `arena` so the parsed AST can borrow
 /// them for `'a`. `extend`/method blocks are desugared to functions here, so the
 /// returned items are already method-free.
+/// A parsed module and the `extend` and method blocks processed later.
+type ModuleParse<'a> =
+    (Vec<Attribute<'a>>, Vec<Import<'a>>, Vec<TopLevel<'a>>, Vec<RawImpl<'a>>, Vec<RawMethod<'a>>);
+
 fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'a>)
-    -> Result<(Vec<Attribute<'a>>, Vec<Import<'a>>, Vec<TopLevel<'a>>,
-               Vec<RawImpl<'a>>, Vec<RawMethod<'a>>), ()>
+    -> Result<ModuleParse<'a>, ()>
 {
     let (tokens, lex_errs) = parse::lex(file, src);
     for e in &lex_errs {
@@ -1096,7 +1096,7 @@ fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], items: &[TopLevel<'a>]) -> 
     let check = |attrs: &[Attribute<'a>], target: AttrTarget, errs: &mut Vec<Error>| {
         for a in attrs {
             if let Err((msg, note)) = check_attribute(&a.value, target) {
-                errs.push(Error::new(a.span.clone(), msg).with_note(note));
+                errs.push(Error::new(a.span, msg).with_note(note));
             }
         }
     };
@@ -1245,7 +1245,7 @@ struct Rewriter<'x, 'a> {
 
 impl<'x, 'a> Rewriter<'x, 'a> {
     fn error(&mut self, span: &Span, msg: String) {
-        let err = Error::new(span.clone(), msg);
+        let err = Error::new(*span, msg);
         self.push(err);
     }
 
@@ -1263,12 +1263,12 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     /// Record an error against the innermost span being walked. For names that
     /// have no span of their own (types, and the leaves inside them).
     fn error_here(&mut self, msg: String) {
-        let span = self.span.clone();
+        let span = self.span;
         self.push(Error::new(span, msg));
     }
 
     fn is_local(&self, name: &str) -> bool {
-        self.locals.iter().any(|n| *n == name)
+        self.locals.contains(&name)
     }
 
     /// Rewrite the enum half of an `Enum::Variant` path to the enum's final name,
@@ -1379,7 +1379,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // it left a `Param`, and a second message would only repeat it.
             Type::Param(_) => {}
             other => {
-                let span = self.span.clone();
+                let span = self.span;
                 self.error(&span, format!(
                     "type alias '{}' names '{}', which is not a struct", written, other));
             }
@@ -1395,13 +1395,13 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     fn expand_alias(&mut self, def: DefId, args: Vec<GenericArg<'a>>, written: &'a str) -> Type<'a> {
         let al = &self.aliases[&def];
         if args.len() != al.generics.len() {
-            let span = self.span.clone();
-            self.errs.push(Error::new(span.clone(), format!(
+            let span = self.span;
+            self.errs.push(Error::new(span, format!(
                 "type alias '{}' expects {} argument{}, got {}",
                 written, al.generics.len(),
                 if al.generics.len() == 1 { "" } else { "s" }, args.len()))
                 .with_label(span, format!("used with {} here", args.len()))
-                .with_label(al.span.clone(), format!("'{}' is declared here", written)));
+                .with_label(al.span, format!("'{}' is declared here", written)));
             return Type::Param(written);
         }
         let mut types: HashMap<&'a str, Type<'a>> = HashMap::new();
@@ -1421,13 +1421,13 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                     consts.insert(name, ConstVal::Param(n));
                 }
                 (GenericParam::Type { name, .. }, GenericArg::Const(_)) => {
-                    let span = self.span.clone();
+                    let span = self.span;
                     self.error(&span, format!(
                         "type alias '{}': expected a type argument for '{}', got a const value",
                         written, name));
                 }
                 (GenericParam::Const(name, _), GenericArg::Type(_)) => {
-                    let span = self.span.clone();
+                    let span = self.span;
                     self.error(&span, format!(
                         "type alias '{}': expected a const argument for '{}', got a type",
                         written, name));
@@ -1583,11 +1583,10 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             return TypeHead::Param(path.last());
         };
         let names_module = scope.children.contains_key(path.last());
-        if segs.len() - n == 1 {
-            if let Some(sym) = scope.types.get(segs[n]) {
+        if segs.len() - n == 1
+            && let Some(sym) = scope.types.get(segs[n]) {
                 return TypeHead::Def(sym.def);
             }
-        }
         self.qual_miss(path, names_module, n, "type");
         TypeHead::Param(path.last())
     }
@@ -1628,9 +1627,9 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // is declared, just not as anything with a value. Worth saying, rather
             // than claiming the name is unknown when it is two lines up.
             if !in_call && gparams.contains(one) {
-                self.push(Error::new(span.clone(), format!(
+                self.push(Error::new(*span, format!(
                     "type parameter '{}' cannot be used as a value", one))
-                    .with_label(span.clone(), format!(
+                    .with_label(*span, format!(
                         "'{}' names a type, not a value", one))
                     .with_note("only a `const` parameter stands for a value"));
                 return Some(one);
@@ -1639,10 +1638,10 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 // same wording as the typechecker's own unknown-call diagnostic:
                 // this just catches it a stage earlier, before mangling can
                 // obscure it.
-                Error::new(span.clone(), format!("unknown function '{}'", one))
+                Error::new(*span, format!("unknown function '{}'", one))
                     .with_note("is it defined and imported into this module?")
             } else {
-                Error::new(span.clone(), format!("unknown value '{}'", one))
+                Error::new(*span, format!("unknown value '{}'", one))
             });
             return Some(one);
         }
@@ -1761,18 +1760,18 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             self.check_member_visible(m, sym);
             return m.name;
         }
-        self.push(Error::new(span.clone(),
+        self.push(Error::new(*span,
             format!("no associated function '{}' on built-in type '{}'", sym, ty))
             .with_note(format!("declare one with `extend {} {{ proc {}(...) ... }}`", ty, sym)));
         sym
     }
 
     fn expr(&mut self, e: &mut Expr<'a>, gparams: &HashSet<&str>) {
-        self.span = e.span.clone();
+        self.span = e.span;
         match &mut e.value {
             ExprNode::Call { func, type_args, args } => {
                 if let ExprNode::Path(path) = &mut func.value {
-                    let span = func.span.clone();
+                    let span = func.span;
                     if let Some(name) = self.value_path(path, &span, true, gparams) {
                         func.value = ExprNode::Var(name);
                     }
@@ -1789,7 +1788,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // template name, which typecheck/mono key on) and resolve the
             // turbofish types. The name lives in `name.path`, rewritten in place.
             ExprNode::FnRef { name, type_args } => {
-                let span = e.span.clone();
+                let span = e.span;
                 if let Some(resolved) = self.value_path(name, &span, true, gparams) {
                     name.path = Path { segments: vec![resolved] };
                 }
@@ -1849,7 +1848,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // *generic* fn by value has no type args to monomorphize with; that's
             // handled (or rejected) downstream, not here.
             ExprNode::Path(path) => {
-                let span = e.span.clone();
+                let span = e.span;
                 if let Some(name) = self.value_path(path, &span, false, gparams) {
                     e.value = ExprNode::Var(name);
                 }
@@ -1860,7 +1859,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     }
 
     fn stmt(&mut self, s: &mut Stmt<'a>, gparams: &HashSet<&str>) {
-        self.span = s.span.clone();
+        self.span = s.span;
         match &mut s.value {
             StmtNode::Expr(e) => self.expr(e, gparams),
             StmtNode::Block(ss) => {
@@ -1910,7 +1909,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     fn toplevel(&mut self, tl: &mut TopLevel<'a>) {
         // baseline span for anything in this item that has none of its own (field
         // types, a trait method's signature); `stmt`/`expr` narrow it as they go.
-        self.span = tl.span.clone();
+        self.span = tl.span;
         match &mut tl.value {
             // an alias' own body was resolved before this pass began (it has to
             // be, since a *use* of it in any module expands during this one), and
@@ -2071,7 +2070,7 @@ fn build_symtab<'a>(m: &Module<'a>, defs: &mut Defs<'a>, arena: &'a Bump,
             _ => continue,
         };
         if seen_types.contains(name) {
-            dup.push(Error::new(tl.span.clone(), format!(
+            dup.push(Error::new(tl.span, format!(
                 "Duplicate {} definition '{}'", kind, name)));
         }
         seen_types.insert(name);
@@ -2293,9 +2292,8 @@ fn meta_provides_prelude(meta: &HavenMeta) -> bool {
         let Some(tokens) = tokens.filter(|_| lex_errs.is_empty()) else { continue };
         let tokens = &*scratch.alloc_slice_fill_iter(tokens);
         let (parsed, parse_errs) = parse::parse(FileId::UNKNOWN, src.len(), tokens);
-        if let Some((mod_attrs, _, _)) = parsed.filter(|_| parse_errs.is_empty()) {
-            if mod_attrs.iter().any(|a| a.value.name == PRELUDE_ATTR) { return true; }
-        }
+        if let Some((mod_attrs, _, _)) = parsed.filter(|_| parse_errs.is_empty())
+            && mod_attrs.iter().any(|a| a.value.name == PRELUDE_ATTR) { return true; }
     }
     false
 }
@@ -2332,9 +2330,15 @@ fn meta_provides_prelude(meta: &HavenMeta) -> bool {
 /// only when no user-bound dependency does, and is otherwise excluded from prelude
 /// discovery so it never collides with a prelude the user brought. In every other
 /// respect it is an ordinary dep in `deps`.
+/// The complete program after all modules have been loaded and merged.
+type LoadedProgram<'a> = (Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>, String);
+
+// Errors have already been reported, so `Err(())` only tells the caller that
+// loading failed.
+#[allow(clippy::result_unit_err)]
 pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: PreludeSource<'_>,
                           deps: &HashMap<String, HavenMeta>, default_std: Option<&str>, arena: &'a Bump)
-    -> Result<(Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'a>>, String), ()>
+    -> Result<LoadedProgram<'a>, ()>
 {
     let mut worklist: VecDeque<Pending<'a>> = VecDeque::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
@@ -2394,7 +2398,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // std on disk would report a spurious two-prelude conflict.
             let mut providers: Vec<&str> = deps.iter()
                 .filter(|(k, _)| Some(k.as_str()) != default_std)
-                .filter_map(|(k, m)| meta_provides_prelude(m).then(|| k.as_str()))
+                .filter_map(|(k, m)| meta_provides_prelude(m).then_some(k.as_str()))
                 .collect();
             providers.sort_unstable();
             match providers.as_slice() {
@@ -2499,12 +2503,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         // every mangled name rewritten.
         if p.is_entry {
             for tl in &mut items {
-                if let TopLevelNode::Function { name: "main", attributes, .. } = &mut tl.value {
-                    if !is_export(attributes) {
+                if let TopLevelNode::Function { name: "main", attributes, .. } = &mut tl.value
+                    && !is_export(attributes) {
                         attributes.push(Metadata::new(
                             AttributeNode::new("export", None), Span::unknown()));
                     }
-                }
             }
         }
 
@@ -2710,9 +2713,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // the package serving as the prelude: exactly one of its modules may
             // claim the role.
             if let Some(prev) = prelude_mod {
-                prelude_errs.push(Error::new(attr.span.clone(),
+                prelude_errs.push(Error::new(attr.span,
                     format!("a second `@!{}`", PRELUDE_ATTR))
-                    .with_label(attr.span.clone(),
+                    .with_label(attr.span,
                         format!("'{}' already claims it", files.path(modules[prev].file)))
                     .with_note("a program has one prelude or none"));
             } else {
@@ -2726,9 +2729,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // does nothing, and a program has one prelude. To make *this* package
             // the prelude, nominate it (`--prelude`), which is also how a stdlib is
             // built.
-            prelude_errs.push(Error::new(attr.span.clone(),
+            prelude_errs.push(Error::new(attr.span,
                 format!("this `@!{}` has no effect", PRELUDE_ATTR))
-                .with_label(attr.span.clone(), format!(
+                .with_label(attr.span, format!(
                     "'{}' already supplies this program's prelude", prelude.provider()))
                 .with_note(format!(
                     "remove it, or build this package as the prelude with `--prelude {}`",
@@ -2796,7 +2799,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // one program.
             if !m.prelude_pkg {
                 let (msg, note) = prelude.lang_item_denial(item);
-                lang_errs.push(Error::new(attr.span.clone(), msg).with_note(note));
+                lang_errs.push(Error::new(attr.span, msg).with_note(note));
                 continue;
             }
 
@@ -2807,14 +2810,14 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 "delete" => &mut lang.delete,
                 // reachable only if `LANG_ITEMS` grew without an arm here.
                 other => {
-                    lang_errs.push(Error::new(attr.span.clone(), format!(
+                    lang_errs.push(Error::new(attr.span, format!(
                         "lang item '{}' is accepted by the parser but not wired up \
                          in the compiler", other)));
                     continue;
                 }
             };
             if slot.is_some() {
-                lang_errs.push(Error::new(attr.span.clone(), format!(
+                lang_errs.push(Error::new(attr.span, format!(
                     "duplicate `@{}({})`: the program already has one", LANG_ATTR, item)));
                 continue;
             }
@@ -2892,9 +2895,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
     for m in &modules {
         for imp in &m.imports {
             if imp.is_pub && imp.symbols.is_none() {
-                errs.push(Error::new(imp.span.clone(),
+                errs.push(Error::new(imp.span,
                     format!("`pub import {}` re-exports nothing", imp.path.join("/")))
-                    .with_label(imp.span.clone(), format!(
+                    .with_label(imp.span, format!(
                         "this binds the qualifier '{}' rather than any names",
                         imp.path.last().unwrap()))
                     .with_note(format!(
@@ -2913,12 +2916,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         // 1. implicit prelude whole-module import (except into the prelude itself).
         //    only `pub` prelude items are pulled in, a private prelude helper
         //    stays local to the prelude.
-        if let Some(pid) = prelude_id {
-            if id != pid {
+        if let Some(pid) = prelude_id
+            && id != pid {
                 for (&k, v) in &symtabs[pid].fns { if v.is_pub { scopes.calls.insert(k, *v); } }
                 for (&k, v) in &symtabs[pid].structs { if v.is_pub { scopes.types.insert(k, *v); } }
             }
-        }
 
         // 2. explicit imports
         let mut from_import_calls: HashSet<&str> = HashSet::new();
@@ -2931,9 +2933,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // a directory names no symbols of its own, so it can only be
             // imported whole - as a namespace.
             if let (ImportTarget::Dir(_), Some(_)) = (target, &imp.symbols) {
-                errs.push(Error::new(imp.span.clone(), format!(
+                errs.push(Error::new(imp.span, format!(
                     "'{}' is a directory of modules, not a module", imp.path.join("/")))
-                    .with_label(imp.span.clone(), "a directory names no symbols to import")
+                    .with_label(imp.span, "a directory names no symbols to import")
                     .with_note(format!(
                         "import it whole (`import {}`) and reach its members through the \
                          qualifier, e.g. `{}::<module>::<name>`",
@@ -2949,12 +2951,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 let ImportTarget::Dir(members) = target else { unreachable!() };
                 let qualifier = *imp.path.last().unwrap();
                 let owner = imp.path.join("/");
-                if let Some(prev) = qual_owner.get(qualifier) {
-                    if *prev != owner {
-                        errs.push(Error::new(imp.span.clone(), format!(
+                if let Some(prev) = qual_owner.get(qualifier)
+                    && *prev != owner {
+                        errs.push(Error::new(imp.span, format!(
                             "qualifier '{}' already refers to a different module", qualifier)));
                     }
-                }
                 qual_owner.insert(qualifier, owner);
                 for member in members {
                     let st = &symtabs[seen[&member.key]];
@@ -2974,12 +2975,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                     // qualified under the module's last path segment.
                     let qualifier = *imp.path.last().unwrap();
                     let owner = imp.path.join("/");
-                    if let Some(prev) = qual_owner.get(qualifier) {
-                        if *prev != owner {
-                            errs.push(Error::new(imp.span.clone(), format!(
+                    if let Some(prev) = qual_owner.get(qualifier)
+                        && *prev != owner {
+                            errs.push(Error::new(imp.span, format!(
                                 "qualifier '{}' already refers to a different module", qualifier)));
                         }
-                    }
                     qual_owner.insert(qualifier, owner);
                     // only `pub` items are importable; private ones are invisible
                     // outside their own module.
@@ -2997,7 +2997,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                         if let Some(f) = target.fns.get(sym).filter(|f| f.is_pub) {
                             imported = true;
                             if from_import_calls.contains(sym) && scopes.calls.get(sym).map(|s| s.def) != Some(f.def) {
-                                errs.push(Error::new(imp.span.clone(), format!(
+                                errs.push(Error::new(imp.span, format!(
                                     "'{}' is imported from more than one module", sym))
                                     .with_note("qualify it with a whole-module `import` instead"));
                             }
@@ -3007,7 +3007,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                         if let Some(f) = target.structs.get(sym).filter(|f| f.is_pub) {
                             imported = true;
                             if from_import_types.contains(sym) && scopes.types.get(sym).map(|s| s.def) != Some(f.def) {
-                                errs.push(Error::new(imp.span.clone(), format!(
+                                errs.push(Error::new(imp.span, format!(
                                     "struct '{}' is imported from more than one module", sym)));
                             }
                             scopes.types.insert(sym, *f);
@@ -3015,11 +3015,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                         }
                         if !imported {
                             errs.push(if exists {
-                                Error::new(imp.span.clone(), format!(
+                                Error::new(imp.span, format!(
                                     "symbol '{}' of module '{}' is private", sym, imp.path.join("/")))
                                     .with_note("add `pub` to export it")
                             } else {
-                                Error::new(imp.span.clone(), format!(
+                                Error::new(imp.span, format!(
                                     "module '{}' has no exported symbol '{}'",
                                     imp.path.join("/"), sym))
                             });
@@ -3164,7 +3164,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                             return_type,
                             body,
                         },
-                        ri.span.clone(),
+                        ri.span,
                     ),
                     RawMethod {
                         target: ri.target.clone(),
@@ -3176,7 +3176,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                         // a trait-impl method's reachability follows the trait.
                         is_pub: true,
                         default_of: Some(ri.trait_),
-                        span: ri.span.clone(),
+                        span: ri.span,
                     },
                 ));
             }
@@ -3221,7 +3221,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             let TopLevelNode::Alias { name, generics, ty, .. } = &tl.value else { continue };
             let Some(sym) = all_scopes[id].types.get(*name) else { continue };
             declared.insert(sym.def);
-            pending.push((id, sym.def, generics.clone(), ty.clone(), tl.span.clone()));
+            pending.push((id, sym.def, generics.clone(), ty.clone(), tl.span));
         }
     }
     let no_members_yet = MemberTable::new();
@@ -3245,7 +3245,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 module: modules[id].mid,
                 errs: &mut errs,
                 locals: Vec::new(),
-                span: span.clone(),
+                span,
             };
             let mut body = ty;
             rw.ty(&mut body, &generic_names(&generics));
@@ -3254,7 +3254,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         }
         if !progressed {
             for (_, _, _, ty, span) in deferred {
-                errs.push(Error::new(span.clone(), "type alias is cyclic".to_string())
+                errs.push(Error::new(span, "type alias is cyclic".to_string())
                     .with_label(span, format!("expanding it reaches itself through '{}'", ty))
                     .with_note("an alias is expanded, not defined - it cannot name itself, \
                                 directly or through another alias"));
@@ -3294,7 +3294,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         for tl in m.items.iter_mut() {
             let TopLevelNode::Function { name, generics, where_bounds, .. } = &mut tl.value
                 else { continue };
-            let span = tl.span.clone();
+            let span = tl.span;
             let fn_name = *name;
             let own_where = std::mem::take(where_bounds);
             let Some(rm) = by_fn.remove(fn_name) else {
@@ -3314,10 +3314,10 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                     GenericParam::Type { name, .. } => *name == ig_name,
                     GenericParam::Const(name, _) => *name == ig_name,
                 }) {
-                    errs.push(Error::new(rm.span.clone(), format!(
+                    errs.push(Error::new(rm.span, format!(
                         "generic parameter '{}' shadows one from the `extend` target",
                         ig_name))
-                        .with_label(rm.span.clone(),
+                        .with_label(rm.span,
                             format!("method '{}' declares it again here", rm.name))
                         .with_note("rename one of them"));
                 }
@@ -3357,9 +3357,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // one declared on a target no path can name could never be called.
             // Rejecting it here beats emitting a symbol with no way in.
             if rm.receiver == Receiver::Associated && !head.is_nameable() {
-                errs.push(Error::new(rm.span.clone(),
+                errs.push(Error::new(rm.span,
                     format!("associated function '{}' cannot be reached", rm.name))
-                    .with_label(rm.span.clone(), format!(
+                    .with_label(rm.span, format!(
                         "a call would have to name '{}', which is not a path", rm.target))
                     .with_note("only a declared type or a built-in keyword can be written \
                                 as a path; give it a `self` parameter so it is found \
@@ -3382,16 +3382,16 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 // "second definition" pointing at that block would send the
                 // reader looking for a method that is not there.
                 let err = match rm.default_of {
-                    Some(tr) => Error::new(rm.span.clone(), format!(
+                    Some(tr) => Error::new(rm.span, format!(
                         "method '{}' is already defined for this type", rm.name))
-                        .with_label(rm.span.clone(), format!(
+                        .with_label(rm.span, format!(
                             "this impl inherits '{}' as a default from trait '{}'",
                             rm.name, tr))
                         .with_note("define it in this block to override the default, \
                                     or rename the other one"),
-                    None => Error::new(rm.span.clone(), format!(
+                    None => Error::new(rm.span, format!(
                         "method '{}' is already defined for this type", rm.name))
-                        .with_label(rm.span.clone(), "second definition")
+                        .with_label(rm.span, "second definition")
                         .with_note("a second `extend` block cannot add or specialize a method \
                                     (`extend [T]` and `extend [i32]` both claim every slice)"),
                 };
@@ -3457,7 +3457,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 generics: resolve_bound_defs(&imp.generics, scopes),
                 trait_: trait_.def,
                 assoc_bindings,
-                span: imp.span.clone(),
+                span: imp.span,
             });
         }
     }
@@ -3502,7 +3502,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 TopLevelNode::Extend { .. } => unreachable!("extend desugared before merge"),
                 TopLevelNode::Global { name, .. } => {
                     if !seen_globals.insert(*name) {
-                        merge_errs.push(Error::new(tl.span.clone(), format!(
+                        merge_errs.push(Error::new(tl.span, format!(
                             "global '{}' is already defined", name)));
                     } else {
                         out.push(tl.clone());
@@ -3531,10 +3531,10 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                     if sig_eq {
                         continue; // same extern already emitted: legit dedup
                     }
-                    merge_errs.push(Error::new(tl.span.clone(), format!(
+                    merge_errs.push(Error::new(tl.span, format!(
                         "extern '{}' is redeclared with a different signature", name)));
                 } else {
-                    merge_errs.push(Error::new(tl.span.clone(), format!(
+                    merge_errs.push(Error::new(tl.span, format!(
                         "'{}' is already defined", name)));
                 }
                 continue;

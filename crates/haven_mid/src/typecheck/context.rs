@@ -225,6 +225,12 @@ pub struct EnumDef<'a> {
     pub has_explicit_repr: bool,
 }
 
+impl<'a> Default for Context<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> Context<'a> {
     pub fn new() -> Self {
         Self {

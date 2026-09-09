@@ -112,11 +112,11 @@ pub(crate) fn check_variant_pattern<'a>(cx: &Context<'a>, en: DefId, r: &NameRef
     // that mono recorded as specializing it.
     let is_instance = cx.instances.get(&en).is_some_and(|i| i.template == r.def);
     if r.def != en && !is_instance {
-        return Err(Error::new(span.clone(), format!(
+        return Err(Error::new(*span, format!(
             "pattern `{}` is not a variant of enum '{}'", r, cx.name_of(en))));
     }
     if !cx.enums[&en].variants.contains_key(variant) {
-        return Err(Error::new(span.clone(), format!(
+        return Err(Error::new(*span, format!(
             "enum '{}' has no variant '{}'", cx.name_of(en), variant)));
     }
     Ok(variant)

@@ -81,10 +81,10 @@ fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], r: &Resolve<'_
                 Callee::None => {}
                 Callee::Named(name) => {
                     if !clean.get(name).copied().unwrap_or(false) {
-                        dirty.push((name, func.span.clone()));
+                        dirty.push((name, func.span));
                     }
                 }
-                Callee::Indirect => dirty.push((INDIRECT_CALLEE, func.span.clone())),
+                Callee::Indirect => dirty.push((INDIRECT_CALLEE, func.span)),
             }
             dirty
         }
@@ -338,7 +338,7 @@ pub fn alloc_check_program<'a>(
         let mut blamed: Vec<(&'a str, Span)> = Vec::new();
         for s in body { blamed.extend(dirty_calls_stmt(&clean, &mut locals, &r, s)); }
         for (callee, span) in blamed {
-            let err = Error::new(span.clone(), format!(
+            let err = Error::new(span, format!(
                 "'{}' is marked as @alloc(false) but may allocate", show(name)))
                 .with_label(span, format!("calls '{}', which may allocate", show(callee)));
             // the immediate callee is just the entry point; name where the
