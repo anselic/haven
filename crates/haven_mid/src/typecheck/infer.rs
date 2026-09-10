@@ -78,8 +78,8 @@ fn method_signature<'a>(
     consts.extend(u.consts.iter().map(|(k, v)| (*k, v.clone())));
     Ok(Some((
         m.name,
-        sig.params.iter().map(|p| subst_param_type(&types, &consts, p)).collect(),
-        subst_param_type(&types, &consts, &sig.return_type),
+        sig.params.iter().map(|p| subst_param_type(cx, &types, &consts, p)).collect(),
+        subst_param_type(cx, &types, &consts, &sig.return_type),
     )))
 }
 
@@ -641,7 +641,7 @@ fn check_enum_call_ctor<'a>(
     let (type_subst, const_subst, resolved_args) =
         enum_ctor_targs(cx, expr.id, ename, cname, type_args, hint, &payload, site, span)?;
     for (pty, arg) in payload_tys.iter().zip(args) {
-        let expected = subst_param_type(&type_subst, &const_subst, pty);
+        let expected = subst_param_type(cx, &type_subst, &const_subst, pty);
         check_expr(cx, &expected, arg)?;
     }
     let ty = Type::Named { def: ename, args: resolved_args };
@@ -698,7 +698,7 @@ fn check_enum_struct_ctor<'a>(
                 "In variant '{}': expected field '{}', got '{}'",
                 name, def_name, lit_name)));
         }
-        let expected = subst_param_type(&type_subst, &const_subst, def_ty);
+        let expected = subst_param_type(cx, &type_subst, &const_subst, def_ty);
         check_expr(cx, &expected, lit_value)?;
     }
     let ty = Type::Named { def: ename, args: resolved_args };
@@ -881,12 +881,20 @@ pub(crate) fn check_expr<'a>(
         },
     };
 
-    let compatible = actual == *expected ||
+    // Resolve any associated type whose base is concrete, and attach the
+    // uniquely selected trait to symbolic projections. This makes a written
+    // `T::Item` compare equal to the `Self::Item` returned by a bounded trait
+    // method without relying on the associated name alone.
+    let expected = cx.normalize_type(expected)
+        .map_err(|msg| Error::new(span, msg))?;
+    let actual = cx.normalize_type(&actual)
+        .map_err(|msg| Error::new(span, msg))?;
+    let compatible = actual == expected ||
         // `!` (the type of a diverging expression like `abort(...)`) coerces to
         // any expected type: control never reaches the surrounding context, so
         // there is no value to be type-incompatible.
         actual == Type::Never ||
-        matches!((&actual, expected),
+        matches!((&actual, &expected),
             (Type::Array(inner_actual, _), Type::Slice(inner_expected))
                 if inner_actual == inner_expected
         );
@@ -896,7 +904,7 @@ pub(crate) fn check_expr<'a>(
         // type name can be long enough on its own to wrap the header line.
         return Err(Error::new(span, "type mismatch")
             .with_label(span, format!("expected `{}`, got `{}`",
-                cx.show(expected), cx.show(&actual))));
+                cx.show(&expected), cx.show(&actual))));
     }
 
     cx.node_types.insert(metadata.id, actual);
@@ -997,8 +1005,8 @@ pub(crate) fn infer<'a>(
             let (type_bindings, const_bindings) =
                 bind_turbofish(cx, fname, &sig.generics, type_args, &span)?;
             let params: Vec<Type<'a>> = sig.params.iter()
-                .map(|p| subst_param_type(&type_bindings, &const_bindings, p)).collect();
-            let ret = subst_param_type(&type_bindings, &const_bindings, &sig.return_type);
+                .map(|p| subst_param_type(cx, &type_bindings, &const_bindings, p)).collect();
+            let ret = subst_param_type(cx, &type_bindings, &const_bindings, &sig.return_type);
             let fn_ty = Type::Function { params, return_type: Box::new(ret) };
             cx.node_types.insert(metadata.id, fn_ty.clone());
             fn_ty
@@ -1214,7 +1222,7 @@ pub(crate) fn infer<'a>(
                         name, def_name, lit_name
                     )));
                 }
-                let expected = subst_param_type(&type_subst, &const_subst, def_ty);
+                let expected = subst_param_type(cx, &type_subst, &const_subst, def_ty);
                 check_expr(cx, &expected, lit_value)?;
             }
 
@@ -1267,7 +1275,7 @@ pub(crate) fn infer<'a>(
                         }
                     }
                 }
-                subst_param_type(&type_subst, &const_subst, &field_ty)
+                subst_param_type(cx, &type_subst, &const_subst, &field_ty)
             }
         },
 
@@ -1642,7 +1650,7 @@ pub(crate) fn check_stmt<'a>(
                                 // binding identity), so shadowing/reuse is distinct.
                                 PatternNode::Bind(bname) => arm_bindings.push((
                                     *bname, Binding::Local(fpat.id),
-                                    subst_param_type(&type_subst, &const_subst, fty),
+                                    subst_param_type(cx, &type_subst, &const_subst, fty),
                                 )),
                                 other => return Err(Error::new(fpat.span, format!(
                                     "unsupported payload sub-pattern `{}`", other))),
@@ -1685,7 +1693,7 @@ pub(crate) fn check_stmt<'a>(
                                 PatternNode::Wildcard => {}
                                 PatternNode::Bind(bname) => arm_bindings.push((
                                     *bname, Binding::Local(fpat.id),
-                                    subst_param_type(&type_subst, &const_subst, fty),
+                                    subst_param_type(cx, &type_subst, &const_subst, fty),
                                 )),
                                 other => return Err(Error::new(fpat.span, format!(
                                     "unsupported payload sub-pattern `{}`", other))),

@@ -102,6 +102,8 @@ fn emit_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>, symbols: &HashMap<DefId, 
         // generic functions are skipped during MIL lowering, so a type param
         // should never reach codegen.
         Param(name) => unreachable!("generic type parameter `{name}` survived to LLVM codegen"),
+        Projection { base, assoc, .. } => unreachable!(
+            "associated type projection `{base}::{assoc}` reached LLVM codegen"),
         // `abort()` is the only source of `!`, and it lowers to a call + an
         // `unreachable` terminator, never to a value or a slot - so no live value
         // ever has this type at codegen.

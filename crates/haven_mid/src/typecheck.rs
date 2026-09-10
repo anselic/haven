@@ -56,6 +56,8 @@ fn check_export_type<'a>(
             Err("function pointer types are not supported in @export functions".into()),
         Type::Param(_) =>
             Err("generic type parameters are not allowed in @export functions".into()),
+        Type::Projection { .. } =>
+            Err("associated type projections are not allowed in @export functions".into()),
         // `!` is not source-spellable and only ever an expression's inferred type,
         // so it cannot appear in a written signature - but reject it explicitly
         // rather than fall through.

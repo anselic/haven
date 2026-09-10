@@ -1,0 +1,44 @@
+// A projection on a bounded type parameter remains symbolic while the generic
+// function is checked, then normalizes through the concrete impl at its call.
+
+trait Value {
+    type Item;
+    proc get(*self) Self::Item;
+    proc wrapped(*self) Option<Self::Item>;
+}
+
+struct Boxed<T> { value: T }
+struct Pair<A> { a: A }
+
+extend Boxed<T>: Value {
+    type Item = T;
+    proc get(*self) T { return self.value; }
+    proc wrapped(*self) Option<T> { return Option::Some::<T>(self.value); }
+}
+
+proc read<A: Value>(x: *A) A::Item {
+    return x.get();
+}
+
+proc read_wrapped<A: Value>(x: *A) Option<A::Item> {
+    return x.wrapped();
+}
+
+extend Pair<A> where A: Value {
+    proc first(*self) A::Item { return self.a.get(); }
+}
+
+@export
+proc main() i32 {
+    let value: Boxed<i32> = Boxed::<i32> { value: 7 };
+    let got: i32 = read::<Boxed<i32>>(&value);
+    let wrapped: Option<i32> = read_wrapped::<Boxed<i32>>(&value);
+    let pair: Pair<Boxed<i32>> = Pair::<Boxed<i32>> { a: value };
+    let first: i32 = pair.first();
+    if (got != 7) { return 1; } else {}
+    if (first != 7) { return 4; } else {}
+    match (wrapped) {
+        Option::Some(v) -> { if (v == 7) { return 0; } else { return 2; } }
+        Option::None -> { return 3; }
+    }
+}

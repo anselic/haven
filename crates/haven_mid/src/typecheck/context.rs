@@ -76,8 +76,8 @@ pub struct TraitMethodSig<'a> {
 pub struct TraitDef<'a> {
     pub methods: HashMap<&'a str, TraitMethodSig<'a>>,
     /// Names of the trait's associated types (`type Item;`). Every conforming
-    /// impl must bind all of them; a method signature's `Self::Item` was
-    /// resolved to `Param("Item")`, substituted per impl during conformance.
+    /// impl must bind all of them. A method signature retains `Self::Item` as a
+    /// projection, which is substituted per impl during conformance.
     pub assoc_types: Vec<&'a str>,
 }
 
@@ -298,6 +298,101 @@ impl<'a> Context<'a> {
         // membership is - see `member_for`.
         haven_common::ast::implements(
             &self.impls, &self.generic_bounds, &deinstance(&self.instances, ty), trait_)
+    }
+
+    /// Resolve associated-type projections as far as the current generic scope
+    /// permits. A projection on a symbolic parameter remains symbolic after we
+    /// verify that exactly one of its bounds declares the associated type. Once
+    /// the base is concrete, the matching impl supplies the binding and the
+    /// projection disappears.
+    pub fn normalize_type(&self, ty: &Type<'a>) -> Result<Type<'a>, String> {
+        let recurse = |t: &Type<'a>| self.normalize_type(t);
+        match ty {
+            Type::Projection { base, trait_, assoc } => {
+                let base = recurse(base)?;
+                if matches!(&base, Type::Param("Self")) {
+                    return Ok(Type::Projection {
+                        base: Box::new(base), trait_: *trait_, assoc });
+                }
+                if let Type::Param(name) = &base {
+                    let candidates: Vec<DefId> = self.generic_bounds.get(name)
+                        .into_iter().flatten().copied()
+                        .filter(|tr| trait_.is_none_or(|selected| selected == *tr))
+                        .filter(|tr| self.traits.get(tr)
+                            .is_some_and(|def| def.assoc_types.contains(assoc)))
+                        .collect();
+                    return match candidates.as_slice() {
+                        [selected] => Ok(Type::Projection {
+                            base: Box::new(base), trait_: Some(*selected), assoc }),
+                        [] => Err(format!(
+                            "type parameter '{}' has no bound declaring associated type '{}'",
+                            name, assoc)),
+                        many => Err(format!(
+                            "associated type '{}::{}' is ambiguous between traits {}",
+                            name, assoc,
+                            many.iter().map(|tr| format!("'{}'", self.name_of(*tr)))
+                                .collect::<Vec<_>>().join(", "))),
+                    };
+                }
+
+                let lookup = deinstance(&self.instances, &base);
+                let Some(head) = TyHead::of(&lookup) else {
+                    return Err(format!("cannot project associated type '{}' from '{}'",
+                        assoc, self.show(&base)));
+                };
+                let mut bindings = Vec::new();
+                for imp in &self.impls {
+                    if trait_.is_some_and(|selected| selected != imp.trait_) { continue; }
+                    let Some(trait_def) = self.traits.get(&imp.trait_) else { continue };
+                    if imp.head != head || !trait_def.assoc_types.contains(assoc) { continue; }
+                    let params = param_names(&imp.generics);
+                    let mut u = Unified::default();
+                    if !unify(&imp.self_ty, &lookup, &params, &mut u)
+                        || !bounds_hold(&self.impls, &self.generic_bounds, &imp.generics, &u) {
+                        continue;
+                    }
+                    if let Some((_, bound)) = imp.assoc_bindings.iter().find(|(name, _)| name == assoc) {
+                        bindings.push((imp.trait_, u.apply(bound)));
+                    }
+                }
+                match bindings.as_slice() {
+                    [(_, bound)] => recurse(bound),
+                    [] => Err(format!("type '{}' has no associated type '{}'",
+                        self.show(&base), assoc)),
+                    many => Err(format!(
+                        "associated type '{}::{}' is ambiguous between traits {}",
+                        self.show(&base), assoc,
+                        many.iter().map(|(tr, _)| format!("'{}'", self.name_of(*tr)))
+                            .collect::<Vec<_>>().join(", "))),
+                }
+            }
+            Type::Named { def, args } => Ok(Type::Named {
+                def: *def,
+                args: args.iter().map(|a| match a {
+                    GenericArg::Type(t) => recurse(t).map(GenericArg::Type),
+                    GenericArg::Const(n) => Ok(GenericArg::Const(n.clone())),
+                }).collect::<Result<_, _>>()?,
+            }),
+            Type::Pointer(inner) => Ok(Type::Pointer(Box::new(recurse(inner)?))),
+            Type::Array(inner, n) => Ok(Type::Array(Box::new(recurse(inner)?), n.clone())),
+            Type::Slice(inner) => Ok(Type::Slice(Box::new(recurse(inner)?))),
+            Type::Simd(inner, n) => Ok(Type::Simd(Box::new(recurse(inner)?), n.clone())),
+            Type::Function { params, return_type } => Ok(Type::Function {
+                params: params.iter().map(recurse).collect::<Result<_, _>>()?,
+                return_type: Box::new(recurse(return_type)?),
+            }),
+            other => Ok(other.clone()),
+        }
+    }
+
+    pub fn check_projection(
+        &self,
+        base: &Type<'a>,
+        trait_: Option<DefId>,
+        assoc: &'a str,
+    ) -> Result<(), String> {
+        self.normalize_type(&Type::Projection {
+            base: Box::new(base.clone()), trait_, assoc }).map(|_| ())
     }
 
     /// Load the diagnostic name of every definition. Called once per pass.

@@ -1,0 +1,9 @@
+//@ error: type parameter 'T' has no bound declaring associated type 'Missing'
+
+trait Value { type Item; }
+
+proc bad<T: Value>(x: T) T::Missing {
+    return x;
+}
+
+@export proc main() i32 { return 0; }

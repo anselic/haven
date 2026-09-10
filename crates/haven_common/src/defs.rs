@@ -137,7 +137,8 @@ impl TyHead {
             Type::Function { .. } => TyHead::Function,
             // `!` has no values, so it never dispatches a method and never
             // carries one - like a bare type parameter.
-            Type::Param(_) | Type::Path { .. } | Type::Never => return None,
+            Type::Param(_) | Type::Projection { .. } | Type::Path { .. } | Type::Never =>
+                return None,
         })
     }
 
@@ -280,6 +281,8 @@ pub fn deinstance<'a>(instances: &Instances<'a>, ty: &Type<'a>) -> Type<'a> {
         Type::Slice(inner) => Type::Slice(Box::new(go(inner))),
         Type::Array(inner, n) => Type::Array(Box::new(go(inner)), n.clone()),
         Type::Simd(inner, n) => Type::Simd(Box::new(go(inner)), n.clone()),
+        Type::Projection { base, trait_, assoc } => Type::Projection {
+            base: Box::new(go(base)), trait_: *trait_, assoc },
         other => other.clone(),
     }
 }

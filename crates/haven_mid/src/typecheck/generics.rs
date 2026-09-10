@@ -149,6 +149,7 @@ fn const_param_name<'a>(ty: &Type<'a>) -> Option<&'a str> {
 // over the same compound-type arms. Generalize into one `Type::map` that takes a
 // per-leaf closure.
 pub(crate) fn subst_param_type<'a>(
+    cx: &Context<'a>,
     types: &HashMap<&'a str, Type<'a>>,
     consts: &HashMap<&'a str, ConstVal<'a>>,
     ty: &Type<'a>,
@@ -169,18 +170,26 @@ pub(crate) fn subst_param_type<'a>(
         Type::Named { def, args } => Type::Named {
             def: *def,
             args: args.iter().map(|a| match a {
-                GenericArg::Type(t) => GenericArg::Type(subst_param_type(types, consts, t)),
+                GenericArg::Type(t) => GenericArg::Type(subst_param_type(cx, types, consts, t)),
                 GenericArg::Const(cv) => GenericArg::Const(sub_cv(cv)),
             }).collect(),
         },
-        Type::Pointer(inner)  => Type::Pointer(Box::new(subst_param_type(types, consts, inner))),
-        Type::Array(inner, n) => Type::Array(Box::new(subst_param_type(types, consts, inner)), sub_cv(n)),
-        Type::Slice(inner)    => Type::Slice(Box::new(subst_param_type(types, consts, inner))),
-        Type::Simd(inner, n)  => Type::Simd(Box::new(subst_param_type(types, consts, inner)), sub_cv(n)),
+        Type::Pointer(inner)  => Type::Pointer(Box::new(subst_param_type(cx, types, consts, inner))),
+        Type::Array(inner, n) => Type::Array(Box::new(subst_param_type(cx, types, consts, inner)), sub_cv(n)),
+        Type::Slice(inner)    => Type::Slice(Box::new(subst_param_type(cx, types, consts, inner))),
+        Type::Simd(inner, n)  => Type::Simd(Box::new(subst_param_type(cx, types, consts, inner)), sub_cv(n)),
         Type::Function { params, return_type } => Type::Function {
-            params: params.iter().map(|p| subst_param_type(types, consts, p)).collect(),
-            return_type: Box::new(subst_param_type(types, consts, return_type)),
+            params: params.iter().map(|p| subst_param_type(cx, types, consts, p)).collect(),
+            return_type: Box::new(subst_param_type(cx, types, consts, return_type)),
         },
+        Type::Projection { base, trait_, assoc } => {
+            let projected = Type::Projection {
+                base: Box::new(subst_param_type(cx, types, consts, base)),
+                trait_: *trait_,
+                assoc,
+            };
+            cx.normalize_type(&projected).unwrap_or(projected)
+        }
         other => other.clone(),
     }
 }
@@ -320,8 +329,8 @@ pub(crate) fn check_generic_call<'a>(
     };
 
     let params: Vec<Type<'a>> = sig.params.iter()
-        .map(|p| subst_param_type(&type_bindings, &const_bindings, p)).collect();
-    let return_type = subst_param_type(&type_bindings, &const_bindings, &sig.return_type);
+        .map(|p| subst_param_type(cx, &type_bindings, &const_bindings, p)).collect();
+    let return_type = subst_param_type(cx, &type_bindings, &const_bindings, &sig.return_type);
 
     for (param_ty, arg) in params.iter().zip(args) {
         check_expr(cx, param_ty, arg)?;
@@ -418,6 +427,7 @@ fn mentions_param<'a>(ty: &Type<'a>, params: &[&'a str]) -> bool {
         }),
         Type::Function { params: ps, return_type } =>
             ps.iter().any(|t| mentions_param(t, params)) || mentions_param(return_type, params),
+        Type::Projection { base, .. } => mentions_param(base, params),
         _ => false,
     }
 }
@@ -574,16 +584,28 @@ pub(crate) fn subst_self<'a>(ty: &Type<'a>, self_ty: &Type<'a>) -> Type<'a> {
             params: params.iter().map(|p| subst_self(p, self_ty)).collect(),
             return_type: Box::new(subst_self(return_type, self_ty)),
         },
+        Type::Named { def, args } => Type::Named {
+            def: *def,
+            args: args.iter().map(|a| match a {
+                GenericArg::Type(t) => GenericArg::Type(subst_self(t, self_ty)),
+                other => other.clone(),
+            }).collect(),
+        },
+        Type::Projection { base, trait_, assoc } => Type::Projection {
+            base: Box::new(subst_self(base, self_ty)),
+            trait_: *trait_,
+            assoc,
+        },
         other => other.clone(),
     }
 }
 
-/// Like [`subst_self`], but also replaces each associated-type parameter with the
-/// implementing type's binding for it. Inside a trait method signature `Self`
-/// stands for the implementing type and a `Self::Item` projection was resolved to
-/// `Param("Item")`; `assoc` maps each such name (`"Item"`) to the type the impl
-/// bound it to. Used to turn a trait signature into the concrete signature the
-/// impl must match. A `Named` type's generic arguments are descended into so
+/// Like [`subst_self`], but also replaces each associated-type projection with
+/// the implementing type's binding for it. Inside a trait method signature
+/// `Self` stands for the implementing type; `assoc` maps each associated name
+/// (`"Item"`) to the type the impl bound it to. Used to turn a trait signature
+/// into the concrete signature the impl must match. A `Named` type's generic
+/// arguments are descended into so
 /// `Option<Self::Item>` becomes `Option<i32>`.
 pub(crate) fn subst_self_assoc<'a>(
     ty: &Type<'a>,
@@ -592,9 +614,13 @@ pub(crate) fn subst_self_assoc<'a>(
 ) -> Type<'a> {
     match ty {
         Type::Param(name) if *name == "Self" => self_ty.clone(),
-        Type::Param(name) => match assoc.get(name) {
-            Some(bound) => bound.clone(),
-            None => ty.clone(),
+        Type::Projection { base, assoc: name, .. }
+            if matches!(base.as_ref(), Type::Param("Self")) =>
+            assoc.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Projection { base, trait_, assoc: name } => Type::Projection {
+            base: Box::new(subst_self_assoc(base, self_ty, assoc)),
+            trait_: *trait_,
+            assoc: name,
         },
         Type::Pointer(inner)  => Type::Pointer(Box::new(subst_self_assoc(inner, self_ty, assoc))),
         Type::Array(inner, n) => Type::Array(Box::new(subst_self_assoc(inner, self_ty, assoc)), n.clone()),
@@ -636,6 +662,7 @@ pub(crate) fn check_const_scope<'a>(in_scope: &[&'a str], ty: &Type<'a>) -> Resu
             for p in params { check_const_scope(in_scope, p)?; }
             check_const_scope(in_scope, return_type)
         }
+        Type::Projection { base, .. } => check_const_scope(in_scope, base),
         _ => Ok(()),
     }
 }
@@ -713,6 +740,10 @@ pub(crate) fn check_type_resolves<'a>(cx: &Context<'a>, ty: &Type<'a>) -> Result
         Type::Function { params, return_type } => {
             for p in params { check_type_resolves(cx, p)?; }
             check_type_resolves(cx, return_type)
+        }
+        Type::Projection { base, trait_, assoc } => {
+            check_type_resolves(cx, base)?;
+            cx.check_projection(base, *trait_, assoc)
         }
         _ => Ok(()),
     }

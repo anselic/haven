@@ -1,0 +1,10 @@
+//@ error: associated type 'T::Item' is ambiguous between traits
+
+trait Left { type Item; }
+trait Right { type Item; }
+
+proc bad<T: Left + Right>(x: T) T::Item {
+    return x;
+}
+
+@export proc main() i32 { return 0; }

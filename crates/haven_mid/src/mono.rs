@@ -70,7 +70,8 @@ fn type_depth(ty: &Type) -> usize {
         Type::Pointer(inner)
         | Type::Array(inner, _)
         | Type::Slice(inner)
-        | Type::Simd(inner, _) => 1 + type_depth(inner),
+        | Type::Simd(inner, _)
+        | Type::Projection { base: inner, .. } => 1 + type_depth(inner),
         Type::Function { params, return_type } => {
             1 + params.iter().chain(std::iter::once(&**return_type))
                 .map(type_depth).max().unwrap_or(0)
@@ -255,6 +256,8 @@ fn mangle_ty<'a>(defs: &Defs<'a>, arena: &'a Bump, ty: &Type<'a>) -> String {
         // Neither should appear in a fully-concrete instantiation; encode them
         // defensively rather than panicking so a bug surfaces as a bad symbol.
         Type::Param(name) => format!(".param.{}", name),
+        Type::Projection { base, assoc, .. } =>
+            format!(".projection.{}.{}", mangle_ty(base), assoc),
         // `!` is only ever an expression's inferred type, never part of a
         // monomorphized signature - encode defensively rather than panic.
         Type::Never => ".never".into(),
@@ -426,6 +429,39 @@ impl<'p, 'a> Mono<'p, 'a> {
         haven_common::defs::deinstance(self.defs.instances(), ty)
     }
 
+    /// Find the concrete binding for `base::assoc`. Typecheck has already
+    /// rejected missing or ambiguous projections, so `None` here means the base
+    /// is still symbolic and should remain a projection until an outer
+    /// instantiation supplies it.
+    fn projection_binding(
+        &self,
+        base: &Type<'a>,
+        trait_: Option<DefId>,
+        assoc: &str,
+    ) -> Option<Type<'a>> {
+        let base = self.deinstance(base);
+        let head = TyHead::of(&base)?;
+        let mut found = None;
+        for imp in self.impls {
+            if trait_.is_some_and(|selected| selected != imp.trait_) { continue; }
+            if imp.head != head { continue; }
+            let Some((_, binding)) = imp.assoc_bindings.iter()
+                .find(|(name, _)| *name == assoc) else { continue };
+            let params: Vec<&'a str> = imp.generics.iter().map(|g| match g {
+                GenericParam::Type { name, .. } => *name,
+                GenericParam::Const(name, _) => *name,
+            }).collect();
+            let mut u = Unified::default();
+            if !unify(&imp.self_ty, &base, &params, &mut u)
+                || !bounds_hold(self.impls, &ParamBounds::new(), &imp.generics, &u) {
+                continue;
+            }
+            if found.is_some() { return None; }
+            found = Some(u.apply(binding));
+        }
+        found
+    }
+
     /// Record a generic-struct instantiation request, return its mangled name
     /// (`Buf` + `[i32, 8]` -> `Buf$i32$8`). de-dupes so each concrete instance is
     /// built once. Enqueues onto the struct queue, drained after all functions.
@@ -581,6 +617,21 @@ impl<'p, 'a> Mono<'p, 'a> {
                 params: params.iter().map(|p| self.subst_ty(p, b)).collect(),
                 return_type: Box::new(self.subst_ty(return_type, b)),
             },
+            Type::Projection { base, trait_, assoc } => {
+                // Keep the base in template form for impl matching. The binding
+                // itself may contain generic named types, so run it back through
+                // `subst_ty` with no remaining parameters to flatten those for
+                // emission.
+                let base = self.subst_params(base, b);
+                match self.projection_binding(&base, *trait_, assoc) {
+                    Some(binding) => self.subst_ty(&binding, &Bindings::empty()),
+                    None => Type::Projection {
+                        base: Box::new(self.subst_ty(&base, &Bindings::empty())),
+                        trait_: *trait_,
+                        assoc,
+                    },
+                }
+            },
             other => other.clone(),
         }
     }
@@ -611,6 +662,11 @@ impl<'p, 'a> Mono<'p, 'a> {
             Type::Function { params, return_type } => Type::Function {
                 params: params.iter().map(|p| self.subst_params(p, b)).collect(),
                 return_type: Box::new(self.subst_params(return_type, b)),
+            },
+            Type::Projection { base, trait_, assoc } => Type::Projection {
+                base: Box::new(self.subst_params(base, b)),
+                trait_: *trait_,
+                assoc,
             },
             other => other.clone(),
         }

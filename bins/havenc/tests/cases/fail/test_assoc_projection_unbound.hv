@@ -1,0 +1,7 @@
+//@ error: type parameter 'T' has no bound declaring associated type 'Item'
+
+proc bad<T>(x: T) T::Item {
+    return x;
+}
+
+@export proc main() i32 { return 0; }

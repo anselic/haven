@@ -427,6 +427,12 @@ pub enum Type<'a> {
     /// of the enclosing item. It is abstract and must never survive to the
     /// codegen stage.
     Param(&'a str),
+    /// An associated type selected from another type, e.g. `T::Item` or
+    /// `Self::Item` inside a trait declaration. The trait is intentionally not
+    /// baked into the syntax: `T::Item` is accepted when exactly one of `T`'s
+    /// bounds declares `Item`, and a concrete projection is normalized through
+    /// the matching impl before monomorphized code reaches layout/codegen.
+    Projection { base: Box<Self>, trait_: Option<DefId>, assoc: &'a str },
 }
 
 impl<'a> Type<'a> {
@@ -506,6 +512,7 @@ impl<'a> Display for Type<'a> {
                 write!(f, "#{}<{}>", def.0, args_str)
             },
             Param(name) => write!(f, "{}", name),
+            Projection { base, assoc, .. } => write!(f, "{}::{}", base, assoc),
         }
     }
 }
@@ -516,6 +523,44 @@ impl<'a> Display for Type<'a> {
 pub struct Unified<'a> {
     pub types: std::collections::HashMap<&'a str, Type<'a>>,
     pub consts: std::collections::HashMap<&'a str, ConstVal<'a>>,
+}
+
+impl<'a> Unified<'a> {
+    /// Apply these unification bindings throughout a type without otherwise
+    /// changing its representation. Shared by associated-type normalization in
+    /// typecheck and monomorphization.
+    pub fn apply(&self, ty: &Type<'a>) -> Type<'a> {
+        let cv = |n: &ConstVal<'a>| match n {
+            ConstVal::Param(name) =>
+                self.consts.get(name).cloned().unwrap_or_else(|| n.clone()),
+            ConstVal::Lit(_) => n.clone(),
+        };
+        match ty {
+            Type::Param(name) =>
+                self.types.get(name).cloned().unwrap_or_else(|| ty.clone()),
+            Type::Named { def, args } => Type::Named {
+                def: *def,
+                args: args.iter().map(|a| match a {
+                    GenericArg::Type(t) => GenericArg::Type(self.apply(t)),
+                    GenericArg::Const(n) => GenericArg::Const(cv(n)),
+                }).collect(),
+            },
+            Type::Pointer(inner)  => Type::Pointer(Box::new(self.apply(inner))),
+            Type::Array(inner, n) => Type::Array(Box::new(self.apply(inner)), cv(n)),
+            Type::Slice(inner)    => Type::Slice(Box::new(self.apply(inner))),
+            Type::Simd(inner, n)  => Type::Simd(Box::new(self.apply(inner)), cv(n)),
+            Type::Function { params, return_type } => Type::Function {
+                params: params.iter().map(|p| self.apply(p)).collect(),
+                return_type: Box::new(self.apply(return_type)),
+            },
+            Type::Projection { base, trait_, assoc } => Type::Projection {
+                base: Box::new(self.apply(base)),
+                trait_: *trait_,
+                assoc,
+            },
+            other => other.clone(),
+        }
+    }
 }
 
 /// Bind the free `params` in `pattern` by matching it against `concrete`.
@@ -560,6 +605,10 @@ pub fn unify<'a>(
             pp.len() == cp.len()
                 && pp.iter().zip(cp).all(|(p, c)| unify(p, c, params, out))
                 && unify(pr, cr, params, out),
+        (Type::Projection { base: pb, trait_: pt, assoc: pa },
+         Type::Projection { base: cb, trait_: ct, assoc: ca }) =>
+            pa == ca && (pt.is_none() || ct.is_none() || pt == ct)
+                && unify(pb, cb, params, out),
         // scalars, `str`, `void`: no structure to descend into.
         (p, c) => p == c,
     }
@@ -1429,10 +1478,8 @@ pub enum TopLevelNode<'a> {
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
         /// Names of the associated types the trait requires (`type Item;`). Each
-        /// stands for a per-impl type that a method signature refers to as
-        /// `Self::Item` — resolved to `Type::Param(name)` inside the signature,
-        /// so it substitutes like a type parameter of the trait scope. Every
-        /// conforming impl must bind all of them.
+        /// stands for a per-impl type that a method signature refers to as a
+        /// `Self::Item` projection. Every conforming impl must bind all of them.
         assoc_types: Vec<&'a str>,
         methods: Vec<TraitMethod<'a>>,
     },

@@ -503,6 +503,9 @@ fn subst_alias<'a>(
             params: params.iter().map(go).collect(),
             return_type: Box::new(go(return_type)),
         },
+        Type::Projection { base, trait_, assoc } => Type::Projection {
+            base: Box::new(go(base)), trait_: *trait_, assoc,
+        },
         _ => ty.clone(),
     }
 }
@@ -621,6 +624,7 @@ fn impl_generics<'a, 'd>(
                 for p in params { walk(p, known, decl, out); }
                 walk(return_type, known, decl, out);
             }
+            Type::Projection { base, .. } => walk(base, known, decl, out),
             _ => {}
         }
     }
@@ -722,6 +726,15 @@ fn self_subst_type<'a>(ty: &mut Type<'a>, target: &Type<'a>, assoc: &[(&'a str, 
             for p in params { self_subst_type(p, target, assoc); }
             self_subst_type(return_type, target, assoc);
         }
+        Type::Projection { base, assoc: name, .. }
+            if matches!(base.as_ref(), Type::Param("Self")) => {
+            if let Some((_, bound)) = assoc.iter().find(|(n, _)| n == name) {
+                *ty = bound.clone();
+            } else {
+                **base = target.clone();
+            }
+        }
+        Type::Projection { base, .. } => self_subst_type(base, target, assoc),
         _ => {}
     }
 }
@@ -1330,6 +1343,22 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     fn ty(&mut self, ty: &mut Type<'a>, gparams: &HashSet<&str>) {
         match ty {
             Type::Path { path, args } => {
+                // `T::Item` where `T` is an in-scope type parameter is an
+                // associated-type projection, not a module-qualified name.
+                // Which bound supplies `Item` is checked by typecheck, where the
+                // resolved trait declarations are available.
+                if path.segments.len() == 2 && gparams.contains(path.segments[0]) {
+                    if !args.is_empty() {
+                        self.error_here(format!(
+                            "associated type '{}' takes no arguments", path.segments[1]));
+                    }
+                    *ty = Type::Projection {
+                        base: Box::new(Type::Param(path.segments[0])),
+                        trait_: None,
+                        assoc: path.segments[1],
+                    };
+                    return;
+                }
                 // a generic type's arguments are themselves types to rewrite;
                 // const arguments carry no names to resolve.
                 for a in args.iter_mut() {
@@ -1356,6 +1385,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 for p in params { self.ty(p, gparams); }
                 self.ty(return_type, gparams);
             }
+            Type::Projection { base, .. } => self.ty(base, gparams),
             _ => {}
         }
     }
@@ -1456,17 +1486,15 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         }
     }
 
-    /// Rewrite a `Self::Item` projection inside a trait method signature to the
-    /// bare associated-type name, so the following `ty` pass resolves it to a
-    /// `Param("Item")` (the trait scope treats each associated type like an
-    /// implicit type parameter; conformance substitutes it per impl).
+    /// Rewrite a `Self::Item` projection inside a trait method signature to its
+    /// first-class representation. Conformance later substitutes the impl's
+    /// associated-type binding for it.
     ///
-    /// Only `Self::<assoc>` is accepted here. `Self::<other>` names an
-    /// associated type the trait never declared, and a projection on anything
-    /// but `Self` (`T::Item` on a bounded parameter) is not supported yet; both
-    /// are reported. Every other path is left for `ty` to resolve normally, so a
-    /// module qualifier (`geo::Point`) is untouched.
-    fn self_assoc(&mut self, ty: &mut Type<'a>, assoc: &HashSet<&'a str>) {
+    /// Only `Self::<assoc>` is handled here. `Self::<other>` names an associated
+    /// type the trait never declared and is reported. Every other path is left
+    /// for `ty` to resolve normally, so a module qualifier (`geo::Point`) is
+    /// untouched and a bounded parameter projection can use the general path.
+    fn self_assoc(&mut self, ty: &mut Type<'a>, trait_: DefId, assoc: &HashSet<&'a str>) {
         match ty {
             Type::Path { path, args } => {
                 let segs = &path.segments;
@@ -1476,7 +1504,11 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                             self.error_here(format!(
                                 "associated type '{}' takes no arguments", segs[1]));
                         }
-                        *path = Path::single(segs[1]);
+                        *ty = Type::Projection {
+                            base: Box::new(Type::Param("Self")),
+                            trait_: Some(trait_),
+                            assoc: segs[1],
+                        };
                     } else {
                         self.error_here(format!(
                             "trait has no associated type '{}'", segs[1]));
@@ -1484,17 +1516,18 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                     return;
                 }
                 for a in args.iter_mut() {
-                    if let GenericArg::Type(t) = a { self.self_assoc(t, assoc); }
+                    if let GenericArg::Type(t) = a { self.self_assoc(t, trait_, assoc); }
                 }
             }
             Type::Pointer(inner)
             | Type::Array(inner, _)
             | Type::Slice(inner)
-            | Type::Simd(inner, _) => self.self_assoc(inner, assoc),
+            | Type::Simd(inner, _) => self.self_assoc(inner, trait_, assoc),
             Type::Function { params, return_type } => {
-                for p in params { self.self_assoc(p, assoc); }
-                self.self_assoc(return_type, assoc);
+                for p in params { self.self_assoc(p, trait_, assoc); }
+                self.self_assoc(return_type, trait_, assoc);
             }
+            Type::Projection { base, .. } => self.self_assoc(base, trait_, assoc),
             _ => {}
         }
     }
@@ -1566,17 +1599,8 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         // when it came from a directory import (`dsp::osc::Osc`), so walk it
         // rather than assuming exactly one.
         let segs = &path.segments;
-        // ...unless the qualifier is a type parameter of the enclosing item, in
-        // which case this is an associated-type projection (`A::Item` where
-        // `A: Iterator`), not a module path at all. It is not supported yet, and
-        // saying so beats sending the reader after an import that would not help:
-        // `A` is bound by the signature they are looking at.
-        if segs.len() == 2 && gparams.contains(segs[0]) {
-            self.error_here(format!(
-                "associated type projection '{}::{}' is not supported yet",
-                segs[0], segs[1]));
-            return TypeHead::Param(path.last());
-        }
+        // A type-parameter-qualified path was already rewritten to
+        // `Type::Projection` by `ty`; anything reaching here is a module path.
         let Some((scope, n)) = self.qual_prefix(segs) else {
             self.error_here(format!(
                 "unknown module qualifier '{}' (did you `import .../{}`?)", segs[0], segs[0]));
@@ -1988,9 +2012,9 @@ impl<'x, 'a> Rewriter<'x, 'a> {
             // be rewritten like any other - a `String` in `proc display(*self)
             // String` resolves to the imported struct's mangled name. `Self` is
             // left untouched (typecheck substitutes it per implementing type).
-            // Each associated type (`type Item;`) is in scope for the signatures
-            // as an implicit type parameter: `Self::Item` is rewritten to the
-            // bare name first, then resolved to `Param("Item")` via `gparams`.
+            // `Self::Item` in a signature becomes a first-class projection tied
+            // to this trait's identity. The impl binding is substituted during
+            // conformance and concrete generic instantiation.
             TopLevelNode::Trait { name, def, assoc_types, methods, .. } => {
                 let sym = *self.scopes.types.get(*name)
                     .expect("a module's own trait is always in its own scope");
@@ -2006,10 +2030,10 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 }
                 for m in methods.iter_mut() {
                     for (_, ty) in m.params.iter_mut() {
-                        self.self_assoc(ty, &assoc);
+                        self.self_assoc(ty, sym.def, &assoc);
                         self.ty(ty, &assoc);
                     }
-                    self.self_assoc(&mut m.return_type, &assoc);
+                    self.self_assoc(&mut m.return_type, sym.def, &assoc);
                     self.ty(&mut m.return_type, &assoc);
                 }
             }
