@@ -1,0 +1,12 @@
+// The turbofish names the pointee, so the pointer must have exactly that type.
+//@ error: first argument must be `*i32`
+
+import std/alloc { alloc, dealloc }
+
+@export
+proc main() i32 {
+    let p: *u8 = alloc::<u8>(1u64).unwrap();
+    let n: i32 = ptr_read::<i32>(p);
+    dealloc::<u8>(p);
+    return n;
+}

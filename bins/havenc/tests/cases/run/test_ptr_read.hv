@@ -1,0 +1,52 @@
+// `ptr_read::<T>(src)` moves a value out of raw storage. The bytes at `src`
+// remain present, but the slot is logically uninitialized until `ptr_write`
+// initializes it again. In particular, an aggregate result must use fresh
+// storage rather than aliasing `src`.
+//@ exit: 0
+
+import std/alloc { alloc, dealloc }
+import std/mem
+
+struct Owner { data: *i32 }
+
+extend Owner: Delete {
+    proc delete(*self) {
+        print("drop "); println(*self.data);
+        dealloc::<i32>(self.data);
+    }
+}
+
+proc owner(n: i32) Owner {
+    let data: *i32 = alloc::<i32>(1u64).unwrap();
+    ptr_write::<i32>(data, n);
+    return Owner { data: data };
+}
+
+@export
+proc main() i32 {
+    let scalar: *i32 = alloc::<i32>(1u64).unwrap();
+    ptr_write::<i32>(scalar, 7);
+    println(ptr_read::<i32>(scalar));
+    dealloc::<i32>(scalar);
+
+    let a: *Owner = alloc::<Owner>(1u64).unwrap();
+    let b: *Owner = alloc::<Owner>(1u64).unwrap();
+    ptr_write::<Owner>(a, owner(1));
+    ptr_write::<Owner>(b, owner(2));
+
+    mem::swap::<Owner>(a, b);
+    print(*a.data); print(" "); println(*b.data);
+    // Aliasing is explicitly supported and must be a no-op.
+    mem::swap::<Owner>(a, a);
+    println(*a.data);
+
+    let previous: Owner = mem::replace::<Owner>(a, owner(3));
+    print(previous.data[0]); print(" "); println(*a.data);
+
+    drop_in_place::<Owner>(a, 1u64);
+    drop_in_place::<Owner>(b, 1u64);
+    dealloc::<Owner>(a);
+    dealloc::<Owner>(b);
+    // `previous` (the original value from `b`) is dropped at scope end.
+    return 0;
+}

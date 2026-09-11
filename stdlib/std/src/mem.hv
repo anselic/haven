@@ -6,7 +6,7 @@
 ///
 /// Raw memory operations do not manage ownership. Callers must provide valid,
 /// sufficiently large storage and must not copy or overwrite owning values.
-/// `set`, `swap`, and `replace` require a `Copy` element type.
+/// `set` requires a `Copy` element type.
 
 // libc takes untyped pointers and byte counts. The wrappers below convert
 // from typed pointers and element counts. These externs do not allocate.
@@ -71,24 +71,26 @@ pub proc equal<T>(a: *T, b: *T, count: u64) bool {
 }
 
 /// Exchange the values at `a` and `b`. The pointers may be the same.
-/// Requires a `Copy` type because reading through a pointer cannot move an
-/// owning value out of its slot.
 @alloc(false)
 pub proc swap<T>(a: *T, b: *T) void {
-    let tmp: T = *a;
-    ptr_write::<T>(a, *b);
+    if (a == b) { return; }
+    let tmp: T = ptr_read::<T>(a);
+    ptr_write::<T>(a, ptr_read::<T>(b));
     ptr_write::<T>(b, tmp);
 }
 
 /// Write `value` into `slot` and return its previous value.
-/// Requires a `Copy` type, like `swap`. Haven does not yet have a `ptr_read`
-/// intrinsic for moving an owning value out of a pointer.
 @alloc(false)
 pub proc replace<T>(slot: *T, value: T) T {
-    let old: T = *slot;
+    let old: T = ptr_read::<T>(slot);
     ptr_write::<T>(slot, value);
     return old;
 }
+
+/// Return the numeric address of `ptr`. The value is process-specific and may
+/// differ between runs; use pointer equality when only identity matters.
+@alloc(false)
+pub proc address<T>(ptr: *T) u64 { return ptr_addr::<T>(ptr); }
 
 /// Return the size of `T` in bytes, including padding. This is also the
 /// distance between consecutive array elements. Wraps the `sizeof` intrinsic.

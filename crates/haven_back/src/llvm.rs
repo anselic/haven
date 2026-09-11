@@ -504,6 +504,8 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             emitln!(cx, "    {dst}.szp = getelementptr {elem}, ptr null, i32 1");
             emitln!(cx, "    {dst} = ptrtoint ptr {dst}.szp to i64");
         }
+        PtrToInt { dst, ptr } =>
+            emitln!(cx, "    {dst} = ptrtoint ptr {} to i64", emit_value(ptr)),
         Extend { dst, val, from_ty, to_ty } => {
             use Type::*;
             let value = emit_value(val);

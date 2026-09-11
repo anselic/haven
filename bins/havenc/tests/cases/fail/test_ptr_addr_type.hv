@@ -1,0 +1,7 @@
+//@ error: first argument must be `*i32`
+
+@export
+proc main() i32 {
+    let value: u8 = 1u8;
+    return numerical_cast::<i32>(ptr_addr::<i32>(&value));
+}

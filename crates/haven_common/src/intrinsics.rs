@@ -13,6 +13,9 @@ pub enum Intrinsic {
     /// pointers are opaque); it only changes the static pointee type. Used to
     /// turn the untyped `*void` from the allocator into a typed `*T`.
     PtrCast,
+    /// Expose a pointer's numeric address.
+    /// `ptr_addr::<T>(ptr: *T) -> u64`
+    PtrAddr,
     /// Initialize the slot at `dst` with `value`, without destroying whatever
     /// bytes were there before.
     /// `ptr_write::<T>(dst: *T, value: T) -> void`
@@ -23,6 +26,13 @@ pub enum Intrinsic {
     /// Writing over a live value leaks it - the caller carries that obligation,
     /// as with Rust's `ptr::write`.
     PtrWrite,
+    /// Read a bitwise copy of the value at `src` without changing its bytes.
+    /// `ptr_read::<T>(src: *T) -> T`
+    ///
+    /// For a non-`Copy` type, the returned value takes ownership. The source must
+    /// not subsequently be read or destroyed unless it is first reinitialized;
+    /// otherwise the same resource could be owned and destroyed twice.
+    PtrRead,
     /// Destroy `count` initialized values of type `T` starting at `ptr`, leaving
     /// the memory itself alone.
     /// `drop_in_place::<T>(ptr: *T, count: u64) -> void`
@@ -60,7 +70,9 @@ impl Intrinsic {
             "numerical_cast" => Some(Self::NumericalCast),
             "sizeof" => Some(Self::Sizeof),
             "ptr_cast" => Some(Self::PtrCast),
+            "ptr_addr" => Some(Self::PtrAddr),
             "ptr_write" => Some(Self::PtrWrite),
+            "ptr_read" => Some(Self::PtrRead),
             "drop_in_place" => Some(Self::DropInPlace),
             "__simd_splat" => Some(Self::SimdSplat),
             "__simd_load" => Some(Self::SimdLoad),
@@ -80,7 +92,9 @@ impl std::fmt::Display for Intrinsic {
             Self::NumericalCast => "numerical_cast",
             Self::Sizeof => "sizeof",
             Self::PtrCast => "ptr_cast",
+            Self::PtrAddr => "ptr_addr",
             Self::PtrWrite => "ptr_write",
+            Self::PtrRead => "ptr_read",
             Self::DropInPlace => "drop_in_place",
             Self::SimdSplat => "__simd_splat",
             Self::SimdLoad => "__simd_load",
@@ -147,9 +161,11 @@ impl Intrinsic {
             Self::NumericalCast => (&[Numeric], &[],           1),
             Self::Sizeof        => (&[Any],     &[],           0),
             Self::PtrCast       => (&[Pointer], &[],           1),
+            Self::PtrAddr       => (&[Any],     &[],           1),
             // the turbofish names the pointee, not the pointer, so the element
             // type is written once.
             Self::PtrWrite      => (&[Any],     &[],           2),
+            Self::PtrRead       => (&[Any],     &[],           1),
             Self::DropInPlace   => (&[Any],     &[],           2),
             Self::SimdSplat     => (&[Numeric], &[LANES],      1),
             Self::SimdLoad      => (&[Numeric], &[LANES],      2),

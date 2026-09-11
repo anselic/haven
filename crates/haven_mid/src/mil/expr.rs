@@ -70,6 +70,12 @@ fn lower_intrinsic<'a>(
             // through; the result's type is tracked in node_types by typecheck.
             lower_expr(cx, &args[0])
         }
+        Intrinsic::PtrAddr => {
+            let ptr = lower_expr(cx, &args[0]);
+            let dst = cx.fresh_reg();
+            cx.emit(Inst::PtrToInt { dst, ptr });
+            Value::Reg(dst)
+        }
         Intrinsic::PtrWrite => {
             // ptr_write::<T>(dst, value): the store half of `*dst = value`,
             // without the destroy-the-old-value half. Identical to how `Assign`
@@ -94,6 +100,23 @@ fn lower_intrinsic<'a>(
             let val = coerce(cx, val, &value_ty, &ty);
             cx.emit(Inst::Store { ptr, val, ty, align: None });
             Value::Const(Const::Undef)
+        }
+        Intrinsic::PtrRead => {
+            // ptr_read::<T>(src): load the bytes without destroying or clearing
+            // the source. Aggregates need fresh result storage: aggregate values
+            // are represented by pointers, and returning `src` itself would make
+            // the moved value alias the now-logically-uninitialized slot.
+            let ty = ta_type(type_args, 0);
+            let src = lower_expr(cx, &args[0]);
+            let src = as_register(cx, src, &Type::Pointer(Box::new(ty.clone())));
+            if is_aggregate_ty(&ty, &cx.enums) {
+                let dst = alloca_aggregate(cx, &ty);
+                copy_aggregate(cx, &ty, src, dst);
+                return Value::Reg(dst);
+            }
+            let dst = cx.fresh_reg();
+            cx.emit(Inst::Load { dst, ptr: src, ty, align: None });
+            Value::Reg(dst)
         }
         Intrinsic::DropInPlace => {
             // reaching lowering means the ownership pass did *not* rewrite this
