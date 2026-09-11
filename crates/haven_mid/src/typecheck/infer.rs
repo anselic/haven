@@ -214,8 +214,8 @@ fn resolve_bounded_assoc<'a>(
 }
 
 /// Check that `arg` is a `*T` for the turbofished element type `T`. Shared by
-/// the two intrinsics that address a slot rather than take one by value; both
-/// name the pointee in the turbofish, so the pointer type is derived, never
+/// intrinsics that address a slot rather than take one by value; they all name
+/// the pointee in the turbofish, so the pointer type is derived, never
 /// written, and a mismatch is worth spelling out in full.
 fn expect_pointer_to<'a>(
     cx: &mut Context<'a>,
@@ -295,6 +295,13 @@ fn typecheck_intrinsic<'a>(
             cx.node_types.insert(expr_id, target_ty.clone());
             Ok(target_ty)
         }
+        Intrinsic::PtrAddr => {
+            // ptr_addr::<T>(ptr: *T) -> u64
+            let ty = tys[0].clone();
+            expect_pointer_to(cx, intrinsic, &ty, &args[0], "first")?;
+            cx.node_types.insert(expr_id, Type::Uint64);
+            Ok(Type::Uint64)
+        }
         Intrinsic::PtrWrite => {
             // ptr_write::<T>(dst: *T, value: T) -> void
             let ty = tys[0].clone();
@@ -303,6 +310,13 @@ fn typecheck_intrinsic<'a>(
             check_expr(cx, &ty, &args[1])?;
             cx.node_types.insert(expr_id, Type::Void);
             Ok(Type::Void)
+        }
+        Intrinsic::PtrRead => {
+            // ptr_read::<T>(src: *T) -> T
+            let ty = tys[0].clone();
+            expect_pointer_to(cx, intrinsic, &ty, &args[0], "first")?;
+            cx.node_types.insert(expr_id, ty.clone());
+            Ok(ty)
         }
         Intrinsic::DropInPlace => {
             // drop_in_place::<T>(ptr: *T, count) -> void

@@ -139,6 +139,8 @@ pub enum Inst<'a> {
     // Intrinsic/SIMD related instructions
     // %dst = ptrtoint of `getelementptr ty, ptr null, i32 1` -> size of `ty` in bytes (u64)
     Sizeof { dst: Register, ty: Type<'a> },
+    // %dst = ptrtoint ptr %ptr to i64
+    PtrToInt { dst: Register, ptr: Value },
     Extend { dst: Register, val: Value, from_ty: Type<'a>, to_ty: Type<'a> },
     // %v0 = insertelement ty(simd) undef, %value, 0
     Splat { dst: Register, val: Value, ty: Type<'a>, size: usize },

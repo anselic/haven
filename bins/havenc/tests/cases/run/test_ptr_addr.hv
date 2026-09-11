@@ -1,0 +1,22 @@
+// Pointer addresses are exposed as pointer-width `u64` values. Test stable
+// relationships rather than concrete addresses, which vary between runs.
+import std/mem
+
+struct Pair { x: i32, y: i32 }
+
+@export
+proc main() i32 {
+    let x: i32 = 7;
+    let p: *i32 = &x;
+    println(ptr_addr::<i32>(p) == mem::address::<i32>(p));
+    println(ptr_addr::<i32>(null::<*i32>()) == 0u64);
+
+    let pair: Pair = Pair { x: 1, y: 2 };
+    println(mem::address::<Pair>(&pair) != 0u64);
+
+    let values: [i32; 2] = [10, 20];
+    let first: u64 = mem::address::<i32>(&values[0u64]);
+    let second: u64 = mem::address::<i32>(&values[1u64]);
+    println(second - first == mem::size_of::<i32>());
+    return 0;
+}
