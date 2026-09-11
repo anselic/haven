@@ -1,0 +1,9 @@
+//@ error: 'NotTrait' is not a trait
+
+struct NotTrait {}
+
+trait Broken {
+    type Item: NotTrait;
+}
+
+@export proc main() i32 { return 0; }

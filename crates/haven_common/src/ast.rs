@@ -823,6 +823,26 @@ pub enum GenericParam<'a> {
     Const(&'a str, Type<'a>),
 }
 
+/// One associated type declared by a trait, optionally constrained by traits
+/// that every implementing binding must satisfy.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AssocTypeDecl<'a> {
+    pub name: &'a str,
+    pub bounds: Vec<NameRef<'a>>,
+}
+
+impl<'a> Display for AssocTypeDecl<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.bounds.is_empty() {
+            write!(f, "{}", self.name)
+        } else {
+            let bounds = self.bounds.iter()
+                .map(|bound| bound.to_string()).collect::<Vec<_>>().join(" + ");
+            write!(f, "{}: {}", self.name, bounds)
+        }
+    }
+}
+
 impl<'a> Display for GenericParam<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1477,10 +1497,11 @@ pub enum TopLevelNode<'a> {
         def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
-        /// Names of the associated types the trait requires (`type Item;`). Each
-        /// stands for a per-impl type that a method signature refers to as a
-        /// `Self::Item` projection. Every conforming impl must bind all of them.
-        assoc_types: Vec<&'a str>,
+        /// Associated types the trait requires (`type Item;` or
+        /// `type IntoIter: Iterator;`). Each stands for a per-impl type that a
+        /// method signature refers to as a `Self::Item` projection. Every
+        /// conforming impl must bind all of them and satisfy their bounds.
+        assoc_types: Vec<AssocTypeDecl<'a>>,
         methods: Vec<TraitMethod<'a>>,
     },
 }
@@ -1591,7 +1612,7 @@ impl<'a> Display for TopLevelNode<'a> {
             TopLevelNode::Trait { name, is_pub, assoc_types, methods, .. } => {
                 let pub_str = if *is_pub { "pub " } else { "" };
                 let assoc_str = assoc_types.iter()
-                    .map(|n| format!("    type {};\n", n)).collect::<String>();
+                    .map(|decl| format!("    type {};\n", decl)).collect::<String>();
                 let methods_str = methods.iter().map(|m| {
                     let recv = match m.receiver {
                         Receiver::Associated => String::new(),

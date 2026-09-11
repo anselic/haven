@@ -637,10 +637,29 @@ pub fn typecheck_program<'a>(
         }
     }
 
+    // Trait names were resolved by the front end, but the type namespace also
+    // contains structs and enums. Once every trait has been registered, reject
+    // associated-type bounds that resolved to some other kind of definition.
+    for node in program {
+        let TopLevelNode::Trait { assoc_types, .. } = &node.value else { continue };
+        for decl in assoc_types {
+            for bound in &decl.bounds {
+                if !cx.traits.contains_key(&bound.def) {
+                    errors.push(Error::new(node.span, format!(
+                        "'{}' is not a trait", cx.name_of(bound.def))));
+                }
+            }
+        }
+    }
+
     // check every `extend T: Trait` conformance and record the satisfied impls,
     // so a `T: Trait` bound at a generic call site can be verified. Runs after
     // function forward-declaration, since a method's desugared function (`T$m`)
     // must be visible to compare its signature.
+    // Make the complete impl set available before validating any one impl. An
+    // associated-type bound may be satisfied by an impl declared later in the
+    // source, and declaration order must not change conformance.
+    cx.impls.extend(impls.iter().cloned());
     for imp in impls {
         check_impl_conformance(cx, imp, &mut errors);
     }
@@ -701,7 +720,7 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
     // naming a type the trait never declared is a mistake, not silently ignored.
     let mut assoc: HashMap<&'a str, Type<'a>> = HashMap::new();
     for (name, ty) in &imp.assoc_bindings {
-        if !trait_def.assoc_types.contains(name) {
+        if trait_def.assoc_type(name).is_none() {
             errors.push(Error::new(imp.span, format!(
                 "trait '{}' has no associated type '{}'", trait_, name)));
             continue;
@@ -711,11 +730,27 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
                 "associated type '{}' is bound more than once", name)));
         }
     }
-    for name in &trait_def.assoc_types {
-        if !assoc.contains_key(name) {
+    for decl in &trait_def.assoc_types {
+        if !assoc.contains_key(decl.name) {
             errors.push(Error::new(imp.span, format!(
                 "type '{}' does not implement trait '{}': missing associated type '{}'",
-                target, trait_, name)));
+                target, trait_, decl.name)));
+        }
+    }
+
+    let impl_scope: ParamBounds<'a> = imp.generics.iter().filter_map(|generic| match generic {
+        GenericParam::Type { name, bounds } =>
+            Some((*name, bounds.iter().map(|bound| bound.def).collect())),
+        GenericParam::Const(..) => None,
+    }).collect();
+    for decl in &trait_def.assoc_types {
+        let Some(binding) = assoc.get(decl.name) else { continue };
+        for bound in &decl.bounds {
+            if !cx.implements_in_scope(binding, bound.def, &impl_scope) {
+                errors.push(Error::new(imp.span, format!(
+                    "associated type '{}' for '{}' does not satisfy bound '{}'",
+                    decl.name, target, cx.name_of(bound.def))));
+            }
         }
     }
 
@@ -786,6 +821,4 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
                         borrowed view, and destroying one would destroy something it does \
                         not own"));
     }
-
-    cx.impls.push(imp.clone());
 }

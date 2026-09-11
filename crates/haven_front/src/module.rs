@@ -1304,11 +1304,18 @@ impl<'x, 'a> Rewriter<'x, 'a> {
     fn bounds(&mut self, generics: &mut [GenericParam<'a>]) {
         for g in generics.iter_mut() {
             let GenericParam::Type { bounds, .. } = g else { continue };
-            for b in bounds.iter_mut() {
-                match self.scopes.types.get(b.path.last()) {
-                    Some(sym) => b.def = sym.def,
-                    None => self.error_here(format!("unknown trait '{}'", b)),
-                }
+            self.bound_refs(bounds);
+        }
+    }
+
+    /// Resolve one list of trait bounds. Associated-type declarations use the
+    /// same bound syntax as generic parameters, but do not have a
+    /// `GenericParam` wrapper.
+    fn bound_refs(&mut self, bounds: &mut [NameRef<'a>]) {
+        for bound in bounds {
+            match self.scopes.types.get(bound.path.last()) {
+                Some(sym) => bound.def = sym.def,
+                None => self.error_here(format!("unknown trait '{}'", bound)),
             }
         }
     }
@@ -1347,16 +1354,20 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 // associated-type projection, not a module-qualified name.
                 // Which bound supplies `Item` is checked by typecheck, where the
                 // resolved trait declarations are available.
-                if path.segments.len() == 2 && gparams.contains(path.segments[0]) {
+                if path.segments.len() >= 2 && gparams.contains(path.segments[0]) {
                     if !args.is_empty() {
                         self.error_here(format!(
-                            "associated type '{}' takes no arguments", path.segments[1]));
+                            "associated type '{}' takes no arguments", path.last()));
                     }
-                    *ty = Type::Projection {
-                        base: Box::new(Type::Param(path.segments[0])),
-                        trait_: None,
-                        assoc: path.segments[1],
-                    };
+                    let mut projection = Type::Param(path.segments[0]);
+                    for assoc in &path.segments[1..] {
+                        projection = Type::Projection {
+                            base: Box::new(projection),
+                            trait_: None,
+                            assoc,
+                        };
+                    }
+                    *ty = projection;
                     return;
                 }
                 // a generic type's arguments are themselves types to rewrite;
@@ -1498,17 +1509,25 @@ impl<'x, 'a> Rewriter<'x, 'a> {
         match ty {
             Type::Path { path, args } => {
                 let segs = &path.segments;
-                if segs.len() == 2 && segs[0] == "Self" {
+                if segs.len() >= 2 && segs[0] == "Self" {
                     if assoc.contains(segs[1]) {
                         if !args.is_empty() {
                             self.error_here(format!(
-                                "associated type '{}' takes no arguments", segs[1]));
+                                "associated type '{}' takes no arguments", path.last()));
                         }
-                        *ty = Type::Projection {
+                        let mut projection = Type::Projection {
                             base: Box::new(Type::Param("Self")),
                             trait_: Some(trait_),
                             assoc: segs[1],
                         };
+                        for assoc in &segs[2..] {
+                            projection = Type::Projection {
+                                base: Box::new(projection),
+                                trait_: None,
+                                assoc,
+                            };
+                        }
+                        *ty = projection;
                     } else {
                         self.error_here(format!(
                             "trait has no associated type '{}'", segs[1]));
@@ -2021,12 +2040,13 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 *name = sym.name;
                 *def = sym.def;
                 let mut assoc: HashSet<&'a str> = HashSet::new();
-                for a in assoc_types.iter() {
-                    if *a == "Self" {
+                for decl in assoc_types.iter_mut() {
+                    if decl.name == "Self" {
                         self.error_here("an associated type cannot be named 'Self'".into());
-                    } else if !assoc.insert(*a) {
-                        self.error_here(format!("duplicate associated type '{}'", a));
+                    } else if !assoc.insert(decl.name) {
+                        self.error_here(format!("duplicate associated type '{}'", decl.name));
                     }
+                    self.bound_refs(&mut decl.bounds);
                 }
                 for m in methods.iter_mut() {
                     for (_, ty) in m.params.iter_mut() {

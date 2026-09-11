@@ -84,11 +84,9 @@ fn method_signature<'a>(
 }
 
 /// Resolve a method call `base.field(args)` when `base` is a (possibly
-/// pointer-wrapped) type parameter, dispatching through the param's trait bounds.
-/// Returns `Ok(Some(result_type))` on success, `Ok(None)` if `base_ty` is not a
-/// type param at all (the caller then tries concrete method resolution), or an
-/// error if the base *is* a type param but no bound provides `field` (a bare type
-/// param has no methods of its own) or the arguments don't match.
+/// pointer-wrapped) type parameter or associated-type projection, dispatching
+/// through its declared trait bounds. Returns `Ok(None)` for a concrete type so
+/// the caller can use ordinary member resolution.
 fn resolve_bounded_method<'a>(
     cx: &mut Context<'a>,
     base_ty: &Type<'a>,
@@ -96,17 +94,39 @@ fn resolve_bounded_method<'a>(
     args: &[Expr<'a>],
     span: &Span,
 ) -> Result<Option<Type<'a>>, Error> {
-    let param = match base_ty {
-        Type::Param(n) => *n,
-        Type::Pointer(inner) => match inner.as_ref() {
-            Type::Param(n) => *n,
-            _ => return Ok(None),
-        },
+    let subject = match base_ty {
+        Type::Pointer(inner) => inner.as_ref(),
+        other => other,
+    };
+    let (self_ty, subject_name, bounds) = match subject {
+        Type::Param(param) => (
+            subject.clone(),
+            format!("type parameter '{}'", param),
+            cx.generic_bounds.get(param).cloned().unwrap_or_default(),
+        ),
+        Type::Projection { trait_: Some(owner), assoc, .. } => {
+            let bounds = cx.traits.get(owner)
+                .and_then(|def| def.assoc_type(assoc))
+                .map(|decl| decl.bounds.iter().map(|bound| bound.def).collect())
+                .unwrap_or_default();
+            (subject.clone(), format!("associated type '{}'", cx.show(subject)), bounds)
+        }
+        Type::Projection { .. } => {
+            let normalized = cx.normalize_type(subject)
+                .map_err(|message| Error::new(*span, message))?;
+            let Type::Projection { trait_: Some(owner), assoc, .. } = &normalized else {
+                return Ok(None);
+            };
+            let bounds = cx.traits.get(owner)
+                .and_then(|def| def.assoc_type(assoc))
+                .map(|decl| decl.bounds.iter().map(|bound| bound.def).collect())
+                .unwrap_or_default();
+            (normalized.clone(), format!("associated type '{}'", cx.show(&normalized)), bounds)
+        }
         _ => return Ok(None),
     };
 
     // find the first bound trait that declares a method named `field`.
-    let bounds = cx.generic_bounds.get(param).cloned().unwrap_or_default();
     let mut sig = None;
     for tr in &bounds {
         if let Some(def) = cx.traits.get(tr)
@@ -117,13 +137,11 @@ fn resolve_bounded_method<'a>(
     }
     let Some((params, return_type)) = sig else {
         return Err(Error::new(*span,
-            format!("no method '{}' on type parameter '{}'", field, param))
-            .with_note(format!(
-                "add a trait bound that provides it, e.g. `<{}: SomeTrait>`", param)));
+            format!("no method '{}' on {}", field, subject_name))
+            .with_note("add a trait bound that provides this method"));
     };
 
-    // `Self` in the trait signature refers to the param type `T` here.
-    let self_ty = Type::Param(param);
+    // `Self` in the trait signature refers to the bounded type or projection.
     if args.len() != params.len() {
         return Err(Error::new(*span, format!("method '{}' expects {} argument(s), got {}",
             field, params.len(), args.len())));
@@ -1295,6 +1313,8 @@ pub(crate) fn infer<'a>(
             // handles a function-pointer struct field called as `x.f()`).
             if let ExprNode::Access { base, field } = &func.value {
                 let base_ty = infer(cx, base)?;
+                let base_ty = cx.normalize_type(&base_ty)
+                    .map_err(|message| Error::new(span, message))?;
                 // a bounded type-param receiver: `x.m(...)` where `x: T` (or
                 // `*T`) and `T: SomeTrait`. Resolve through the bound and yield
                 // the trait method's result type. The generic body itself is

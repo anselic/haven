@@ -1,0 +1,7 @@
+//@ error: unknown trait 'Missing'
+
+trait Broken {
+    type Item: Missing;
+}
+
+@export proc main() i32 { return 0; }

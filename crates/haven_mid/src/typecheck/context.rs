@@ -75,10 +75,16 @@ pub struct TraitMethodSig<'a> {
 #[derive(Clone, Debug)]
 pub struct TraitDef<'a> {
     pub methods: HashMap<&'a str, TraitMethodSig<'a>>,
-    /// Names of the trait's associated types (`type Item;`). Every conforming
-    /// impl must bind all of them. A method signature retains `Self::Item` as a
-    /// projection, which is substituted per impl during conformance.
-    pub assoc_types: Vec<&'a str>,
+    /// The trait's associated types and their bounds. Every conforming impl must
+    /// bind all of them. A method signature retains `Self::Item` as a projection,
+    /// which is substituted per impl during conformance.
+    pub assoc_types: Vec<AssocTypeDecl<'a>>,
+}
+
+impl<'a> TraitDef<'a> {
+    pub fn assoc_type(&self, name: &str) -> Option<&AssocTypeDecl<'a>> {
+        self.assoc_types.iter().find(|decl| decl.name == name)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -294,10 +300,30 @@ impl<'a> Context<'a> {
     /// makes `Serial<A, Gain>` a `Mono` under `extend Serial<A, B>: Mono where
     /// A: Mono, B: Mono` while `A` is still symbolic.
     pub fn implements(&self, ty: &Type<'a>, trait_: DefId) -> bool {
+        self.implements_in_scope(ty, trait_, &self.generic_bounds)
+    }
+
+    /// The scope-explicit form used while trait impls are checked, before a
+    /// function body's generic bounds have been installed on the context.
+    pub fn implements_in_scope(
+        &self,
+        ty: &Type<'a>,
+        trait_: DefId,
+        scope: &ParamBounds<'a>,
+    ) -> bool {
         // conformance is recorded against the template, for the same reason
         // membership is - see `member_for`.
-        haven_common::ast::implements(
-            &self.impls, &self.generic_bounds, &deinstance(&self.instances, ty), trait_)
+        let ty = deinstance(&self.instances, ty);
+        let ty = match self.normalize_type_in_scope(&ty, scope) {
+            Ok(normalized) => normalized,
+            Err(_) => return false,
+        };
+        if let Type::Projection { trait_: Some(owner), assoc, .. } = &ty {
+            return self.traits.get(owner)
+                .and_then(|def| def.assoc_type(assoc))
+                .is_some_and(|decl| decl.bounds.iter().any(|bound| bound.def == trait_));
+        }
+        haven_common::ast::implements(&self.impls, scope, &ty, trait_)
     }
 
     /// Resolve associated-type projections as far as the current generic scope
@@ -306,7 +332,15 @@ impl<'a> Context<'a> {
     /// the base is concrete, the matching impl supplies the binding and the
     /// projection disappears.
     pub fn normalize_type(&self, ty: &Type<'a>) -> Result<Type<'a>, String> {
-        let recurse = |t: &Type<'a>| self.normalize_type(t);
+        self.normalize_type_in_scope(ty, &self.generic_bounds)
+    }
+
+    fn normalize_type_in_scope(
+        &self,
+        ty: &Type<'a>,
+        scope: &ParamBounds<'a>,
+    ) -> Result<Type<'a>, String> {
+        let recurse = |t: &Type<'a>| self.normalize_type_in_scope(t, scope);
         match ty {
             Type::Projection { base, trait_, assoc } => {
                 let base = recurse(base)?;
@@ -314,22 +348,34 @@ impl<'a> Context<'a> {
                     return Ok(Type::Projection {
                         base: Box::new(base), trait_: *trait_, assoc });
                 }
-                if let Type::Param(name) = &base {
-                    let candidates: Vec<DefId> = self.generic_bounds.get(name)
-                        .into_iter().flatten().copied()
+                let symbolic_bounds = match &base {
+                    Type::Param(name) => Some(scope.get(name).cloned().unwrap_or_default()),
+                    Type::Projection { trait_: Some(owner), assoc, .. } => self.traits
+                        .get(owner)
+                        .and_then(|def| def.assoc_type(assoc))
+                        .map(|decl| decl.bounds.iter().map(|bound| bound.def).collect()),
+                    _ => None,
+                };
+                if let Some(bounds) = symbolic_bounds {
+                    let candidates: Vec<DefId> = bounds.into_iter()
                         .filter(|tr| trait_.is_none_or(|selected| selected == *tr))
                         .filter(|tr| self.traits.get(tr)
-                            .is_some_and(|def| def.assoc_types.contains(assoc)))
+                            .is_some_and(|def| def.assoc_type(assoc).is_some()))
                         .collect();
+                    let subject = self.show(&base);
+                    let subject_kind = match &base {
+                        Type::Param(name) => format!("type parameter '{}'", name),
+                        _ => format!("type '{}'", subject),
+                    };
                     return match candidates.as_slice() {
                         [selected] => Ok(Type::Projection {
                             base: Box::new(base), trait_: Some(*selected), assoc }),
                         [] => Err(format!(
-                            "type parameter '{}' has no bound declaring associated type '{}'",
-                            name, assoc)),
+                            "{} has no bound declaring associated type '{}'",
+                            subject_kind, assoc)),
                         many => Err(format!(
                             "associated type '{}::{}' is ambiguous between traits {}",
-                            name, assoc,
+                            subject, assoc,
                             many.iter().map(|tr| format!("'{}'", self.name_of(*tr)))
                                 .collect::<Vec<_>>().join(", "))),
                     };
@@ -344,11 +390,11 @@ impl<'a> Context<'a> {
                 for imp in &self.impls {
                     if trait_.is_some_and(|selected| selected != imp.trait_) { continue; }
                     let Some(trait_def) = self.traits.get(&imp.trait_) else { continue };
-                    if imp.head != head || !trait_def.assoc_types.contains(assoc) { continue; }
+                    if imp.head != head || trait_def.assoc_type(assoc).is_none() { continue; }
                     let params = param_names(&imp.generics);
                     let mut u = Unified::default();
                     if !unify(&imp.self_ty, &lookup, &params, &mut u)
-                        || !bounds_hold(&self.impls, &self.generic_bounds, &imp.generics, &u) {
+                        || !bounds_hold(&self.impls, scope, &imp.generics, &u) {
                         continue;
                     }
                     if let Some((_, bound)) = imp.assoc_bindings.iter().find(|(name, _)| name == assoc) {

@@ -1,0 +1,19 @@
+//@ error: associated type 'Iter' for 'BadSource' does not satisfy bound 'Iterator'
+
+trait Iterator {
+    type Item;
+    proc next(*self) Option<Self::Item>;
+}
+
+trait Source {
+    type Iter: Iterator;
+}
+
+struct NotStep {}
+struct BadSource {}
+
+extend BadSource: Source {
+    type Iter = NotStep;
+}
+
+@export proc main() i32 { return 0; }

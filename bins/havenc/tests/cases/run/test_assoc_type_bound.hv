@@ -1,0 +1,50 @@
+// Associated-type bounds remain usable while the projected type is symbolic.
+// The Source impl intentionally precedes the Iterator impl to prove conformance
+// is independent of declaration order.
+
+trait Iterator {
+    type Item;
+    proc next(*self) Option<Self::Item>;
+}
+
+trait Source {
+    type Iter: Iterator;
+    proc iter(self) Self::Iter;
+}
+
+struct Counter { value: i32 }
+struct Once { value: i32 }
+
+extend Once: Source {
+    type Iter = Counter;
+    proc iter(self) Counter { return Counter { value: self.value }; }
+}
+
+extend Counter: Iterator {
+    type Item = i32;
+    proc next(*self) Option<i32> { return Option::Some::<i32>(self.value); }
+}
+
+proc call_next<T: Iterator>(value: *T) Option<T::Item> {
+    return value.next();
+}
+
+proc consume<S: Source>(source: S) i32 {
+    let iter: S::Iter = source.iter();
+    let direct: Option<S::Iter::Item> = iter.next();
+    let through_bound: Option<S::Iter::Item> = call_next::<S::Iter>(&iter);
+    match (direct) {
+        Option::Some(_) -> {
+            match (through_bound) {
+                Option::Some(_) -> { return 0; }
+                Option::None -> { return 2; }
+            }
+        }
+        Option::None -> { return 1; }
+    }
+}
+
+@export
+proc main() i32 {
+    return consume::<Once>(Once { value: 42 });
+}

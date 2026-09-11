@@ -1546,7 +1546,7 @@ fn parse_trait_method<'tks, 'src: 'tks>() -> P<'tks, 'src, TraitMethod<'src>> {
 /// or a required method signature. Partitioned into the trait node's
 /// `assoc_types` / `methods` after parsing.
 enum TraitItem<'a> {
-    Assoc(&'a str),
+    Assoc(AssocTypeDecl<'a>),
     Method(TraitMethod<'a>),
 }
 
@@ -1811,8 +1811,12 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
     // first, since it is the only one that leads with `type`) or a method sig.
     let assoc_decl = select_ref! { Token::Var(s) if *s == "type" => () }
         .ignore_then(var.map(|s| *s))
+        .then(just(Token::Colon).ignore_then(parse_trait_bounds()).or_not())
         .then_ignore(just(Token::Semicolon))
-        .map(TraitItem::Assoc);
+        .map(|(name, bounds)| TraitItem::Assoc(AssocTypeDecl {
+            name,
+            bounds: bounds.unwrap_or_default(),
+        }));
     let trait_item = choice([
         assoc_decl.boxed(),
         parse_trait_method().map(TraitItem::Method).boxed(),
@@ -1831,7 +1835,7 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
             let mut methods = Vec::new();
             for it in items {
                 match it {
-                    TraitItem::Assoc(n) => assoc_types.push(n),
+                    TraitItem::Assoc(decl) => assoc_types.push(decl),
                     TraitItem::Method(m) => methods.push(m),
                 }
             }

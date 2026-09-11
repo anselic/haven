@@ -618,11 +618,9 @@ impl<'p, 'a> Mono<'p, 'a> {
                 return_type: Box::new(self.subst_ty(return_type, b)),
             },
             Type::Projection { base, trait_, assoc } => {
-                // Keep the base in template form for impl matching. The binding
-                // itself may contain generic named types, so run it back through
-                // `subst_ty` with no remaining parameters to flatten those for
-                // emission.
-                let base = self.subst_params(base, b);
+                // Resolve inner projections first. The concrete base is restored
+                // to template form inside `projection_binding` for impl matching.
+                let base = self.subst_ty(base, b);
                 match self.projection_binding(&base, *trait_, assoc) {
                     Some(binding) => self.subst_ty(&binding, &Bindings::empty()),
                     None => Type::Projection {
@@ -631,42 +629,6 @@ impl<'p, 'a> Mono<'p, 'a> {
                         assoc,
                     },
                 }
-            },
-            other => other.clone(),
-        }
-    }
-
-    /// Substitute bound params in `ty` *without* collapsing generic types to
-    /// their instances.
-    ///
-    /// [`Self::subst_ty`] does both jobs at once, which is right everywhere a
-    /// type is being rewritten for emission - but wrong for deciding which
-    /// `extend` block a receiver dispatches to. Dispatch happens on the head, and
-    /// collapsing turns `Buf<i32>` into the fresh instance `Buf$i32`, whose head
-    /// is an identity no impl was ever registered against. The generic form is
-    /// what has to be matched against the impl's `Buf<T>`, so this keeps it.
-    fn subst_params(&self, ty: &Type<'a>, b: &Bindings<'a>) -> Type<'a> {
-        match ty {
-            Type::Param(n) if b.types.contains_key(n) => b.types[n].clone(),
-            Type::Named { def, args } => Type::Named {
-                def: *def,
-                args: args.iter().map(|a| match a {
-                    GenericArg::Type(t) => GenericArg::Type(self.subst_params(t, b)),
-                    GenericArg::Const(cv) => GenericArg::Const(subst_cv(cv, b)),
-                }).collect(),
-            },
-            Type::Pointer(inner)  => Type::Pointer(Box::new(self.subst_params(inner, b))),
-            Type::Array(inner, n) => Type::Array(Box::new(self.subst_params(inner, b)), subst_cv(n, b)),
-            Type::Slice(inner)    => Type::Slice(Box::new(self.subst_params(inner, b))),
-            Type::Simd(inner, n)  => Type::Simd(Box::new(self.subst_params(inner, b)), subst_cv(n, b)),
-            Type::Function { params, return_type } => Type::Function {
-                params: params.iter().map(|p| self.subst_params(p, b)).collect(),
-                return_type: Box::new(self.subst_params(return_type, b)),
-            },
-            Type::Projection { base, trait_, assoc } => Type::Projection {
-                base: Box::new(self.subst_params(base, b)),
-                trait_: *trait_,
-                assoc,
             },
             other => other.clone(),
         }
@@ -734,11 +696,12 @@ impl<'p, 'a> Mono<'p, 'a> {
         // instantiation's parameters bound but generic types left generic, since
         // that is the form an impl is written against.
         let recv_ty = self.node_types.get(&base.id)?.clone();
-        // `subst_params` may bind a parameter to a generic *instance* (`Vec$i32`)
-        // rather than to `Vec<i32>`, when the caller's turbofish was itself a
-        // generic type; `deinstance` restores template form so head dispatch can
-        // find the impl and unification can recover its parameters.
-        let recv_ty = self.deinstance(&self.subst_params(&recv_ty, b));
+        // Full substitution also normalizes an associated-type projection to
+        // its concrete binding. It may produce a generic instance (`Vec$i32`)
+        // rather than `Vec<i32>`; `deinstance` restores template form so head
+        // dispatch can find the impl and unification can recover its parameters.
+        let recv_ty = self.subst_ty(&recv_ty, b);
+        let recv_ty = self.deinstance(&recv_ty);
 
         // dispatch by head, then through one pointer level - the same two-step
         // the typechecker uses, so both agree on which impl a receiver picks.
