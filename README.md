@@ -4,15 +4,26 @@ haven is a statically typed programming language and compiler, built specificall
 for DSP and audio plugin development.
 
 This repository includes:
+
 - `vestry`: build system and project manager for Haven projects
 - `havenc`: the compiler for the haven programming language
-- `havendoc`: a documentation generator for haven projects
+- `havendoc`: a documentation generator that emits Markdown or static HTML
+
+Generate a portable static documentation site with:
+
+```shell
+$ havendoc path/to/package --format html --out docs
+```
+
+The built-in HTML shell and stylesheet live in `bins/havendoc/assets/`; edit
+those source files and rebuild `havendoc` to customize generated sites.
 
 > [!NOTE]
 > This is very alpha and work in progress, codebase can be messy and bugs may
 > arise, please report if you find one.
 
 ## Dependencies
+
 - (Developer dependencies)
   - rust/cargo
   - python (for installation script)
@@ -23,6 +34,7 @@ This repository includes:
 ## Installation
 
 Install the binaries using the provided `install.py` script:
+
 ```shell
 $ cargo build --release
 $ python install.py [--debug] [--path <install_path>]

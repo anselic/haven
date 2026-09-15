@@ -1,4 +1,4 @@
-//! `havendoc`: generate Markdown documentation from `.hv` source.
+//! `havendoc`: generate documentation from `.hv` source.
 //!
 //! Parses each file for real signatures (via `haven_front`) and pulls `///` doc
 //! comments straight from the source, writing one page per module. See the `doc`
@@ -6,14 +6,14 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 mod doc;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "havendoc",
-    about = "Generate Markdown docs from .hv source"
+    about = "Generate documentation from .hv source"
 )]
 pub struct DocArgs {
     /// Source files or directories to document. Vestry package directories use
@@ -22,9 +22,19 @@ pub struct DocArgs {
     #[arg(required = true, num_args = 1..)]
     pub inputs: Vec<PathBuf>,
 
-    /// Output directory for the generated Markdown files.
+    /// Output directory for the generated documentation files.
     #[arg(short, long, default_value = "docs")]
     pub out: PathBuf,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
+    pub format: OutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum OutputFormat {
+    Markdown,
+    Html,
 }
 
 fn main() {

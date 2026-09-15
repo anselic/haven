@@ -33,6 +33,7 @@ sha2 = "0.10"
 tempfile = "3.27.0"
 cc = "1.2.65"
 libtest-mimic = "0.8"
+pulldown-cmark = "0.13.4"
 
 [workspace.package]
 version = "0.1.0"

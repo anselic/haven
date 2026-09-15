@@ -1,9 +1,10 @@
-//! `havendoc`: turn `.hv` source into Markdown.
+//! `havendoc`: turn `.hv` source into renderer-independent documentation, then
+//! emit Markdown or a static HTML site.
 //!
 //! Signatures come from the parsed AST. Since the lexer discards comments, doc
 //! bodies are read from the source and matched to items by span.
 //!
-//! Output layout, given `havendoc std -o docs`:
+//! Markdown output layout, given `havendoc std -o docs`:
 //! ```text
 //! docs/
 //!   index.md
@@ -11,13 +12,16 @@
 //!   std/dsp/osc.md
 //!   ...
 //! ```
+//! `--format html` emits the same module structure as `.html` pages plus a
+//! shared `assets/style.css`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bumpalo::Bump;
+use pulldown_cmark::{Event, Options, Parser as MarkdownParser, Tag, html};
 
-use crate::DocArgs;
+use crate::{DocArgs, OutputFormat};
 use haven_common::ast::{Method, Receiver, TopLevel, TopLevelNode, Type};
 use haven_common::diag::Files;
 use haven_front::parse;
@@ -32,69 +36,107 @@ pub fn generate(args: &DocArgs) -> Result<(), ()> {
         return Err(());
     }
 
-    if let Err(e) = std::fs::create_dir_all(&args.out) {
-        eprintln!("havendoc: cannot create {}: {}", args.out.display(), e);
-        return Err(());
-    }
-
-    // Module title and page path relative to the output directory.
-    let mut pages: Vec<(String, PathBuf)> = Vec::new();
-
-    for source in &files {
-        let rel_md = title_to_rel_path(&source.title);
-        let page_path = args.out.join(&rel_md);
-
-        let markdown = match render_file(&source.title, &source.file) {
-            Ok(md) => md,
-            Err(()) => {
-                eprintln!(
-                    "havendoc: skipping {} (failed to parse)",
-                    source.file.display()
-                );
-                continue;
-            }
-        };
-
-        if let Some(parent) = page_path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("havendoc: cannot create {}: {}", parent.display(), e);
-                continue;
-            }
-        if let Err(e) = std::fs::write(&page_path, markdown) {
-            eprintln!("havendoc: cannot write {}: {}", page_path.display(), e);
-            continue;
-        }
-        pages.push((source.title.clone(), rel_md));
-    }
-
-    if pages.is_empty() {
-        eprintln!("havendoc: no pages generated");
-        return Err(());
-    }
-
-    // Stable, human-friendly ordering in generated indexes.
-    pages.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Build a directory tree from `a/b/c` page titles so directories without a
-    // corresponding module can get a useful Markdown index.
-    let tree = build_tree(&pages);
-    let package_name = files
+    let package = files
         .first()
         .and_then(|source| source.package.as_deref())
         .filter(|name| {
             files
                 .iter()
                 .all(|source| source.package.as_deref() == Some(*name))
-        });
-    write_landing(&args.out, package_name, &pages)?;
-    write_module_indexes(&args.out, &tree)?;
+        })
+        .map(str::to_owned);
+    let mut modules = Vec::new();
+    for source in &files {
+        match extract_module(source) {
+            Ok(module) => modules.push(module),
+            Err(()) => {
+                eprintln!(
+                    "havendoc: skipping {} (failed to parse)",
+                    source.file.display()
+                );
+            }
+        }
+    }
+
+    if modules.is_empty() {
+        eprintln!("havendoc: no pages generated");
+        return Err(());
+    }
+
+    modules.sort_by(|a, b| a.title.cmp(&b.title));
+    let docs = Documentation { package, modules };
+    match args.format {
+        OutputFormat::Markdown => render_markdown(&docs, &args.out)?,
+        OutputFormat::Html => render_html(&docs, &args.out)?,
+    }
 
     println!(
         "havendoc: wrote {} page(s) to {}",
-        pages.len(),
+        docs.modules.len(),
         args.out.display()
     );
     Ok(())
+}
+
+/// Renderer-independent documentation extracted from one invocation. This is
+/// the boundary future HTML or JSON renderers consume.
+#[derive(Debug, PartialEq, Eq)]
+struct Documentation {
+    /// Present when every input module belongs to the same Vestry package.
+    package: Option<String>,
+    modules: Vec<ModuleDoc>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ModuleDoc {
+    title: String,
+    docs: Option<String>,
+    items: Vec<ItemDoc>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ItemKind {
+    Function,
+    Extern,
+    Struct,
+    Constant,
+    Enum,
+    Trait,
+    Alias,
+    Extension,
+}
+
+impl ItemKind {
+    fn label(self) -> &'static str {
+        match self {
+            ItemKind::Function => "function",
+            ItemKind::Extern => "extern",
+            ItemKind::Struct => "struct",
+            ItemKind::Constant => "constant",
+            ItemKind::Enum => "enum",
+            ItemKind::Trait => "trait",
+            ItemKind::Alias => "alias",
+            ItemKind::Extension => "extension",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ItemDoc {
+    kind: ItemKind,
+    name: String,
+    /// Haven declaration without its implementation body. Extension groups do
+    /// not have a single declaration, so their signature is absent.
+    signature: Option<String>,
+    docs: Option<String>,
+    methods: Vec<MethodDoc>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MethodDoc {
+    name: String,
+    signature: String,
+    docs: Option<String>,
 }
 
 struct SourceFile {
@@ -232,12 +274,12 @@ fn title_to_rel_path(title: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Per-file rendering
+// Documentation extraction
 // ---------------------------------------------------------------------------
 
-fn render_file(title: &str, file: &Path) -> Result<String, ()> {
-    let src = std::fs::read_to_string(file).map_err(|e| {
-        eprintln!("havendoc: cannot read {}: {}", file.display(), e);
+fn extract_module(source: &SourceFile) -> Result<ModuleDoc, ()> {
+    let src = std::fs::read_to_string(&source.file).map_err(|e| {
+        eprintln!("havendoc: cannot read {}: {}", source.file.display(), e);
     })?;
 
     // Parse into real signatures. A fresh arena per file is fine: everything we
@@ -249,7 +291,7 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
     // diagnostic (a lex/parse failure just fails the page), so a one-entry file
     // table is all the spans need to be well-formed.
     let mut files = Files::new();
-    let key = files.add(file.to_string_lossy().into_owned(), src_ref);
+    let key = files.add(source.file.to_string_lossy().into_owned(), src_ref);
 
     let (tokens, lex_errs) = parse::lex(key, src_ref);
     let tokens = match tokens {
@@ -264,21 +306,6 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
     };
 
     let lines = LineIndex::new(&src);
-
-    let mut md = String::new();
-    md.push_str(&format!("# `{}`\n\n", title));
-
-    // Module-level doc: a leading `///` block separated from the first item by a
-    // blank line (mirrors the intent of Rust's `//!`).
-    if let Some(doc) = lines.module_doc() {
-        md.push_str(&doc);
-        md.push_str("\n\n");
-    }
-
-    if items.is_empty() {
-        md.push_str("_This module exposes no documented items._\n");
-        return Ok(md);
-    }
 
     // `extend`/inherent-method blocks were parsed into `Extend` items. Group each
     // block's *visible* methods (public, or any method of a trait impl) under the
@@ -299,6 +326,7 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
         }
     }
 
+    let mut documented_items = Vec::new();
     for item in &items {
         match &item.value {
             // extend blocks are rendered as method sections under their type, not
@@ -308,12 +336,15 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
             // are implementation details and are omitted entirely.
             node if !item_is_pub(node) => continue,
             node => {
-                render_item(&mut md, item, &src, &lines);
                 // a type carries its methods directly beneath its declaration.
-                if let TopLevelNode::Struct { name, .. } | TopLevelNode::Enum { name, .. } = node
-                    && let Some(methods) = method_groups.remove(*name) {
-                        render_methods(&mut md, &methods, &lines);
-                    }
+                let methods = if let TopLevelNode::Struct { name, .. }
+                    | TopLevelNode::Enum { name, .. } = node
+                {
+                    method_groups.remove(*name).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                documented_items.push(extract_item(item, &src, &lines, &methods));
             }
         }
     }
@@ -324,12 +355,67 @@ fn render_file(title: &str, file: &Path) -> Result<String, ()> {
         if methods.is_empty() {
             continue;
         }
-        md.push_str(&format!("## `{}`\n\n", target));
-        md.push_str("_Methods on this type, declared in this module._\n\n");
-        render_methods(&mut md, methods, &lines);
+        documented_items.push(ItemDoc {
+            kind: ItemKind::Extension,
+            name: target.clone(),
+            signature: None,
+            docs: None,
+            methods: methods
+                .iter()
+                .map(|method| extract_method(method, &lines))
+                .collect(),
+        });
     }
 
-    Ok(md)
+    Ok(ModuleDoc {
+        title: source.title.clone(),
+        docs: lines.module_doc(),
+        items: documented_items,
+    })
+}
+
+fn extract_item(
+    item: &TopLevel,
+    src: &str,
+    lines: &LineIndex,
+    methods: &[&Method],
+) -> ItemDoc {
+    ItemDoc {
+        kind: item_kind(&item.value),
+        name: item_name(&item.value).to_string(),
+        signature: Some(signature(
+            &item.value,
+            src,
+            item.span.start,
+            item.span.end,
+        )),
+        docs: lines.doc_above(item.span.start),
+        methods: methods
+            .iter()
+            .map(|method| extract_method(method, lines))
+            .collect(),
+    }
+}
+
+fn extract_method(method: &Method, lines: &LineIndex) -> MethodDoc {
+    MethodDoc {
+        name: method.value.name.to_string(),
+        signature: method_signature(&method.value),
+        docs: lines.doc_above(method.span.start),
+    }
+}
+
+fn item_kind(node: &TopLevelNode) -> ItemKind {
+    match node {
+        TopLevelNode::Function { .. } => ItemKind::Function,
+        TopLevelNode::Extern { .. } => ItemKind::Extern,
+        TopLevelNode::Struct { .. } => ItemKind::Struct,
+        TopLevelNode::Global { .. } => ItemKind::Constant,
+        TopLevelNode::Enum { .. } => ItemKind::Enum,
+        TopLevelNode::Trait { .. } => ItemKind::Trait,
+        TopLevelNode::Alias { .. } => ItemKind::Alias,
+        TopLevelNode::Extend { .. } => ItemKind::Extension,
+    }
 }
 
 /// The group key for an `extend` target: the name a reader looks it up under. A
@@ -350,26 +436,6 @@ fn extend_target_key(target: &Type) -> String {
 /// records in `Member::is_pub`.
 fn method_visible(m: &haven_common::ast::MethodNode, in_trait_impl: bool) -> bool {
     m.is_pub || in_trait_impl
-}
-
-/// Render a type's methods under a `### Methods` heading nested in the type's
-/// `##` section, each method its own `#### <name>` subsection: a heading, its
-/// `hv` signature block, then its `///` doc block if it has one.
-fn render_methods(md: &mut String, methods: &[&Method], lines: &LineIndex) {
-    if methods.is_empty() {
-        return;
-    }
-    md.push_str("### Methods\n\n");
-    for m in methods {
-        md.push_str(&format!("#### `{}`\n\n", m.value.name));
-        md.push_str("```hv\n");
-        md.push_str(&method_signature(&m.value));
-        md.push_str("\n```\n\n");
-        if let Some(doc) = lines.doc_above(m.span.start) {
-            md.push_str(&doc);
-            md.push_str("\n\n");
-        }
-    }
 }
 
 /// Render a method's signature without its body: `[attrs] pub proc name<gens>(recv,
@@ -411,21 +477,6 @@ fn item_is_pub(node: &TopLevelNode) -> bool {
         // `extend` blocks are rendered as method sections under their target type
         // (see `render_file`), not as items here.
         TopLevelNode::Extend { .. } => false,
-    }
-}
-
-fn render_item(md: &mut String, item: &TopLevel, src: &str, lines: &LineIndex) {
-    let name = item_name(&item.value);
-    let signature = signature(&item.value, src, item.span.start, item.span.end);
-    let doc = lines.doc_above(item.span.start);
-
-    md.push_str(&format!("## `{}`\n\n", name));
-    md.push_str("```hv\n");
-    md.push_str(&signature);
-    md.push_str("\n```\n\n");
-    if let Some(doc) = doc {
-        md.push_str(&doc);
-        md.push_str("\n\n");
     }
 }
 
@@ -697,6 +748,474 @@ fn doc_body(line: &str) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
+// Markdown renderer
+// ---------------------------------------------------------------------------
+
+fn render_markdown(docs: &Documentation, out_dir: &Path) -> Result<(), ()> {
+    if let Err(e) = std::fs::create_dir_all(out_dir) {
+        eprintln!("havendoc: cannot create {}: {}", out_dir.display(), e);
+        return Err(());
+    }
+
+    let mut pages = Vec::with_capacity(docs.modules.len());
+    for module in &docs.modules {
+        let relative = title_to_rel_path(&module.title);
+        let path = out_dir.join(&relative);
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("havendoc: cannot create {}: {}", parent.display(), e);
+                return Err(());
+            }
+        write_file(&path, render_module_markdown(module).as_bytes())?;
+        pages.push((module.title.clone(), relative));
+    }
+
+    let tree = build_tree(&pages);
+    write_landing(out_dir, docs.package.as_deref(), &pages)?;
+    write_module_indexes(out_dir, &tree)
+}
+
+fn render_module_markdown(module: &ModuleDoc) -> String {
+    let mut markdown = format!("# `{}`\n\n", module.title);
+    if let Some(docs) = &module.docs {
+        markdown.push_str(docs);
+        markdown.push_str("\n\n");
+    }
+    if module.items.is_empty() {
+        markdown.push_str("_This module exposes no documented items._\n");
+        return markdown;
+    }
+
+    for item in &module.items {
+        markdown.push_str(&format!("## `{}`\n\n", item.name));
+        if item.kind == ItemKind::Extension {
+            markdown.push_str("_Methods on this type, declared in this module._\n\n");
+        } else if let Some(signature) = &item.signature {
+            markdown.push_str("```hv\n");
+            markdown.push_str(signature);
+            markdown.push_str("\n```\n\n");
+        }
+        if let Some(docs) = &item.docs {
+            markdown.push_str(docs);
+            markdown.push_str("\n\n");
+        }
+        render_methods_markdown(&mut markdown, &item.methods);
+    }
+    markdown
+}
+
+fn render_methods_markdown(markdown: &mut String, methods: &[MethodDoc]) {
+    if methods.is_empty() {
+        return;
+    }
+    markdown.push_str("### Methods\n\n");
+    for method in methods {
+        markdown.push_str(&format!("#### `{}`\n\n", method.name));
+        markdown.push_str("```hv\n");
+        markdown.push_str(&method.signature);
+        markdown.push_str("\n```\n\n");
+        if let Some(docs) = &method.docs {
+            markdown.push_str(docs);
+            markdown.push_str("\n\n");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Static HTML renderer
+// ---------------------------------------------------------------------------
+
+fn render_html(docs: &Documentation, out_dir: &Path) -> Result<(), ()> {
+    if let Err(e) = std::fs::create_dir_all(out_dir.join("assets")) {
+        eprintln!("havendoc: cannot create {}: {}", out_dir.display(), e);
+        return Err(());
+    }
+    write_file(&out_dir.join("assets/style.css"), HTML_STYLE.as_bytes())?;
+
+    let mut pages = Vec::with_capacity(docs.modules.len());
+    for module in &docs.modules {
+        let relative = title_to_html_path(&module.title);
+        let path = out_dir.join(&relative);
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("havendoc: cannot create {}: {}", parent.display(), e);
+                return Err(());
+            }
+        let body = render_module_html(module, &relative);
+        let page = html_shell(docs, &module.title, &relative, &body);
+        write_file(&path, page.as_bytes())?;
+        pages.push((module.title.clone(), relative));
+    }
+
+    let landing_path = Path::new("index.html");
+    let landing = render_html_landing(docs, &pages);
+    write_file(
+        &out_dir.join(landing_path),
+        html_shell(docs, docs.package.as_deref().unwrap_or("Haven API"), landing_path, &landing)
+            .as_bytes(),
+    )?;
+
+    let tree = build_tree(&pages);
+    write_html_module_indexes(docs, out_dir, &tree)
+}
+
+fn title_to_html_path(title: &str) -> PathBuf {
+    PathBuf::from(format!("{}.html", title))
+}
+
+fn render_module_html(module: &ModuleDoc, current: &Path) -> String {
+    let mut output = render_breadcrumbs(&module.title, current);
+    output.push_str("<header class=\"page-heading\"><p class=\"eyebrow\">Module</p><h1><code>");
+    output.push_str(&escape_html(&module.title));
+    output.push_str("</code></h1></header>");
+    if let Some(docs) = &module.docs {
+        output.push_str("<div class=\"prose module-docs\">");
+        output.push_str(&markdown_to_html(docs));
+        output.push_str("</div>");
+    }
+    if module.items.is_empty() {
+        output.push_str("<p class=\"empty\">This module exposes no documented items.</p>");
+        return output;
+    }
+
+    output.push_str("<div class=\"items\">");
+    for item in &module.items {
+        let anchor = item_anchor(item);
+        output.push_str("<section class=\"item\" id=\"");
+        output.push_str(&anchor);
+        output.push_str("\"><header class=\"item-heading\"><span class=\"kind\">");
+        output.push_str(item.kind.label());
+        output.push_str("</span><h2><a href=\"#");
+        output.push_str(&anchor);
+        output.push_str("\"><code>");
+        output.push_str(&escape_html(&item.name));
+        output.push_str("</code></a></h2></header>");
+        if item.kind == ItemKind::Extension {
+            output.push_str("<p class=\"muted\">Methods on this type declared in this module.</p>");
+        } else if let Some(signature) = &item.signature {
+            output.push_str(&code_block(signature));
+        }
+        if let Some(docs) = &item.docs {
+            output.push_str("<div class=\"prose\">");
+            output.push_str(&markdown_to_html(docs));
+            output.push_str("</div>");
+        }
+        if !item.methods.is_empty() {
+            output.push_str("<div class=\"methods\"><h3>Methods</h3>");
+            for method in &item.methods {
+                let method_anchor = format!("{}-method-{}", anchor, slug(&method.name));
+                output.push_str("<article class=\"method\" id=\"");
+                output.push_str(&method_anchor);
+                output.push_str("\"><h4><a href=\"#");
+                output.push_str(&method_anchor);
+                output.push_str("\"><code>");
+                output.push_str(&escape_html(&method.name));
+                output.push_str("</code></a></h4>");
+                output.push_str(&code_block(&method.signature));
+                if let Some(docs) = &method.docs {
+                    output.push_str("<div class=\"prose\">");
+                    output.push_str(&markdown_to_html(docs));
+                    output.push_str("</div>");
+                }
+                output.push_str("</article>");
+            }
+            output.push_str("</div>");
+        }
+        output.push_str("</section>");
+    }
+    output.push_str("</div>");
+    output
+}
+
+fn render_breadcrumbs(title: &str, current: &Path) -> String {
+    let prefix = root_prefix(current);
+    let parts: Vec<&str> = title.split('/').collect();
+    let mut output = format!(
+        "<nav class=\"breadcrumbs\" aria-label=\"Breadcrumb\"><a href=\"{}index.html\">Docs</a>",
+        prefix
+    );
+    let mut path = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        output.push_str("<span aria-hidden=\"true\">/</span>");
+        if index + 1 == parts.len() {
+            output.push_str("<span>");
+            output.push_str(&escape_html(part));
+            output.push_str("</span>");
+        } else {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(part);
+            output.push_str("<a href=\"");
+            output.push_str(&prefix);
+            output.push_str(&escape_html(&path));
+            output.push_str("/index.html\">");
+            output.push_str(&escape_html(part));
+            output.push_str("</a>");
+        }
+    }
+    output.push_str("</nav>");
+    output
+}
+
+fn render_html_landing(docs: &Documentation, pages: &[(String, PathBuf)]) -> String {
+    let (title, intro) = match docs.package.as_deref() {
+        Some(name) => (
+            format!("<code>{}</code>", escape_html(name)),
+            format!("API documentation for the <code>{}</code> Haven package.", escape_html(name)),
+        ),
+        None => ("Haven API".to_string(), "Generated API documentation.".to_string()),
+    };
+    let mut output = format!(
+        "<header class=\"page-heading landing-heading\"><p class=\"eyebrow\">Haven documentation</p><h1>{}</h1><p>{}</p></header><section><h2>Modules</h2><div class=\"module-grid\">",
+        title, intro
+    );
+    for (name, path) in pages {
+        output.push_str("<a class=\"module-card\" href=\"");
+        output.push_str(&escape_html(&path.to_string_lossy().replace('\\', "/")));
+        output.push_str("\"><code>");
+        output.push_str(&escape_html(name));
+        output.push_str("</code><span>Open module <span aria-hidden=\"true\">→</span></span></a>");
+    }
+    output.push_str("</div></section>");
+    output
+}
+
+fn html_shell(docs: &Documentation, title: &str, current: &Path, body: &str) -> String {
+    let prefix = root_prefix(current);
+    let navigation = render_html_navigation(docs, current, &prefix);
+    render_page_template(
+        &escape_html(title),
+        &prefix,
+        &docs.package.as_deref().map(escape_html).unwrap_or_default(),
+        &navigation,
+        body,
+    )
+}
+
+/// Expand the fixed placeholders in `page.html` in one pass. Replacement text
+/// is appended directly to the output and is never interpreted as template
+/// syntax, which keeps source documentation separate from the template itself.
+fn render_page_template(
+    title: &str,
+    root: &str,
+    package: &str,
+    navigation: &str,
+    content: &str,
+) -> String {
+    let mut output = String::with_capacity(HTML_PAGE_TEMPLATE.len() + content.len());
+    let mut remaining = HTML_PAGE_TEMPLATE;
+    while let Some(start) = remaining.find("{{") {
+        output.push_str(&remaining[..start]);
+        let after_open = &remaining[start + 2..];
+        let Some(close) = after_open.find("}}") else {
+            output.push_str(&remaining[start..]);
+            return output;
+        };
+        let token = after_open[..close].trim();
+        let replacement = match token {
+            "title" => title,
+            "root" => root,
+            "package" => package,
+            "navigation" => navigation,
+            "content" => content,
+            _ => {
+                output.push_str(&remaining[start..start + 2 + close + 2]);
+                remaining = &after_open[close + 2..];
+                continue;
+            }
+        };
+        output.push_str(replacement);
+        remaining = &after_open[close + 2..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+const HTML_PAGE_TEMPLATE: &str = include_str!("../assets/page.html");
+
+fn render_html_navigation(docs: &Documentation, current: &Path, prefix: &str) -> String {
+    let mut output = String::new();
+    for module in &docs.modules {
+        let path = title_to_html_path(&module.title);
+        let active = if path == current {
+            " class=\"active\" aria-current=\"page\""
+        } else {
+            ""
+        };
+        output.push_str("<li><a");
+        output.push_str(active);
+        output.push_str(" href=\"");
+        output.push_str(prefix);
+        output.push_str(&escape_html(&path.to_string_lossy().replace('\\', "/")));
+        output.push_str("\"><code>");
+        output.push_str(&escape_html(&module.title));
+        output.push_str("</code></a></li>");
+    }
+    output
+}
+
+fn write_html_module_indexes(
+    docs: &Documentation,
+    out_dir: &Path,
+    tree: &TreeNode,
+) -> Result<(), ()> {
+    for (name, node) in &tree.children {
+        write_html_index_rec(docs, out_dir, name, node)?;
+    }
+    Ok(())
+}
+
+fn write_html_index_rec(
+    docs: &Documentation,
+    out_dir: &Path,
+    title: &str,
+    node: &TreeNode,
+) -> Result<(), ()> {
+    if node.page.is_none() && !node.children.is_empty() {
+        let relative = PathBuf::from(title).join("index.html");
+        let mut body = render_breadcrumbs(title, &relative);
+        body.push_str("<header class=\"page-heading\"><p class=\"eyebrow\">Namespace</p><h1><code>");
+        body.push_str(&escape_html(title));
+        body.push_str("</code></h1></header><section><h2>Modules</h2><div class=\"module-grid\">");
+        for (child, child_node) in &node.children {
+            let link = if child_node.page.is_some() {
+                format!("{}.html", child)
+            } else {
+                format!("{}/index.html", child)
+            };
+            body.push_str("<a class=\"module-card\" href=\"");
+            body.push_str(&escape_html(&link));
+            body.push_str("\"><code>");
+            body.push_str(&escape_html(child));
+            body.push_str("</code><span>Open module <span aria-hidden=\"true\">→</span></span></a>");
+        }
+        body.push_str("</div></section>");
+        let page = html_shell(docs, title, &relative, &body);
+        let path = out_dir.join(&relative);
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("havendoc: cannot create {}: {}", parent.display(), e);
+                return Err(());
+            }
+        write_file(&path, page.as_bytes())?;
+    }
+    for (child, child_node) in &node.children {
+        write_html_index_rec(docs, out_dir, &format!("{}/{}", title, child), child_node)?;
+    }
+    Ok(())
+}
+
+fn markdown_to_html(markdown: &str) -> String {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    let parser = MarkdownParser::new_ext(markdown, options).map(|event| match event {
+        // Documentation may eventually come from untrusted registry packages.
+        // Preserve raw HTML visibly instead of injecting it into the output.
+        Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) if !safe_doc_url(&dest_url) => Event::Start(Tag::Link {
+            link_type,
+            dest_url: "#".into(),
+            title,
+            id,
+        }),
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) if !safe_doc_url(&dest_url) => Event::Start(Tag::Image {
+            link_type,
+            dest_url: "".into(),
+            title,
+            id,
+        }),
+        other => other,
+    });
+    let mut output = String::new();
+    html::push_html(&mut output, parser);
+    output
+}
+
+fn safe_doc_url(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty()
+        || url.starts_with('#')
+        || url.starts_with('/')
+        || url.starts_with("./")
+        || url.starts_with("../")
+    {
+        return true;
+    }
+    let scheme_end = url.find(':');
+    let path_start = url.find(['/', '?', '#']).unwrap_or(usize::MAX);
+    match scheme_end.filter(|colon| *colon < path_start) {
+        Some(colon) => matches!(
+            url[..colon].to_ascii_lowercase().as_str(),
+            "http" | "https" | "mailto"
+        ),
+        None => true,
+    }
+}
+
+fn code_block(code: &str) -> String {
+    format!(
+        "<pre class=\"signature\"><code class=\"language-hv\">{}</code></pre>",
+        escape_html(code)
+    )
+}
+
+fn item_anchor(item: &ItemDoc) -> String {
+    format!("{}-{}", item.kind.label(), slug(&item.name))
+}
+
+fn slug(value: &str) -> String {
+    let mut output = String::new();
+    let mut separated = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            output.push(character.to_ascii_lowercase());
+            separated = false;
+        } else if !separated && !output.is_empty() {
+            output.push('-');
+            separated = true;
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    if output.is_empty() { "item".to_string() } else { output }
+}
+
+fn root_prefix(path: &Path) -> String {
+    "../".repeat(path.parent().map_or(0, |parent| parent.components().count()))
+}
+
+fn escape_html(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            '\'' => output.push_str("&#39;"),
+            other => output.push(other),
+        }
+    }
+    output
+}
+
+const HTML_STYLE: &str = include_str!("../assets/style.css");
+
+// ---------------------------------------------------------------------------
 // Markdown indexes
 // ---------------------------------------------------------------------------
 
@@ -795,6 +1314,81 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_builds_a_renderer_independent_module_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("math.hv");
+        std::fs::write(
+            &path,
+            "/// Package arithmetic.\n\n/// Return the supplied value.\npub proc identity(value: i32) i32 { return value; }\n\nproc hidden() void {}\n",
+        )
+        .unwrap();
+        let source = SourceFile {
+            title: "sample/math".to_string(),
+            file: path,
+            package: Some("sample".to_string()),
+        };
+
+        let module = extract_module(&source).unwrap();
+
+        assert_eq!(module.title, "sample/math");
+        assert_eq!(module.docs.as_deref(), Some("Package arithmetic."));
+        assert_eq!(module.items.len(), 1);
+        assert_eq!(module.items[0].kind, ItemKind::Function);
+        assert_eq!(module.items[0].name, "identity");
+        assert_eq!(
+            module.items[0].signature.as_deref(),
+            Some("proc identity(value: i32) i32")
+        );
+        assert_eq!(
+            module.items[0].docs.as_deref(),
+            Some("Return the supplied value.")
+        );
+    }
+
+    #[test]
+    fn html_renderer_writes_a_portable_safe_static_site() {
+        let temp = tempfile::tempdir().unwrap();
+        let docs = Documentation {
+            package: Some("audio".to_string()),
+            modules: vec![ModuleDoc {
+                title: "audio/math".to_string(),
+                docs: Some(
+                    "Use **carefully**. <script>alert('no')</script> [unsafe](javascript:alert(1))"
+                        .to_string(),
+                ),
+                items: vec![ItemDoc {
+                    kind: ItemKind::Function,
+                    name: "identity".to_string(),
+                    signature: Some("proc identity(value: i32) i32".to_string()),
+                    docs: None,
+                    methods: Vec::new(),
+                }],
+            }],
+        };
+
+        render_html(&docs, temp.path()).unwrap();
+
+        assert!(temp.path().join("index.html").is_file());
+        assert!(temp.path().join("audio/index.html").is_file());
+        assert!(temp.path().join("assets/style.css").is_file());
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("assets/style.css")).unwrap(),
+            HTML_STYLE
+        );
+        assert!(!HTML_STYLE.contains("border-radius"));
+        assert!(HTML_STYLE.contains("scrollbar-color"));
+        assert!(HTML_STYLE.contains("::-webkit-scrollbar-thumb"));
+        let module = std::fs::read_to_string(temp.path().join("audio/math.html")).unwrap();
+        assert!(!module.contains("{{"));
+        assert!(module.contains("href=\"../assets/style.css\""));
+        assert!(module.contains("id=\"function-identity\""));
+        assert!(module.contains("<strong>carefully</strong>"));
+        assert!(module.contains("&lt;script&gt;alert('no')&lt;/script&gt;"));
+        assert!(!module.contains("<script>"));
+        assert!(!module.contains("javascript:"));
+    }
 
     #[test]
     fn package_input_uses_manifest_name_and_src_as_root() {
