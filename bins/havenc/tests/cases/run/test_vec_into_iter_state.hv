@@ -1,0 +1,41 @@
+// Consuming a Vec moves yielded elements out of its allocation. Breaking early
+// must destroy only the unconsumed suffix; the yielded owner is destroyed
+// separately at the end of its loop iteration.
+//@ exit: 0
+
+import std/vec { Vec }
+
+struct Owner { value: i32 }
+
+extend Owner: Delete {
+    proc delete(*self) {
+        print("drop "); println(self.value);
+    }
+}
+
+proc count<C: IntoIterator>(values: C) u64 {
+    let count: u64 = 0u64;
+    for (unused in values) {
+        count = count + 1u64;
+    }
+    return count;
+}
+
+proc main() i32 {
+    let numbers: Vec<i32> = Vec::<i32>::new();
+    numbers.push(10);
+    numbers.push(20);
+    numbers.push(30);
+    print("count "); println(count::<Vec<i32>>(numbers));
+
+    let values: Vec<Owner> = Vec::<Owner>::new();
+    values.push(Owner { value: 1 });
+    values.push(Owner { value: 2 });
+    values.push(Owner { value: 3 });
+
+    for (value in values) {
+        print("first "); println(value.value);
+        break;
+    }
+    return 0;
+}

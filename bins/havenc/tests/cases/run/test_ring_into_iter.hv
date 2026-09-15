@@ -1,0 +1,37 @@
+// Consuming Ring iteration preserves logical FIFO order across a wrapped
+// allocation. Breaking early destroys each unconsumed owning element once.
+//@ exit: 0
+
+import std/ring { Ring }
+
+struct Owner { value: i32 }
+
+extend Owner: Delete {
+    proc delete(*self) {
+        print("drop "); println(self.value);
+    }
+}
+
+proc main() i32 {
+    let wrapped: Ring<i32> = Ring::<i32>::with_capacity(4u64);
+    wrapped.push(1);
+    wrapped.push(2);
+    wrapped.push(3);
+    wrapped.pop();
+    wrapped.push(4);
+    wrapped.push(5);
+    for (value in wrapped) {
+        print(value); print(" ");
+    }
+    println("");
+
+    let owners: Ring<Owner> = Ring::<Owner>::with_capacity(4u64);
+    owners.push(Owner { value: 6 });
+    owners.push(Owner { value: 7 });
+    owners.push(Owner { value: 8 });
+    for (owner in owners) {
+        print("first "); println(owner.value);
+        break;
+    }
+    return 0;
+}

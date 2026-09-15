@@ -100,6 +100,9 @@ pub struct Def<'a> {
 /// cover every `Vec` instance.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TyHead {
+    /// A bare type parameter used as an `extend` target. It is never produced by
+    /// `of`: lookup tries it only after no concrete-head member applies.
+    Blanket,
     /// A struct, enum or enum-payload definition, generic template included.
     Def(DefId),
     Void, Bool,
@@ -173,7 +176,7 @@ impl TyHead {
     /// structural target is unaffected — it is found through its receiver.
     pub fn is_nameable(self) -> bool {
         !matches!(self,
-            TyHead::Pointer | TyHead::Slice | TyHead::Array
+            TyHead::Blanket | TyHead::Pointer | TyHead::Slice | TyHead::Array
             | TyHead::Simd | TyHead::Function)
     }
 
@@ -183,6 +186,7 @@ impl TyHead {
     /// the emitted name is never parsed back.
     pub fn tag(self) -> &'static str {
         match self {
+            TyHead::Blanket => "blanket",
             TyHead::Def(_) => "ty",
             TyHead::Void => "void", TyHead::Bool => "bool",
             TyHead::Int8 => "i8", TyHead::Int16 => "i16", TyHead::Int32 => "i32", TyHead::Int64 => "i64",
@@ -230,8 +234,9 @@ pub struct Member<'a> {
 /// Methods and associated functions, keyed by `(receiver head, method name)`.
 ///
 /// [`TyHead`] supports methods on primitives and structural types, which have no
-/// `DefId`. Only one method may occupy a `(head, name)` slot, so structural impls
-/// cannot be specialized.
+/// `DefId`, plus one fallback `Blanket` head. Only one method may occupy a
+/// `(head, name)` slot. A concrete head takes precedence over `Blanket`, while
+/// structural impls sharing a head still cannot specialize one another.
 pub type MemberTable<'a> = HashMap<(TyHead, &'a str), Member<'a>>;
 
 /// What a monomorphized instance came from.

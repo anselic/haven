@@ -136,6 +136,36 @@ fn resolve_bounded_method<'a>(
             }
     }
     let Some((params, return_type)) = sig else {
+        // A blanket method may be available from the subject's existing bounds
+        // even though none of those traits declares the method itself. For
+        // example, `I: Iterator` satisfies the blanket `IntoIterator for I`, so
+        // a generic `for` may call `I::into_iter` without redundantly declaring
+        // `I: IntoIterator` too.
+        let blanket = cx.members
+            .get(&(haven_common::defs::TyHead::Blanket, field)).cloned();
+        if let Some(m) = blanket.filter(|m| m.receiver != Receiver::Associated) {
+            let impl_params: Vec<&'a str> = m.generics.iter().map(|g| match g {
+                GenericParam::Type { name, .. } => *name,
+                GenericParam::Const(name, _) => *name,
+            }).collect();
+            let mut u = Unified::default();
+            if unify(&m.self_ty, &self_ty, &impl_params, &mut u)
+                && bounds_hold(&cx.impls, &cx.generic_bounds, &m.generics, &u)
+                && let Some((_, all_params, return_type)) =
+                    method_signature(cx, &m, &u, field, &[], span)?
+            {
+                let params = &all_params[1..];
+                if args.len() != params.len() {
+                    return Err(Error::new(*span, format!(
+                        "method '{}' expects {} argument(s), got {}",
+                        field, params.len(), args.len())));
+                }
+                for (pty, arg) in params.iter().zip(args) {
+                    check_expr(cx, pty, arg)?;
+                }
+                return Ok(Some(return_type));
+            }
+        }
         return Err(Error::new(*span,
             format!("no method '{}' on {}", field, subject_name))
             .with_note("add a trait bound that provides this method"));

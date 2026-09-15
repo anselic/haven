@@ -1108,16 +1108,17 @@ fn parse_stmt<'tks, 'src: 'tks>() -> P<'tks, 'src, Stmt<'src>> {
             });
 
         // `for (x in <expr>) <body>`. The iterand is a full expression, evaluated
-        // *once* into a hidden `$for_iter` local before the loop; the loop then
-        // advances that one iterator. Parenthesizing `x in <expr>` mirrors
+        // *once* by converting it into a hidden `$for_iter` local before the
+        // loop; the loop then advances that one iterator. Parenthesizing
+        // `x in <expr>` mirrors
         // `if`/`while`/`match` and dodges the `Name { ... }` struct-literal reading
         // of the iterand, so it needs no grammatical restriction — a call like
         // `xs.iter()` is fine, since it is evaluated exactly once.
         //
-        // Desugars into the `Iterator` protocol:
+        // Desugars through the `IntoIterator` and `Iterator` protocols:
         //
         //     {
-        //         let $for_iter = <expr>;
+        //         let $for_iter = <expr>.into_iter();
         //         while (true) {
         //             match ($for_iter.next()) {
         //                 Option::Some(x) -> <body>
@@ -1180,11 +1181,22 @@ fn parse_stmt<'tks, 'src: 'tks>() -> P<'tks, 'src, Stmt<'src>> {
                     condition: Metadata::new(ExprNode::Bool(true), span),
                     body: Box::new(match_stmt),
                 }, span);
-                // `let $for_iter = <expr>;` — evaluate the iterand exactly once.
+                // `<expr>.into_iter()` — evaluate the iterand exactly once and
+                // retain the resulting iterator for the duration of the loop.
+                let into_iter = Metadata::new(ExprNode::Call {
+                    func: Box::new(Metadata::new(
+                        ExprNode::Access {
+                            base: Box::new(iter),
+                            field: "into_iter",
+                        }, iter_span)),
+                    type_args: Vec::new(),
+                    args: Vec::new(),
+                }, iter_span);
+                // `let $for_iter = <expr>.into_iter();`
                 let declare = Metadata::new(StmtNode::Declare {
                     name: FOR_ITER,
                     ty: None,
-                    value: iter,
+                    value: into_iter,
                 }, iter_span);
                 StmtNode::Block(vec![declare, while_])
             });

@@ -1269,6 +1269,8 @@ pub struct ImplDecl<'a> {
     /// definition to name — see [`TyHead`](crate::defs::TyHead).
     pub self_ty: Type<'a>,
     /// `self_ty`'s head, precomputed: what a candidate receiver is looked up by.
+    /// A bare parameter target uses `TyHead::Blanket`, which lookup considers
+    /// only after no concrete-head member applies.
     pub head: TyHead,
     /// The impl's own type parameters (the `T` of `extend [T]`), inferred from
     /// the free names in `self_ty`. Empty for a fully concrete target.
@@ -1303,9 +1305,20 @@ pub fn bounds_hold<'a>(
     generics: &[GenericParam<'a>],
     u: &Unified<'a>,
 ) -> bool {
+    bounds_hold_inner(impls, scope, generics, u, &mut Vec::new())
+}
+
+fn bounds_hold_inner<'a>(
+    impls: &[ImplDecl<'a>],
+    scope: &ParamBounds<'a>,
+    generics: &[GenericParam<'a>],
+    u: &Unified<'a>,
+    visiting: &mut Vec<(Type<'a>, DefId)>,
+) -> bool {
     generics.iter().all(|g| match g {
         GenericParam::Type { name, bounds } => match u.types.get(name) {
-            Some(arg) => bounds.iter().all(|b| implements(impls, scope, arg, b.def)),
+            Some(arg) => bounds.iter()
+                .all(|b| implements_inner(impls, scope, arg, b.def, visiting)),
             None => true,
         },
         GenericParam::Const(_, _) => true,
@@ -1313,13 +1326,24 @@ pub fn bounds_hold<'a>(
 }
 
 /// Test whether an impl target unifies with `ty` and its `where` clause holds.
-/// Symbolic parameters use the bounds in `scope`. Conditional impls recurse into
-/// their arguments, which are strict subterms of the original type.
+/// Symbolic parameters use the bounds in `scope`. Conditional impls may recurse
+/// through other conformance questions; `visiting` prevents cyclic blanket
+/// assumptions from proving each other or overflowing the solver.
 pub fn implements<'a>(
     impls: &[ImplDecl<'a>],
     scope: &ParamBounds<'a>,
     ty: &Type<'a>,
     trait_: DefId,
+) -> bool {
+    implements_inner(impls, scope, ty, trait_, &mut Vec::new())
+}
+
+fn implements_inner<'a>(
+    impls: &[ImplDecl<'a>],
+    scope: &ParamBounds<'a>,
+    ty: &Type<'a>,
+    trait_: DefId,
+    visiting: &mut Vec<(Type<'a>, DefId)>,
 ) -> bool {
     // checked before the head lookup because a parameter *has* no head, and
     // because a declared bound is the stronger statement: it is what every
@@ -1328,8 +1352,14 @@ pub fn implements<'a>(
         return scope.get(p).is_some_and(|bs| bs.contains(&trait_));
     }
     let Some(head) = TyHead::of(ty) else { return false };
-    impls.iter().any(|i| {
-        if i.trait_ != trait_ || i.head != head { return false; }
+    if visiting.iter().any(|(seen_ty, seen_trait)| seen_ty == ty && *seen_trait == trait_) {
+        return false;
+    }
+    visiting.push((ty.clone(), trait_));
+    let implemented = impls.iter().any(|i| {
+        if i.trait_ != trait_ || (i.head != head && i.head != TyHead::Blanket) {
+            return false;
+        }
         let params: Vec<&'a str> = i.generics.iter().map(|g| match g {
             GenericParam::Type { name, .. } => *name,
             GenericParam::Const(name, _) => *name,
@@ -1337,8 +1367,11 @@ pub fn implements<'a>(
         let mut u = Unified::default();
         // `u` binds the impl's parameters to types written in *the caller's*
         // parameter space, so the same `scope` keeps applying as this recurses.
-        unify(&i.self_ty, ty, &params, &mut u) && bounds_hold(impls, scope, &i.generics, &u)
-    })
+        unify(&i.self_ty, ty, &params, &mut u)
+            && bounds_hold_inner(impls, scope, &i.generics, &u, visiting)
+    });
+    visiting.pop();
+    implemented
 }
 
 /// The fields carried by an enum variant, stored as `(name, type)` pairs.

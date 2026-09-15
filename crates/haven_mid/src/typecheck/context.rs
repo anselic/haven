@@ -283,7 +283,11 @@ impl<'a> Context<'a> {
         // so both the head lookup and the unification want template form. Before
         // mono, and for anything that is not an instance, this is the identity.
         let ty = deinstance(&self.instances, ty);
-        let m = self.members.get(&(TyHead::of(&ty)?, name))?;
+        // A concrete/specialized impl wins. Only when its head has no matching
+        // member do we consider the single blanket slot for this method name.
+        let m = TyHead::of(&ty)
+            .and_then(|head| self.members.get(&(head, name)))
+            .or_else(|| self.members.get(&(TyHead::Blanket, name)))?;
         let params = param_names(&m.generics);
         let mut u = Unified::default();
         unify(&m.self_ty, &ty, &params, &mut u).then_some((m, u))
@@ -386,21 +390,32 @@ impl<'a> Context<'a> {
                     return Err(format!("cannot project associated type '{}' from '{}'",
                         assoc, self.show(&base)));
                 };
-                let mut bindings = Vec::new();
-                for imp in &self.impls {
-                    if trait_.is_some_and(|selected| selected != imp.trait_) { continue; }
-                    let Some(trait_def) = self.traits.get(&imp.trait_) else { continue };
-                    if imp.head != head || trait_def.assoc_type(assoc).is_none() { continue; }
-                    let params = param_names(&imp.generics);
-                    let mut u = Unified::default();
-                    if !unify(&imp.self_ty, &lookup, &params, &mut u)
-                        || !bounds_hold(&self.impls, scope, &imp.generics, &u) {
-                        continue;
+                let collect = |wanted_head| {
+                    let mut bindings = Vec::new();
+                    for imp in &self.impls {
+                        if trait_.is_some_and(|selected| selected != imp.trait_) { continue; }
+                        let Some(trait_def) = self.traits.get(&imp.trait_) else { continue };
+                        if imp.head != wanted_head || trait_def.assoc_type(assoc).is_none() {
+                            continue;
+                        }
+                        let params = param_names(&imp.generics);
+                        let mut u = Unified::default();
+                        if !unify(&imp.self_ty, &lookup, &params, &mut u)
+                            || !bounds_hold(&self.impls, scope, &imp.generics, &u) {
+                            continue;
+                        }
+                        if let Some((_, bound)) = imp.assoc_bindings.iter()
+                            .find(|(name, _)| name == assoc) {
+                            bindings.push((imp.trait_, u.apply(bound)));
+                        }
                     }
-                    if let Some((_, bound)) = imp.assoc_bindings.iter().find(|(name, _)| name == assoc) {
-                        bindings.push((imp.trait_, u.apply(bound)));
-                    }
-                }
+                    bindings
+                };
+                // Concrete impls specialize blanket ones. This is enough
+                // coherence for the deliberately small blanket model: one slot
+                // per method, with an exact-head override when present.
+                let mut bindings = collect(head);
+                if bindings.is_empty() { bindings = collect(TyHead::Blanket); }
                 match bindings.as_slice() {
                     [(_, bound)] => recurse(bound),
                     [] => Err(format!("type '{}' has no associated type '{}'",

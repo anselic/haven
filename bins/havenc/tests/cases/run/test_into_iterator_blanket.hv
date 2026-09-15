@@ -1,0 +1,28 @@
+// The blanket `I: Iterator -> I: IntoIterator` applies while `I` is still a
+// symbolic type parameter, not only after monomorphization makes it concrete.
+//@ exit: 0
+
+struct Counter { cur: i32, end: i32 }
+
+extend Counter: Iterator {
+    type Item = i32;
+    proc next(*self) Option<i32> {
+        if (self.cur >= self.end) { return Option::None; } else {}
+        let value: i32 = self.cur;
+        self.cur = self.cur + 1;
+        return Option::Some(value);
+    }
+}
+
+proc count<I: Iterator>(values: I) u64 {
+    let count: u64 = 0u64;
+    for (unused in values) {
+        count = count + 1u64;
+    }
+    return count;
+}
+
+proc main() i32 {
+    let n: u64 = count::<Counter>(Counter { cur: 2, end: 6 });
+    if (n == 4u64) { return 0; } else { return 1; }
+}

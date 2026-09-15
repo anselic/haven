@@ -8,6 +8,7 @@ pub import string { String }
 pub import vec { Vec }
 pub import result { Result, Unit }
 pub import option { Option }
+pub import iter { IntoIterator, Iterator } // needed for `for` loops
 
 import fmt { display_print, display_println }
 

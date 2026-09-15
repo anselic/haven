@@ -11,3 +11,16 @@ pub trait Iterator {
     type Item;
     proc next(*self) Option<Self::Item>;
 }
+
+/// Conversion into an iterator. The resulting iterator defines the yielded
+/// item type through its `Iterator::Item` associated type.
+pub trait IntoIterator {
+    type IntoIter: Iterator;
+    proc into_iter(self) Self::IntoIter;
+}
+
+/// Every iterator is already an iterator source; converting it is the identity.
+extend I: IntoIterator where I: Iterator {
+    type IntoIter = I;
+    proc into_iter(self) I { return self; }
+}

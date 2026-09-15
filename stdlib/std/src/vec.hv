@@ -1,13 +1,14 @@
 /// A growable, heap-backed array. It owns its buffer and destroys its elements
 /// when dropped. Use `with_capacity` and `push_within_capacity` when growth must
-/// not allocate.
+/// not allocate. Consuming iteration walks front to back, moves each element out
+/// of the Vec, and leaves the original Vec unavailable after the loop.
 
 // Growth doubles the capacity. `ptr_write` initializes unused slots without
 // trying to destroy their old contents.
 
 import alloc { alloc, realloc, dealloc }
 import option { Option }
-import iter { Iterator }
+import iter { IntoIterator, Iterator }
 
 pub struct Vec<T> {
     data: *T,  /// heap buffer, or null when cap == 0
@@ -221,6 +222,65 @@ extend VecIter<T>: Iterator {
         let p: *T = self.vec.get_ptr(self.pos).unwrap();
         self.pos = self.pos + 1u64;
         return Option::Some(p);
+    }
+}
+
+/// An owning iterator over a Vec's allocation. Elements before `pos` have been
+/// moved out and are no longer live; elements in `pos..len` remain initialized.
+/// Dropping the iterator destroys only that remaining suffix, then frees the
+/// allocation. This makes an early exit from iteration behave like dropping the
+/// unconsumed part of the original Vec.
+pub struct VecIntoIter<T> {
+    data: *T,
+    pos: u64,
+    len: u64,
+    cap: u64,
+}
+
+extend VecIntoIter<T>: Iterator {
+    type Item = T;
+
+    proc next(*self) Option<T> {
+        if (self.pos >= self.len) {
+            return Option::None;
+        }
+
+        // Move the value out of its slot. Advancing `pos` makes the slot dead,
+        // so `delete` below will not destroy the moved value a second time.
+        let value: T = ptr_read::<T>(&self.data[self.pos]);
+        self.pos = self.pos + 1u64;
+        return Option::Some(value);
+    }
+}
+
+extend VecIntoIter<T>: Delete {
+    proc delete(*self) {
+        if (self.pos < self.len) {
+            drop_in_place::<T>(&self.data[self.pos], self.len - self.pos);
+        }
+        if (self.cap != 0u64) {
+            dealloc::<T>(self.data);
+        }
+    }
+}
+
+extend Vec<T>: IntoIterator {
+    type IntoIter = VecIntoIter<T>;
+
+    proc into_iter(self) VecIntoIter<T> {
+        let iter: VecIntoIter<T> = VecIntoIter::<T> {
+            data: self.data,
+            pos: 0u64,
+            len: self.len,
+            cap: self.cap,
+        };
+
+        // Ownership of the allocation now belongs to `iter`. Leave `self`
+        // empty so its automatic cleanup cannot destroy or free it again.
+        self.data = null::<*T>();
+        self.len = 0u64;
+        self.cap = 0u64;
+        return iter;
     }
 }
 

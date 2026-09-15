@@ -7,7 +7,7 @@
 import alloc { alloc, dealloc }
 import bits { next_power_of_two_u64 }
 import option { Option }
-import iter { Iterator }
+import iter { IntoIterator, Iterator }
 
 /// A queue whose indices wrap around a fixed buffer.
 pub struct Ring<T> {
@@ -175,6 +175,65 @@ extend RingIter<T>: Iterator {
         let p: *T = self.ring.get_ptr(self.pos).unwrap();
         self.pos = self.pos + 1u64;
         return Option::Some(p);
+    }
+}
+
+/// An owning iterator over a Ring's allocation. `head` and `len` describe the
+/// live, potentially wrapped region that has not yet been moved out.
+pub struct RingIntoIter<T> {
+    data: *T,
+    head: u64,
+    len: u64,
+    mask: u64,
+    cap: u64,
+}
+
+extend RingIntoIter<T>: Iterator {
+    type Item = T;
+
+    proc next(*self) Option<T> {
+        if (self.len == 0u64) {
+            return Option::None;
+        }
+
+        let slot: *T = &self.data[self.head];
+        self.head = (self.head + 1u64) & self.mask;
+        self.len = self.len - 1u64;
+        return Option::Some(ptr_read::<T>(slot));
+    }
+}
+
+extend RingIntoIter<T>: Delete {
+    proc delete(*self) {
+        let i: u64 = 0u64;
+        while (i < self.len) {
+            drop_in_place::<T>(&self.data[(self.head + i) & self.mask], 1u64);
+            i = i + 1u64;
+        }
+        if (self.cap != 0u64) {
+            dealloc::<T>(self.data);
+        }
+    }
+}
+
+extend Ring<T>: IntoIterator {
+    type IntoIter = RingIntoIter<T>;
+
+    proc into_iter(self) RingIntoIter<T> {
+        let iter: RingIntoIter<T> = RingIntoIter::<T> {
+            data: self.data,
+            head: self.head,
+            len: self.len,
+            mask: self.mask,
+            cap: self.cap,
+        };
+
+        self.data = null::<*T>();
+        self.head = 0u64;
+        self.len = 0u64;
+        self.mask = 0u64;
+        self.cap = 0u64;
+        return iter;
     }
 }
 

@@ -332,7 +332,9 @@ fn member_of<'a>(members: &MemberTable<'a>, instances: &Instances<'a>, ty: &Type
         // because `Vec$i32` was never registered against anything, and the
         // unification because that is the form the impl was written in.
         let ty = deinstance(instances, ty);
-        let m = members.get(&(TyHead::of(&ty)?, name))?;
+        let m = TyHead::of(&ty)
+            .and_then(|head| members.get(&(head, name)))
+            .or_else(|| members.get(&(TyHead::Blanket, name)))?;
         let params: Vec<&'a str> = m.generics.iter().map(|g| match g {
             GenericParam::Type { name, .. } => *name,
             GenericParam::Const(name, _) => *name,
@@ -441,25 +443,32 @@ impl<'p, 'a> Mono<'p, 'a> {
     ) -> Option<Type<'a>> {
         let base = self.deinstance(base);
         let head = TyHead::of(&base)?;
-        let mut found = None;
-        for imp in self.impls {
-            if trait_.is_some_and(|selected| selected != imp.trait_) { continue; }
-            if imp.head != head { continue; }
-            let Some((_, binding)) = imp.assoc_bindings.iter()
-                .find(|(name, _)| *name == assoc) else { continue };
-            let params: Vec<&'a str> = imp.generics.iter().map(|g| match g {
-                GenericParam::Type { name, .. } => *name,
-                GenericParam::Const(name, _) => *name,
-            }).collect();
-            let mut u = Unified::default();
-            if !unify(&imp.self_ty, &base, &params, &mut u)
-                || !bounds_hold(self.impls, &ParamBounds::new(), &imp.generics, &u) {
-                continue;
+        let find = |wanted_head| {
+            let mut found = Vec::new();
+            for imp in self.impls {
+                if trait_.is_some_and(|selected| selected != imp.trait_) { continue; }
+                if imp.head != wanted_head { continue; }
+                let Some((_, binding)) = imp.assoc_bindings.iter()
+                    .find(|(name, _)| *name == assoc) else { continue };
+                let params: Vec<&'a str> = imp.generics.iter().map(|g| match g {
+                    GenericParam::Type { name, .. } => *name,
+                    GenericParam::Const(name, _) => *name,
+                }).collect();
+                let mut u = Unified::default();
+                if !unify(&imp.self_ty, &base, &params, &mut u)
+                    || !bounds_hold(self.impls, &ParamBounds::new(), &imp.generics, &u) {
+                    continue;
+                }
+                found.push(u.apply(binding));
             }
-            if found.is_some() { return None; }
-            found = Some(u.apply(binding));
+            found
+        };
+        let mut found = find(head);
+        if found.is_empty() { found = find(TyHead::Blanket); }
+        match found.as_slice() {
+            [binding] => Some(binding.clone()),
+            _ => None,
         }
-        found
     }
 
     /// Record a generic-struct instantiation request, return its mangled name

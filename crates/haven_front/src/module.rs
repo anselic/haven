@@ -544,11 +544,11 @@ fn alias_deps_ready<'a>(
 ///
 ///   * a single-segment, argument-less path (`T`, never `geo::Point` or
 ///     `Vec<T>`),
-///   * a *proper subterm* of the target, and
+///   * a *proper subterm* of the target, or the whole target when that target is
+///     a bare unknown name used for a blanket impl, and
 ///   * not a type in scope, per `known`.
 ///
-/// Bare targets are always treated as named types, so blanket impls are not
-/// supported. `decl` identifies const argument positions when available.
+/// `decl` identifies const argument positions when available.
 fn impl_generics<'a, 'd>(
     target: &Type<'a>,
     known: &dyn Fn(&str) -> bool,
@@ -629,9 +629,14 @@ fn impl_generics<'a, 'd>(
         }
     }
     let mut out = Vec::new();
-    // descend one level before collecting, so the target itself is never taken
-    // for a parameter.
+    // A bare unknown target is a blanket parameter (`extend I: Trait where ...`).
+    // A known bare name remains an ordinary concrete type.
     match target {
+        Type::Path { path, args } if args.is_empty()
+            && path.as_single().is_some_and(|name| !known(name)) =>
+        {
+            push_ty(path.as_single().unwrap(), &mut out);
+        }
         Type::Path { path, args } => {
             let params = decl(path);
             for (i, a) in args.iter().enumerate() {
@@ -674,7 +679,10 @@ fn resolve_extend_target<'a>(
     let mut resolved = target.clone();
     rw.ty(&mut resolved, &generic_names(generics));
     if !errs.is_empty() { return None; }
-    let head = TyHead::of(&resolved)?;
+    let head = match &resolved {
+        Type::Param(_) => TyHead::Blanket,
+        _ => TyHead::of(&resolved)?,
+    };
     Some((resolved, head))
 }
 
@@ -3418,9 +3426,10 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 is_pub: rm.is_pub,
                 module: m.mid,
             });
-            // one impl per `(head, method)`: see `MemberTable`. Two `extend`
-            // blocks reaching the same slot are ambiguous at every call site, so
-            // this is an error rather than a silent last-one-wins.
+            // one impl per `(head, method)`: see `MemberTable`. A blanket and a
+            // concrete impl occupy distinct heads (the concrete one wins at a
+            // call); two blocks reaching the same slot remain ambiguous, so this
+            // is an error rather than a silent last-one-wins.
             if prev.is_some() {
                 // a default body is not written in the block it lands in, so
                 // "second definition" pointing at that block would send the

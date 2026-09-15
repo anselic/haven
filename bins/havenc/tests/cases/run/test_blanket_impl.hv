@@ -1,0 +1,38 @@
+// A bare type-parameter target applies through its where-bound, while a
+// concrete impl of the same trait and method takes precedence.
+//@ exit: 0
+
+trait Mark {}
+
+trait Pick {
+    type Output;
+    proc pick(self) Self::Output;
+}
+
+struct General {}
+struct Special {}
+
+extend General: Mark {}
+extend Special: Mark {}
+
+extend I: Pick where I: Mark {
+    type Output = i32;
+    proc pick(self) i32 { return 1; }
+}
+
+extend Special: Pick {
+    type Output = i32;
+    proc pick(self) i32 { return 2; }
+}
+
+proc choose<T: Pick>(value: T) T::Output {
+    return value.pick();
+}
+
+proc main() i32 {
+    let general: i32 = choose::<General>(General {});
+    let special: i32 = choose::<Special>(Special {});
+    if (general != 1) { return 1; } else {}
+    if (special != 2) { return 2; } else {}
+    return 0;
+}

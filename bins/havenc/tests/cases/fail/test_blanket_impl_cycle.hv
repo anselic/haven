@@ -1,0 +1,16 @@
+// Cyclic blanket assumptions prove nothing and must fail normally rather than
+// overflowing the conformance solver.
+//@ error: does not implement trait
+
+trait A {}
+trait B {}
+
+extend I: A where I: B {}
+extend I: B where I: A {}
+
+proc needs_a<T: A>(value: T) void {}
+
+proc main() i32 {
+    needs_a::<i32>(1);
+    return 0;
+}
