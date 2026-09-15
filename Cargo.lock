@@ -375,6 +375,8 @@ dependencies = [
  "clap",
  "haven_common",
  "haven_front",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

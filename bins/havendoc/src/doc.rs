@@ -1,4 +1,4 @@
-//! `havendoc`: turn `.hv` source into mdBook-ready Markdown.
+//! `havendoc`: turn `.hv` source into Markdown.
 //!
 //! Signatures come from the parsed AST. Since the lexer discards comments, doc
 //! bodies are read from the source and matched to items by span.
@@ -6,12 +6,10 @@
 //! Output layout, given `havendoc std -o docs`:
 //! ```text
 //! docs/
-//!   book.toml
-//!   src/
-//!     SUMMARY.md
-//!     std/alloc.md
-//!     std/dsp/osc.md
-//!     ...
+//!   index.md
+//!   std/alloc.md
+//!   std/dsp/osc.md
+//!   ...
 //! ```
 
 use std::collections::BTreeMap;
@@ -34,25 +32,25 @@ pub fn generate(args: &DocArgs) -> Result<(), ()> {
         return Err(());
     }
 
-    let src_dir = args.out.join("src");
-    if let Err(e) = std::fs::create_dir_all(&src_dir) {
-        eprintln!("havendoc: cannot create {}: {}", src_dir.display(), e);
+    if let Err(e) = std::fs::create_dir_all(&args.out) {
+        eprintln!("havendoc: cannot create {}: {}", args.out.display(), e);
         return Err(());
     }
 
-    // (module title, page path relative to src/) for the SUMMARY, in the order
-    // pages were emitted.
+    // Module title and page path relative to the output directory.
     let mut pages: Vec<(String, PathBuf)> = Vec::new();
 
-    for (strip_base, file) in &files {
-        let title = module_title(strip_base, file);
-        let rel_md = title_to_rel_path(&title);
-        let page_path = src_dir.join(&rel_md);
+    for source in &files {
+        let rel_md = title_to_rel_path(&source.title);
+        let page_path = args.out.join(&rel_md);
 
-        let markdown = match render_file(&title, file) {
+        let markdown = match render_file(&source.title, &source.file) {
             Ok(md) => md,
             Err(()) => {
-                eprintln!("havendoc: skipping {} (failed to parse)", file.display());
+                eprintln!(
+                    "havendoc: skipping {} (failed to parse)",
+                    source.file.display()
+                );
                 continue;
             }
         };
@@ -66,7 +64,7 @@ pub fn generate(args: &DocArgs) -> Result<(), ()> {
             eprintln!("havendoc: cannot write {}: {}", page_path.display(), e);
             continue;
         }
-        pages.push((title, rel_md));
+        pages.push((source.title.clone(), rel_md));
     }
 
     if pages.is_empty() {
@@ -74,17 +72,22 @@ pub fn generate(args: &DocArgs) -> Result<(), ()> {
         return Err(());
     }
 
-    // Stable, human-friendly ordering in the sidebar.
+    // Stable, human-friendly ordering in generated indexes.
     pages.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Build a directory tree from the `a/b/c` page titles so nested modules
-    // (`dsp/osc`) render as collapsible subsections instead of a flat list.
+    // Build a directory tree from `a/b/c` page titles so directories without a
+    // corresponding module can get a useful Markdown index.
     let tree = build_tree(&pages);
-    write_landing(&src_dir, "haven std", &pages)?;
-    write_module_indexes(&src_dir, &tree)?;
-    write_summary(&src_dir, &tree)?;
-    write_book_toml(&args.out, "haven std")?;
-    write_theme(&args.out)?;
+    let package_name = files
+        .first()
+        .and_then(|source| source.package.as_deref())
+        .filter(|name| {
+            files
+                .iter()
+                .all(|source| source.package.as_deref() == Some(*name))
+        });
+    write_landing(&args.out, package_name, &pages)?;
+    write_module_indexes(&args.out, &tree)?;
 
     println!(
         "havendoc: wrote {} page(s) to {}",
@@ -94,20 +97,32 @@ pub fn generate(args: &DocArgs) -> Result<(), ()> {
     Ok(())
 }
 
-/// Recursively gather `.hv` files from each input. Returns `(strip_base, file)`
-/// pairs, where `strip_base` is the path prefix stripped off `file` to form its
-/// module title. For a directory input it's the directory's *parent*, so the
-/// directory name is kept (`std/` -> `std/dsp/osc`); for a file input it's the
-/// file's parent, so a lone `foo/bar.hv` titles as just `bar`.
-fn collect_hv_files(inputs: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+struct SourceFile {
+    title: String,
+    file: PathBuf,
+    package: Option<String>,
+}
+
+/// Recursively gather `.hv` files from each input and assign their module
+/// titles. A directory containing `vestry.toml` is a package: its manifest name
+/// becomes the title's first component and paths are relative to its `src/`
+/// directory. Other directory inputs keep their directory name, while a single
+/// file uses just its stem.
+fn collect_hv_files(inputs: &[PathBuf]) -> Vec<SourceFile> {
     let mut out = Vec::new();
     for input in inputs {
         if input.is_dir() {
-            let base = input.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
-            walk_dir(&base, input, &mut out);
+            match package_source(input) {
+                Ok(Some((name, src))) => walk_dir(&src, &src, Some(&name), &mut out),
+                Ok(None) => {
+                    let base = input.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+                    walk_dir(&base, input, None, &mut out);
+                }
+                Err(()) => {}
+            }
         } else if is_hv(input) {
             let base = input.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
-            out.push((base, input.clone()));
+            push_source(&base, None, input, &mut out);
         } else {
             eprintln!("havendoc: skipping {} (not a .hv file)", input.display());
         }
@@ -115,7 +130,58 @@ fn collect_hv_files(inputs: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
     out
 }
 
-fn walk_dir(base: &Path, dir: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
+/// If `dir` is a Vestry package, return its name and source directory. A present
+/// but invalid manifest is diagnosed and treated as an invalid input rather
+/// than silently falling back to ordinary-directory behavior.
+fn package_source(dir: &Path) -> Result<Option<(String, PathBuf)>, ()> {
+    let manifest_path = dir.join("vestry.toml");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+
+    let text = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        eprintln!(
+            "havendoc: cannot read {}: {}",
+            manifest_path.display(),
+            e
+        );
+    })?;
+    let manifest: toml::Value = toml::from_str(&text).map_err(|e| {
+        eprintln!("havendoc: invalid {}: {}", manifest_path.display(), e);
+    })?;
+    let name = manifest
+        .get("project")
+        .and_then(|project| project.get("name"))
+        .and_then(toml::Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            eprintln!(
+                "havendoc: {} has no non-empty `project.name`",
+                manifest_path.display()
+            );
+        })?;
+    if name == "." || name == ".." || name.contains(['/', '\\']) {
+        eprintln!(
+            "havendoc: package name {:?} in {} cannot be used as a documentation path",
+            name,
+            manifest_path.display()
+        );
+        return Err(());
+    }
+
+    let src = dir.join("src");
+    if !src.is_dir() {
+        eprintln!(
+            "havendoc: package {} has no source directory at {}",
+            name,
+            src.display()
+        );
+        return Err(());
+    }
+    Ok(Some((name.to_string(), src)))
+}
+
+fn walk_dir(base: &Path, dir: &Path, prefix: Option<&str>, out: &mut Vec<SourceFile>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -128,11 +194,24 @@ fn walk_dir(base: &Path, dir: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
     paths.sort();
     for path in paths {
         if path.is_dir() {
-            walk_dir(base, &path, out);
+            walk_dir(base, &path, prefix, out);
         } else if is_hv(&path) {
-            out.push((base.to_path_buf(), path));
+            push_source(base, prefix, &path, out);
         }
     }
+}
+
+fn push_source(base: &Path, prefix: Option<&str>, file: &Path, out: &mut Vec<SourceFile>) {
+    let relative = module_title(base, file);
+    let title = match prefix {
+        Some(prefix) => format!("{}/{}", prefix, relative),
+        None => relative,
+    };
+    out.push(SourceFile {
+        title,
+        file: file.to_path_buf(),
+        package: prefix.map(str::to_owned),
+    });
 }
 
 fn is_hv(p: &Path) -> bool {
@@ -618,23 +697,25 @@ fn doc_body(line: &str) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
-// Book scaffolding
+// Markdown indexes
 // ---------------------------------------------------------------------------
 
-/// Write the book's landing page (`src/index.md`). mdBook renders the *first*
-/// chapter to the book root's `index.html`, and `write_summary` lists this as a
-/// prefix chapter ahead of everything else, so this becomes the home page a
-/// bare visit to the book lands on (à la `doc.rust-lang.org/std/`). It's a title,
-/// a blurb, and an auto-generated index of every documented module.
-fn write_landing(src_dir: &Path, title: &str, pages: &[(String, PathBuf)]) -> Result<(), ()> {
-    let mut md = format!(
-        "# {}\n\nThe `haven` standard library.\n\n## Modules\n\n",
-        title
-    );
+/// Write the documentation landing page (`index.md`) with links to every
+/// documented module.
+fn write_landing(
+    out_dir: &Path,
+    package: Option<&str>,
+    pages: &[(String, PathBuf)],
+) -> Result<(), ()> {
+    let mut md = match package {
+        Some(name) => format!("# `{}`\n\nAPI documentation for the `{}` Haven package.\n\n", name, name),
+        None => "# Haven API\n\nGenerated API documentation.\n\n".to_string(),
+    };
+    md.push_str("## Modules\n\n");
     for (title, path) in pages {
         md.push_str(&format!("- [{}]({})\n", title, path.to_string_lossy().replace('\\', "/")));
     }
-    let path = src_dir.join("index.md");
+    let path = out_dir.join("index.md");
     std::fs::write(&path, md).map_err(|e| {
         eprintln!("havendoc: cannot write {}: {}", path.display(), e);
     })
@@ -646,7 +727,7 @@ fn write_landing(src_dir: &Path, title: &str, pages: &[(String, PathBuf)]) -> Re
 /// generated index page so they can still be a clickable parent chapter.
 #[derive(Default)]
 struct TreeNode {
-    /// Rel-to-`src/` `.md` path of this node's own documented page, if any.
+    /// Path of this node's own documented page, relative to the output directory.
     page: Option<PathBuf>,
     /// Child modules/directories, keyed by their last path component. `BTreeMap`
     /// keeps the sidebar order stable and alphabetical.
@@ -670,19 +751,19 @@ fn build_tree(pages: &[(String, PathBuf)]) -> TreeNode {
 /// Write an index page for every directory node that lacks its own `.hv` page,
 /// so it can serve as a clickable parent chapter (à la a Rust module page that
 /// lists its submodules). Real module pages are left untouched.
-fn write_module_indexes(src_dir: &Path, tree: &TreeNode) -> Result<(), ()> {
+fn write_module_indexes(out_dir: &Path, tree: &TreeNode) -> Result<(), ()> {
     for (name, node) in &tree.children {
-        write_index_rec(src_dir, name, node)?;
+        write_index_rec(out_dir, name, node)?;
     }
     Ok(())
 }
 
-fn write_index_rec(src_dir: &Path, path: &str, node: &TreeNode) -> Result<(), ()> {
+fn write_index_rec(out_dir: &Path, path: &str, node: &TreeNode) -> Result<(), ()> {
     if node.page.is_none() && !node.children.is_empty() {
         let mut md = format!("# `{}`\n\n## Modules\n\n", path);
         for (child, child_node) in &node.children {
             // Links are relative to this index page's own directory
-            // (`src/<path>/index.md`), so a child is just its last component.
+            // (`<out>/<path>/index.md`), so a child is just its last component.
             let link = if child_node.page.is_some() {
                 format!("{}.md", child)
             } else {
@@ -690,7 +771,7 @@ fn write_index_rec(src_dir: &Path, path: &str, node: &TreeNode) -> Result<(), ()
             };
             md.push_str(&format!("- [{}]({})\n", child, link));
         }
-        let page_path = src_dir.join(path).join("index.md");
+        let page_path = out_dir.join(path).join("index.md");
         if let Some(parent) = page_path.parent()
             && let Err(e) = std::fs::create_dir_all(parent) {
                 eprintln!("havendoc: cannot create {}: {}", parent.display(), e);
@@ -699,124 +780,7 @@ fn write_index_rec(src_dir: &Path, path: &str, node: &TreeNode) -> Result<(), ()
         write_file(&page_path, md.as_bytes())?;
     }
     for (child, child_node) in &node.children {
-        write_index_rec(src_dir, &format!("{}/{}", path, child), child_node)?;
-    }
-    Ok(())
-}
-
-fn write_summary(src_dir: &Path, tree: &TreeNode) -> Result<(), ()> {
-    // The landing page (`index.md`) goes first as a prefix chapter (no list
-    // marker), so mdBook renders it to the book root's `index.html`. The rest is
-    // an indented tree: nesting depth = directory depth, which mdBook turns into
-    // collapsible subsections.
-    let mut summary = String::from("# Summary\n\n[Overview](index.md)\n\n");
-    for (name, node) in &tree.children {
-        emit_summary_node(&mut summary, name, name, node, 0);
-    }
-    let path = src_dir.join("SUMMARY.md");
-    std::fs::write(&path, summary).map_err(|e| {
-        eprintln!("havendoc: cannot write {}: {}", path.display(), e);
-    })
-}
-
-/// Append one chapter line (4-space indent per level, as mdBook requires for
-/// nesting) plus its descendants. `path` is the full title path used for link
-/// resolution; `name` is just the displayed last component.
-fn emit_summary_node(out: &mut String, path: &str, name: &str, node: &TreeNode, depth: usize) {
-    let indent = "    ".repeat(depth);
-    // Summary links resolve from `src/`, so use the full path. A directory
-    // without its own page links to the index we generated for it.
-    let link = match &node.page {
-        Some(rel) => rel.to_string_lossy().replace('\\', "/"),
-        None => format!("{}/index.md", path),
-    };
-    out.push_str(&format!("{}- [{}]({})\n", indent, name, link));
-    for (child, child_node) in &node.children {
-        emit_summary_node(out, &format!("{}/{}", path, child), child, child_node, depth + 1);
-    }
-}
-
-fn write_book_toml(out: &Path, title: &str) -> Result<(), ()> {
-    // The Oxocarbon theme reuses mdBook's built-in `navy` slot for its dark
-    // variant (navy already selects the dark syntax-highlight stylesheet) and
-    // `light` for its light variant; see `write_theme`. `navy` is therefore the
-    // default and the preferred dark theme.
-    let toml = format!(
-        "[book]\ntitle = \"{}\"\nlanguage = \"en\"\nsrc = \"src\"\n\n\
-         [output.html]\ndefault-theme = \"navy\"\npreferred-dark-theme = \"navy\"\nhash-files = false\n",
-        title.replace('"', "\\\"")
-    );
-    let path = out.join("book.toml");
-    std::fs::write(&path, toml).map_err(|e| {
-        eprintln!("havendoc: cannot write {}: {}", path.display(), e);
-    })
-}
-
-/// Oxocarbon (nyoom-engineering, an IBM Carbon Design System palette) as an
-/// mdBook theme, emitted so a plain `havendoc` run needs no manual theming.
-///
-/// Only `theme/css/variables.css` and `theme/highlight.js` are overridden:
-/// mdBook falls back to its built-in `index.hbs`/`book.js` for everything else.
-/// (`highlight.js` is the one vendored mdBook internal; see `THEME_HIGHLIGHT_JS`
-/// for why.) The dark variant is mapped onto the built-in
-/// `navy` theme slot (which already loads the dark highlight CSS) and the light
-/// variant onto `light`; the trailing rules restrict the theme picker to just
-/// those two and relabel them "Oxocarbon" / "Oxocarbon Light".
-const THEME_VARIABLES_CSS: &str = include_str!("../assets/variables.css");
-
-/// `theme/fonts/fonts.css`, overriding mdBook's default Open Sans / Source Code
-/// Pro `@font-face` set with Geist / Geist Mono. Uses mdBook's `{{ resource }}`
-/// helper, so it is rendered as a template at book-build time.
-const THEME_FONTS_CSS: &str = include_str!("../assets/fonts.css");
-
-/// `theme/highlight.js`: mdBook's bundled highlight.js (10.1.1, BSD-3-Clause)
-/// with a haven (`hv`) language grammar appended. mdBook highlights client-side
-/// and has no append hook, only a wholesale `theme/highlight.js` override, so the
-/// core is necessarily vendored and version-pinned here. Without it, ```` ```hv ````
-/// fences render unhighlighted since stock highlight.js has no `hv` language. The
-/// grammar emits standard hljs scopes (`keyword`/`string`/`number`/`meta`/`type`
-/// /...), which the theme's highlight CSS already colors. To refresh the base:
-/// grab `highlight.js` from any `mdbook build` output and re-append the grammar.
-const THEME_HIGHLIGHT_JS: &str = include_str!("../assets/highlight.js");
-
-/// The Geist family (variable, weight axis 100-900) plus its SIL OFL license,
-/// embedded so a plain `havendoc` run ships self-contained fonts. `(filename,
-/// bytes)`; mdBook copies everything in `theme/fonts/` into the book and
-/// content-hashes the woff2s. The `OFL.txt` accompanies the fonts as the license
-/// requires.
-const THEME_FONTS: &[(&str, &[u8])] = &[
-    ("Geist.woff2", include_bytes!("../assets/fonts/Geist.woff2")),
-    ("Geist-Italic.woff2", include_bytes!("../assets/fonts/Geist-Italic.woff2")),
-    ("GeistMono.woff2", include_bytes!("../assets/fonts/GeistMono.woff2")),
-    ("GeistMono-Italic.woff2", include_bytes!("../assets/fonts/GeistMono-Italic.woff2")),
-    ("OFL.txt", include_bytes!("../assets/fonts/OFL.txt")),
-];
-
-/// Write the theme override under `<out>/theme`: the Oxocarbon color variables
-/// (`css/variables.css`), the haven syntax-highlighting grammar (`highlight.js`),
-/// plus the Geist fonts and their `@font-face` declarations (`fonts/`). mdBook
-/// falls back to its built-in `index.hbs`/`book.js`/`general.css` for everything
-/// else.
-fn write_theme(out: &Path) -> Result<(), ()> {
-    let theme = out.join("theme");
-
-    let css_dir = theme.join("css");
-    if let Err(e) = std::fs::create_dir_all(&css_dir) {
-        eprintln!("havendoc: cannot create {}: {}", css_dir.display(), e);
-        return Err(());
-    }
-    write_file(&css_dir.join("variables.css"), THEME_VARIABLES_CSS.as_bytes())?;
-
-    write_file(&theme.join("highlight.js"), THEME_HIGHLIGHT_JS.as_bytes())?;
-
-    let fonts_dir = theme.join("fonts");
-    if let Err(e) = std::fs::create_dir_all(&fonts_dir) {
-        eprintln!("havendoc: cannot create {}: {}", fonts_dir.display(), e);
-        return Err(());
-    }
-    write_file(&fonts_dir.join("fonts.css"), THEME_FONTS_CSS.as_bytes())?;
-    for (name, bytes) in THEME_FONTS {
-        write_file(&fonts_dir.join(name), bytes)?;
+        write_index_rec(out_dir, &format!("{}/{}", path, child), child_node)?;
     }
     Ok(())
 }
@@ -826,4 +790,43 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), ()> {
     std::fs::write(path, bytes).map_err(|e| {
         eprintln!("havendoc: cannot write {}: {}", path.display(), e);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_input_uses_manifest_name_and_src_as_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("checkout-name-does-not-matter");
+        std::fs::create_dir_all(package.join("src/dsp")).unwrap();
+        std::fs::write(
+            package.join("vestry.toml"),
+            "[project]\nname = \"audio\"\nkind = [\"lib\"]\n",
+        )
+        .unwrap();
+        std::fs::write(package.join("src/lib.hv"), "").unwrap();
+        std::fs::write(package.join("src/dsp/osc.hv"), "").unwrap();
+        std::fs::write(package.join("build.hv"), "").unwrap();
+
+        let files = collect_hv_files(&[package]);
+        let titles: Vec<&str> = files.iter().map(|file| file.title.as_str()).collect();
+
+        assert_eq!(titles, ["audio/dsp/osc", "audio/lib"]);
+    }
+
+    #[test]
+    fn ordinary_directory_keeps_its_directory_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("sources");
+        std::fs::create_dir_all(input.join("nested")).unwrap();
+        std::fs::write(input.join("root.hv"), "").unwrap();
+        std::fs::write(input.join("nested/item.hv"), "").unwrap();
+
+        let files = collect_hv_files(&[input]);
+        let titles: Vec<&str> = files.iter().map(|file| file.title.as_str()).collect();
+
+        assert_eq!(titles, ["sources/nested/item", "sources/root"]);
+    }
 }

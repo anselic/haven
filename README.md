@@ -6,7 +6,7 @@ for DSP and audio plugin development.
 This repository includes:
 - `vestry`: build system and project manager for Haven projects
 - `havenc`: the compiler for the haven programming language
-- `havendoc`: a documentation generator for haven projects, built for mdBook
+- `havendoc`: a documentation generator for haven projects
 
 > [!NOTE]
 > This is very alpha and work in progress, codebase can be messy and bugs may
