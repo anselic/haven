@@ -1,9 +1,0 @@
-[project]
-name = "example_plugin"
-version = "0.1.0"
-kind = ["cdylib"]
-build = "build.hv"
-
-[dependencies]
-plug = { git = "https://github.com/anselic/plug" }
-dsp = { git = "https://github.com/anselic/dsp" }
