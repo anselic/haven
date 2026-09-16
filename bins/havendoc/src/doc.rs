@@ -826,11 +826,16 @@ fn render_methods_markdown(markdown: &mut String, methods: &[MethodDoc]) {
 // ---------------------------------------------------------------------------
 
 fn render_html(docs: &Documentation, out_dir: &Path) -> Result<(), ()> {
-    if let Err(e) = std::fs::create_dir_all(out_dir.join("assets")) {
+    let assets_dir = out_dir.join("assets");
+    let fonts_dir = assets_dir.join("fonts");
+    if let Err(e) = std::fs::create_dir_all(&fonts_dir) {
         eprintln!("havendoc: cannot create {}: {}", out_dir.display(), e);
         return Err(());
     }
-    write_file(&out_dir.join("assets/style.css"), HTML_STYLE.as_bytes())?;
+    write_file(&assets_dir.join("style.css"), HTML_STYLE.as_bytes())?;
+    for (name, contents) in HTML_FONT_ASSETS {
+        write_file(&fonts_dir.join(name), contents)?;
+    }
 
     let mut pages = Vec::with_capacity(docs.modules.len());
     for module in &docs.modules {
@@ -1214,6 +1219,25 @@ fn escape_html(value: &str) -> String {
 }
 
 const HTML_STYLE: &str = include_str!("../assets/style.css");
+const HTML_FONT_ASSETS: &[(&str, &[u8])] = &[
+    (
+        "Geist-VariableFont_wght.ttf",
+        include_bytes!("../assets/fonts/Geist-VariableFont_wght.ttf"),
+    ),
+    (
+        "Geist-Italic-VariableFont_wght.ttf",
+        include_bytes!("../assets/fonts/Geist-Italic-VariableFont_wght.ttf"),
+    ),
+    (
+        "GeistMono-VariableFont_wght.ttf",
+        include_bytes!("../assets/fonts/GeistMono-VariableFont_wght.ttf"),
+    ),
+    (
+        "GeistMono-Italic-VariableFont_wght.ttf",
+        include_bytes!("../assets/fonts/GeistMono-Italic-VariableFont_wght.ttf"),
+    ),
+    ("OFL.txt", include_bytes!("../assets/fonts/OFL.txt")),
+];
 
 // ---------------------------------------------------------------------------
 // Markdown indexes
@@ -1377,7 +1401,17 @@ mod tests {
             std::fs::read_to_string(temp.path().join("assets/style.css")).unwrap(),
             HTML_STYLE
         );
+        for (name, contents) in HTML_FONT_ASSETS {
+            assert_eq!(
+                std::fs::read(temp.path().join("assets/fonts").join(name)).unwrap(),
+                *contents
+            );
+        }
+        assert!(HTML_STYLE.contains("font-family: \"Geist\""));
+        assert!(HTML_STYLE.contains("font-family: \"Geist Mono\""));
+        assert!(HTML_STYLE.contains("font-weight: 100 900"));
         assert!(!HTML_STYLE.contains("border-radius"));
+        assert!(!HTML_STYLE.contains("--accent"));
         assert!(HTML_STYLE.contains("scrollbar-color"));
         assert!(HTML_STYLE.contains("::-webkit-scrollbar-thumb"));
         let module = std::fs::read_to_string(temp.path().join("audio/math.html")).unwrap();
