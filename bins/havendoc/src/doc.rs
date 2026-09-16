@@ -103,7 +103,6 @@ enum ItemKind {
     Enum,
     Trait,
     Alias,
-    Extension,
 }
 
 impl ItemKind {
@@ -116,7 +115,6 @@ impl ItemKind {
             ItemKind::Enum => "enum",
             ItemKind::Trait => "trait",
             ItemKind::Alias => "alias",
-            ItemKind::Extension => "extension",
         }
     }
 }
@@ -125,8 +123,7 @@ impl ItemKind {
 struct ItemDoc {
     kind: ItemKind,
     name: String,
-    /// Haven declaration without its implementation body. Extension groups do
-    /// not have a single declaration, so their signature is absent.
+    /// Haven declaration without its implementation body.
     signature: Option<String>,
     docs: Option<String>,
     methods: Vec<MethodDoc>,
@@ -310,9 +307,9 @@ fn extract_module(source: &SourceFile) -> Result<ModuleDoc, ()> {
     // `extend`/inherent-method blocks were parsed into `Extend` items. Group each
     // block's *visible* methods (public, or any method of a trait impl) under the
     // type name they extend, so they render as a section of that type rather than
-    // as standalone blocks. A target with no declared type in this file (a
-    // builtin, or an imported type) keeps its own group, rendered after the
-    // declared items.
+    // as standalone blocks. Extensions of builtins, imported types, and generic
+    // parameters are intentionally omitted until havendoc has a proper
+    // implementations view that can show their trait and bounds.
     let mut method_groups: BTreeMap<String, Vec<&Method>> = BTreeMap::new();
     for item in &items {
         if let TopLevelNode::Extend { methods, trait_, target, .. } = &item.value {
@@ -347,24 +344,6 @@ fn extract_module(source: &SourceFile) -> Result<ModuleDoc, ()> {
                 documented_items.push(extract_item(item, &src, &lines, &methods));
             }
         }
-    }
-
-    // methods extending a type not declared here (`extend i32`, or an imported
-    // type). Only emitted when a group actually has visible methods.
-    for (target, methods) in &method_groups {
-        if methods.is_empty() {
-            continue;
-        }
-        documented_items.push(ItemDoc {
-            kind: ItemKind::Extension,
-            name: target.clone(),
-            signature: None,
-            docs: None,
-            methods: methods
-                .iter()
-                .map(|method| extract_method(method, &lines))
-                .collect(),
-        });
     }
 
     Ok(ModuleDoc {
@@ -414,7 +393,7 @@ fn item_kind(node: &TopLevelNode) -> ItemKind {
         TopLevelNode::Enum { .. } => ItemKind::Enum,
         TopLevelNode::Trait { .. } => ItemKind::Trait,
         TopLevelNode::Alias { .. } => ItemKind::Alias,
-        TopLevelNode::Extend { .. } => ItemKind::Extension,
+        TopLevelNode::Extend { .. } => unreachable!("extend blocks are handled separately"),
     }
 }
 
@@ -788,9 +767,7 @@ fn render_module_markdown(module: &ModuleDoc) -> String {
 
     for item in &module.items {
         markdown.push_str(&format!("## `{}`\n\n", item.name));
-        if item.kind == ItemKind::Extension {
-            markdown.push_str("_Methods on this type, declared in this module._\n\n");
-        } else if let Some(signature) = &item.signature {
+        if let Some(signature) = &item.signature {
             markdown.push_str("```hv\n");
             markdown.push_str(signature);
             markdown.push_str("\n```\n\n");
@@ -895,9 +872,7 @@ fn render_module_html(module: &ModuleDoc, current: &Path) -> String {
         output.push_str("\"><code>");
         output.push_str(&escape_html(&item.name));
         output.push_str("</code></a></h2></header>");
-        if item.kind == ItemKind::Extension {
-            output.push_str("<p class=\"muted\">Methods on this type declared in this module.</p>");
-        } else if let Some(signature) = &item.signature {
+        if let Some(signature) = &item.signature {
             output.push_str(&code_block(signature));
         }
         if let Some(docs) = &item.docs {
