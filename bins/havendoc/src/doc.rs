@@ -27,9 +27,9 @@ mod markdown;
 #[cfg(test)]
 mod tests;
 
-use extract::{collect_hv_files, extract_module};
 #[cfg(test)]
 use extract::SourceFile;
+use extract::{collect_hv_files, extract_module};
 use html::render_html;
 #[cfg(test)]
 use html::{HTML_FONT_ASSETS, HTML_STYLE};

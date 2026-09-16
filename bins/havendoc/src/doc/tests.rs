@@ -58,6 +58,14 @@ fn html_renderer_writes_a_portable_safe_static_site() {
     assert!(temp.path().join("index.html").is_file());
     assert!(temp.path().join("audio/index.html").is_file());
     assert!(temp.path().join("assets/style.css").is_file());
+    assert!(temp.path().join("assets/search.js").is_file());
+    let search_index = std::fs::read_to_string(temp.path().join("assets/search-index.js")).unwrap();
+    assert!(search_index.contains("[\"audio/math\",\"module\",\"audio/math.html\"]"));
+    assert!(
+        search_index.contains(
+            "[\"audio/math::identity\",\"function\",\"audio/math.html#function-identity\"]"
+        )
+    );
     assert_eq!(
         std::fs::read_to_string(temp.path().join("assets/style.css")).unwrap(),
         HTML_STYLE
@@ -78,11 +86,54 @@ fn html_renderer_writes_a_portable_safe_static_site() {
     let module = std::fs::read_to_string(temp.path().join("audio/math.html")).unwrap();
     assert!(!module.contains("{{"));
     assert!(module.contains("href=\"../assets/style.css\""));
+    assert!(module.contains("src=\"../assets/search-index.js\""));
+    assert!(module.contains("data-root=\"../\""));
+    assert!(module.contains("aria-controls=\"search-dialog\""));
     assert!(module.contains("id=\"function-identity\""));
     assert!(module.contains("<strong>carefully</strong>"));
     assert!(module.contains("&lt;script&gt;alert('no')&lt;/script&gt;"));
     assert!(!module.contains("<script>"));
     assert!(!module.contains("javascript:"));
+    let landing = std::fs::read_to_string(temp.path().join("index.html")).unwrap();
+    assert!(landing.contains("API documentation for the <code>audio</code> Haven package."));
+}
+
+#[test]
+fn lib_inner_docs_replace_html_landing_intro() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("lib.hv");
+    std::fs::write(
+        &source_path,
+        "//! # Audio library\n//!\n//! Use **carefully**. <script>bad()</script>\n//!\n//! ```hv\n//! proc play() void\n//! ```\npub proc play() void {}\n",
+    )
+    .unwrap();
+    let source = SourceFile {
+        title: "audio/lib".to_string(),
+        file: source_path,
+        package: Some("audio".to_string()),
+    };
+    let module = extract_module(&source).unwrap();
+    assert!(
+        module
+            .docs
+            .as_deref()
+            .unwrap()
+            .starts_with("# Audio library")
+    );
+    assert!(module.items[0].docs.is_none());
+    let docs = Documentation {
+        package: Some("audio".to_string()),
+        modules: vec![module],
+    };
+    let out = temp.path().join("site");
+    render_html(&docs, &out).unwrap();
+    let landing = std::fs::read_to_string(out.join("index.html")).unwrap();
+    assert!(landing.contains("<h1>Audio library</h1>"));
+    assert!(landing.contains("Use <strong>carefully</strong>."));
+    assert!(landing.contains("&lt;script&gt;bad()&lt;/script&gt;"));
+    assert!(landing.contains("<span class=\"syntax-keyword\">proc</span>"));
+    assert!(!landing.contains("API documentation for the"));
+    assert!(!landing.contains("<script>"));
 }
 
 #[test]

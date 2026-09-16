@@ -606,15 +606,23 @@ impl LineIndex {
         Some(collected.join("\n"))
     }
 
-    /// A leading `///` block at the top of the file, but only when it's set off
-    /// from the first item by a blank line (so it reads as module-level prose,
-    /// not the first item's doc).
+    /// A leading `//!` block documents the module. A leading `///` block also
+    /// documents it when a blank line separates it from the first item.
     fn module_doc(&self) -> Option<String> {
         let mut i = 0;
         let mut collected: Vec<&str> = Vec::new();
+        let inner = self
+            .lines
+            .first()
+            .is_some_and(|(_, line)| line.trim_start().starts_with("//!"));
         while i < self.lines.len() {
             let text = self.lines[i].1.trim_start();
-            match doc_body(text) {
+            let body = if inner {
+                module_doc_body(text)
+            } else {
+                doc_body(text)
+            };
+            match body {
                 Some(rest) => {
                     collected.push(rest);
                     i += 1;
@@ -627,13 +635,18 @@ impl LineIndex {
         }
         // Require a blank separator (or EOF) after the block; otherwise it's
         // glued to the first item and `doc_above` will claim it there.
-        let separated = i >= self.lines.len() || self.lines[i].1.trim().is_empty();
+        let separated = inner || i >= self.lines.len() || self.lines[i].1.trim().is_empty();
         if separated {
             Some(collected.join("\n"))
         } else {
             None
         }
     }
+}
+
+fn module_doc_body(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("//!")?;
+    Some(rest.strip_prefix(' ').unwrap_or(rest))
 }
 
 /// If `line` (already left-trimmed) is a `///` doc comment, return its body with

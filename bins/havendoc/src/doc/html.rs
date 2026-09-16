@@ -1,5 +1,7 @@
 use super::*;
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser as MarkdownParser, Tag, TagEnd, html};
+use pulldown_cmark::{
+    CodeBlockKind, Event, HeadingLevel, Options, Parser as MarkdownParser, Tag, TagEnd, html,
+};
 
 // ---------------------------------------------------------------------------
 // Static HTML renderer
@@ -13,6 +15,11 @@ pub(super) fn render_html(docs: &Documentation, out_dir: &Path) -> Result<(), ()
         return Err(());
     }
     write_file(&assets_dir.join("style.css"), HTML_STYLE.as_bytes())?;
+    write_file(&assets_dir.join("search.js"), HTML_SEARCH_SCRIPT.as_bytes())?;
+    write_file(
+        &assets_dir.join("search-index.js"),
+        render_search_index(docs).as_bytes(),
+    )?;
     for (name, contents) in HTML_FONT_ASSETS {
         write_file(&fonts_dir.join(name), contents)?;
     }
@@ -52,6 +59,58 @@ pub(super) fn render_html(docs: &Documentation, out_dir: &Path) -> Result<(), ()
 
 fn title_to_html_path(title: &str) -> PathBuf {
     PathBuf::from(format!("{}.html", title))
+}
+
+fn render_search_index(docs: &Documentation) -> String {
+    let mut output = String::from("window.havenSearchEntries=[");
+    for module in &docs.modules {
+        let path = title_to_html_path(&module.title)
+            .to_string_lossy()
+            .replace('\\', "/");
+        push_search_entry(&mut output, &module.title, "module", &path);
+        for item in &module.items {
+            let anchor = item_anchor(item);
+            push_search_entry(
+                &mut output,
+                &format!("{}::{}", module.title, item.name),
+                item.kind.label(),
+                &format!("{path}#{anchor}"),
+            );
+            for method in &item.methods {
+                push_search_entry(
+                    &mut output,
+                    &format!("{}::{}::{}", module.title, item.name, method.name),
+                    "method",
+                    &format!("{path}#{anchor}-method-{}", slug(&method.name)),
+                );
+            }
+        }
+    }
+    output.push_str("];");
+    output
+}
+
+fn push_search_entry(output: &mut String, label: &str, kind: &str, path: &str) {
+    output.push('[');
+    for value in [label, kind, path] {
+        output.push('"');
+        for character in value.chars() {
+            match character {
+                '"' => output.push_str("\\\""),
+                '\\' => output.push_str("\\\\"),
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                '\u{2028}' => output.push_str("\\u2028"),
+                '\u{2029}' => output.push_str("\\u2029"),
+                c if c.is_control() => output.push_str(&format!("\\u{:04x}", c as u32)),
+                c => output.push(c),
+            }
+        }
+        output.push_str("\",");
+    }
+    output.pop();
+    output.push_str("],");
 }
 
 fn render_module_html(module: &ModuleDoc, current: &Path) -> String {
@@ -161,10 +220,36 @@ fn render_html_landing(docs: &Documentation, pages: &[(String, PathBuf)]) -> Str
             "Generated API documentation.".to_string(),
         ),
     };
-    let mut output = format!(
-        "<header class=\"page-heading landing-heading\"><p class=\"eyebrow\">Haven documentation</p><h1>{}</h1><p>{}</p></header><section><h2>Modules</h2><div class=\"module-grid\">",
-        title, intro
+    let lib_title = docs.package.as_ref().map(|name| format!("{name}/lib"));
+    let lib_docs = docs
+        .modules
+        .iter()
+        .find(|module| match &lib_title {
+            Some(expected) => module.title == *expected,
+            None => module.title.rsplit('/').next() == Some("lib"),
+        })
+        .and_then(|module| module.docs.as_deref());
+    let mut output = String::from(
+        "<header class=\"page-heading landing-heading\"><p class=\"eyebrow\">Haven documentation</p>",
     );
+    if let Some(markdown) = lib_docs {
+        let has_title = matches!(
+            MarkdownParser::new(markdown).next(),
+            Some(Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            }))
+        );
+        if !has_title {
+            output.push_str(&format!("<h1>{title}</h1>"));
+        }
+        output.push_str("<div class=\"prose\">");
+        output.push_str(&markdown_to_html(markdown));
+        output.push_str("</div>");
+    } else {
+        output.push_str(&format!("<h1>{title}</h1><p>{intro}</p>"));
+    }
+    output.push_str("</header><section><h2>Modules</h2><div class=\"module-grid\">");
     for (name, path) in pages {
         output.push_str("<a class=\"module-card\" href=\"");
         output.push_str(&escape_html(&path.to_string_lossy().replace('\\', "/")));
@@ -447,6 +532,7 @@ fn escape_html(value: &str) -> String {
 }
 
 pub(super) const HTML_STYLE: &str = include_str!("../../assets/style.css");
+const HTML_SEARCH_SCRIPT: &str = include_str!("../../assets/search.js");
 pub(super) const HTML_FONT_ASSETS: &[(&str, &[u8])] = &[
     (
         "Geist-VariableFont_wght.ttf",
@@ -469,7 +555,8 @@ pub(super) const HTML_FONT_ASSETS: &[(&str, &[u8])] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{code_block, markdown_to_html};
+    use super::{code_block, markdown_to_html, push_search_entry, render_search_index};
+    use crate::doc::{Documentation, ItemDoc, ItemKind, MethodDoc, ModuleDoc};
 
     #[test]
     fn highlights_haven_signatures_and_fences() {
@@ -482,5 +569,33 @@ mod tests {
         assert!(prose.contains("<span class=\"syntax-keyword\">let</span>"));
         assert!(prose.contains("&lt;unsafe&gt;"));
         assert!(prose.contains("<code class=\"language-text\">let plain"));
+    }
+
+    #[test]
+    fn search_index_links_to_methods_and_escapes_labels() {
+        let docs = Documentation {
+            package: None,
+            modules: vec![ModuleDoc {
+                title: "audio/voice".to_string(),
+                docs: None,
+                items: vec![ItemDoc {
+                    kind: ItemKind::Struct,
+                    name: "Voice".to_string(),
+                    signature: None,
+                    docs: None,
+                    methods: vec![MethodDoc {
+                        name: "play".to_string(),
+                        signature: String::new(),
+                        docs: None,
+                    }],
+                }],
+            }],
+        };
+        let index = render_search_index(&docs);
+        assert!(index.contains("[\"audio/voice::Voice::play\",\"method\",\"audio/voice.html#struct-voice-method-play\"]"));
+
+        let mut escaped = String::new();
+        push_search_entry(&mut escaped, "a\"b\\c", "module", "a.html");
+        assert_eq!(escaped, "[\"a\\\"b\\\\c\",\"module\",\"a.html\"],");
     }
 }

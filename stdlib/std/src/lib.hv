@@ -1,3 +1,18 @@
+//! # haven's standard library.
+//!
+//! The haven's standard library (`std`) is a package of modules that every program
+//! can use. It provides core types, memory management, I/O, and other facilities.
+//! The `std` package is always available on every packages and modules by default.
+//!
+//! You can use the search button to find the documentation for any type or function
+//! in the standard library, and then import it using `import` statements in your code.
+//!
+//! ```hv
+//! import std/env { env }
+//!
+//! let args: Vec<str> = env::args();
+//! ```
+
 @!prelude
 
 // The prelude proper: what every module in every program using this package
