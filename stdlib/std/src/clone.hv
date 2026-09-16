@@ -1,15 +1,17 @@
 /// Explicitly duplicate a value. Owners must return an independent copy; scalar
 /// implementations can return the value itself.
-///
-///     let a: String = String::from_str("hi");
-///     let b: String = a.clone();   // a still usable; a and b own separate buffers
+/// ```hv
+/// let a: String = String::from_str("hi");
+/// let b: String = a.clone();   // a still usable; a and b own separate buffers
+/// ```
 ///
 /// `Clone` is an ordinary trait and is never called implicitly. Implement it for
 /// custom types that support duplication:
+/// ```hv
+/// extend Point: Clone {
+///     proc clone(*self) Point { return Point { x: self.x, y: self.y }; }
+/// }
 ///
-///     extend Point: Clone {
-///         proc clone(*self) Point { return Point { x: self.x, y: self.y }; }
-///     }
 
 import string { String }
 import vec { Vec }

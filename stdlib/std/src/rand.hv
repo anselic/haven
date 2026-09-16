@@ -3,10 +3,10 @@
 /// `Rng` stores two `u64` words and never allocates. It is useful for noise,
 /// dithering, simulations, and tests. The same seed and stream produce the
 /// same sequence. Do not use it for cryptography.
-///
-///     let rng: Rng = Rng::new(0x853c49e6748fea9bu64);
-///     let noise: f32 = rng.bipolar_f32();
-///
+/// ```hv
+/// let rng: Rng = Rng::new(0x853c49e6748fea9bu64);
+/// let noise: f32 = rng.bipolar_f32();
+/// ```
 /// All methods are `@alloc(false)`. Most take a fixed number of steps, but
 /// `below` retries rejected draws and has no fixed iteration limit.
 

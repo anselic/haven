@@ -113,10 +113,10 @@ pub struct AtomicU32 {
     /// If the value equals `*expected`, write `desired` and return `true`.
     /// Otherwise, write the observed value into `*expected` and return `false`.
     /// This updates `expected` for the next attempt in a retry loop:
-    ///
-    ///     let cur: u32 = a.load_relaxed();
-    ///     while (!a.compare_exchange(&cur, f(cur))) { }
-    ///
+    /// ```hv
+    /// let cur: u32 = a.load_relaxed();
+    /// while (!a.compare_exchange(&cur, f(cur))) { }
+    /// ```
     /// Uses acquire-release ordering on success and acquire ordering on failure.
     /// This is a strong comparison: it fails only when the values differ.
     @alloc(false)

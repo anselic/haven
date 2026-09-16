@@ -320,7 +320,7 @@ h4 {
   line-height: 1.55;
 }
 
-.prose {
+.prose p {
   max-width: 52rem;
 }
 
@@ -352,6 +352,13 @@ h4 {
   border: 0;
   background: transparent;
 }
+
+.syntax-keyword { color: #c792ea; }
+.syntax-type { color: #82aaff; }
+.syntax-constant,
+.syntax-number { color: #f78c6c; }
+.syntax-string { color: #c3e88d; }
+.syntax-comment { color: #8b949e; }
 
 .prose blockquote {
   margin-left: 0;

@@ -34,11 +34,11 @@ import simd
 import spsc
 
 /// A destructor. Implement it to give a type ownership of a resource:
-///
-///     extend Buf: Delete {
-///         proc delete(*self) { dealloc::<u8>(self.data, self.cap); }
-///     }
-///
+/// ```hv
+/// extend Buf: Delete {
+///     proc delete(*self) { dealloc::<u8>(self.data, self.cap); }
+/// }
+/// ```
 /// `Delete` is a lang item. Implementing it makes the type non-`Copy`; passing
 /// the value transfers ownership. The compiler calls `delete` for each live
 /// owner at scope exit, before overwrite, and on return.

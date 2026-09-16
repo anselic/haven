@@ -1,13 +1,14 @@
 /// Portable file and directory operations. Paths are plain `str`s.
 /// Fallible calls return an `FsError` containing the underlying C `errno`.
+/// ```hv
+/// import fs
+/// import result { Result }
 ///
-///     import fs
-///     import result { Result }
-///
-///     match (fs::read("config.txt")) {
-///         Result::Ok(text) -> { /* use text */ }
-///         Result::Err(e)   -> { println(e.message()); }
-///     }
+/// match (fs::read("config.txt")) {
+///     Result::Ok(text) -> { /* use text */ }
+///     Result::Err(e)   -> { println(e.message()); }
+/// }
+/// ```
 
 // Every operation is a thin wrapper over a platform-normalized `rt_fs_*` shim in
 // std/c/fs.c (see there for the Windows/POSIX differences it papers over). The
@@ -174,11 +175,11 @@ proc is_sep(b: u8) bool {
 }
 
 /// Join `leaf` onto `base`, with exactly one separator between them.
-///
-///     fs::join("dist", "VERSION")     // "dist/VERSION"
-///     fs::join("dist/", "VERSION")    // "dist/VERSION" - not "dist//VERSION"
-///     fs::join("", "VERSION")         // "VERSION"      - no leading separator
-///
+/// ```hv
+/// fs::join("dist", "VERSION")     // "dist/VERSION"
+/// fs::join("dist/", "VERSION")    // "dist/VERSION" - not "dist//VERSION"
+/// fs::join("", "VERSION")         // "VERSION"      - no leading separator
+/// ```
 /// The result is owned. Existing separators are preserved, including backslashes
 /// and Windows verbatim paths. Empty inputs add no separator.
 pub proc join(base: str, leaf: str) String {

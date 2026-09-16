@@ -1,9 +1,9 @@
 /// Copy, fill, and compare memory through typed pointers. Counts are in elements,
 /// not bytes. These operations do not allocate or perform bounds checks.
-///
-///     mem::copy::<f32>(out, input, frames);
-///     mem::zero::<f32>(tail, frames);
-///
+/// ```hv
+/// mem::copy::<f32>(out, input, frames);
+/// mem::zero::<f32>(tail, frames);
+/// ```
 /// Raw memory operations do not manage ownership. Callers must provide valid,
 /// sufficiently large storage and must not copy or overwrite owning values.
 /// `set` requires a `Copy` element type.

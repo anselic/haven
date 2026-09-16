@@ -77,19 +77,20 @@ pub struct Vec<T> {
 
     /// Append without growing. Returns `None` on success or `Some(value)` when
     /// the Vec is full. This is safe to call from an `@alloc(false)` function:
-    ///
-    ///     let v: Vec<Voice> = Vec::<Voice>::with_capacity(16u64);   // setup
-    ///     ...
-    ///     @alloc(false)
-    ///     proc note_on(v: *Vec<Voice>, n: Voice) bool {
-    ///         return v.push_within_capacity(n).is_none();
-    ///     }
-    ///
+    /// ```hv
+    /// let v: Vec<Voice> = Vec::<Voice>::with_capacity(16u64); // setup
+    /// ...
+    /// @alloc(false)
+    /// proc note_on(v: *Vec<Voice>, n: Voice) bool {
+    ///     return v.push_within_capacity(n).is_none();
+    /// }
+    /// ```
     /// For an owning `T`, bind the result so a rejected value has a scope in
     /// which it can be destroyed:
-    ///
-    ///     let slot: Option<String> = v.push_within_capacity(s);
-    ///     if (slot.is_none()) { ... }   // `slot` is destroyed at end of scope
+    /// ```hv
+    /// let slot: Option<String> = v.push_within_capacity(s);
+    /// if (slot.is_none()) { ... }   // `slot` is destroyed at end of scope
+    /// ```
     @alloc(false)
     pub proc push_within_capacity(*self, value: T) Option<T> {
         if (self.len >= self.cap) {

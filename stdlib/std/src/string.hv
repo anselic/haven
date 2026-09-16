@@ -3,8 +3,9 @@
 ///
 /// `str` - borrowed text, what a literal is - gets an `eq` of its own here, so
 /// comparing against a literal never needs a `String` built to hold it:
-///
-///     if (name.as_str().eq("macos")) { /* ... */ }
+/// ```hv
+/// if (name.as_str().eq("macos")) { /* ... */ }
+/// ```
 ///
 /// A `String` owns its heap allocation and frees it for you: it holds a `Vec<u8>`
 /// field, and `Vec` implements `Delete`, so a String is destroyed - buffer freed

@@ -1,16 +1,17 @@
 /// Render a value as an owned `String`.
 ///
 /// Implement `Display` for custom printable types:
-///
-///     extend Point: Display {
-///         proc display(*self) String {
-///             let s: String = String::from_str("(");
-///             let x: String = self.x.display();
-///             s.push_str(x.as_str());
-///             ...
-///             return s;
-///         }
+/// ```hv
+/// extend Point: Display {
+///     proc display(*self) String {
+///         let s: String = String::from_str("(");
+///         let x: String = self.x.display();
+///         s.push_str(x.as_str());
+///         ...
+///         return s;
 ///     }
+/// }
+/// ```
 ///
 /// Implementations are provided for integers, `bool`, `str`, `String`, and
 /// `Vec<T>` when `T: Display`.
