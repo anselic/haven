@@ -13,7 +13,8 @@ mod doc;
 #[derive(Parser, Debug)]
 #[command(
     name = "havendoc",
-    about = "Generate documentation from .hv source"
+    about = "Generate documentation from .hv source",
+    version,
 )]
 pub struct DocArgs {
     /// Source files or directories to document. Vestry package directories use

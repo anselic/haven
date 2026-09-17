@@ -9,18 +9,8 @@ This repository includes:
 - `havenc`: the compiler for the haven programming language
 - `havendoc`: a documentation generator that emits Markdown or static HTML
 
-Generate a portable static documentation site with:
-
-```shell
-$ havendoc path/to/package --format html --out docs
-```
-
-The built-in HTML shell and stylesheet live in `bins/havendoc/assets/`; edit
-those source files and rebuild `havendoc` to customize generated sites.
-
 > [!NOTE]
-> This is very alpha and work in progress, codebase can be messy and bugs may
-> arise, please report if you find one.
+> This is pre-alpha software. The compiler is not yet stable, and the language is still under active development. Expect breaking changes and bugs.
 
 ## Dependencies
 
@@ -36,8 +26,10 @@ those source files and rebuild `havendoc` to customize generated sites.
 Install the binaries using the provided `install.py` script:
 
 ```shell
-$ cargo build --release
+# Use `--debug` if you want to build the binaries in debug mode (default is release mode).
 $ python install.py [--debug] [--path <install_path>]
+
+$ havenc --version
 # To uninstall the binaries with the script, you can also run:
 $ python install.py --uninstall [--path <install_path>]
 ```
@@ -59,7 +51,7 @@ crates/
 extensions/
 └── vscode/         # VSCode extension for syntax highlighting
 stdlib/
-└── std/            # haven standard library packages
+└── std/            # haven standard library package
 ```
 
 ## License

@@ -22,6 +22,7 @@ impl From<MessageFormat> for diag::Format {
 }
 
 #[derive(Parser, Debug)]
+#[command(version)]
 pub struct Args {
     /// The main input source file to compile
     #[arg(required = true)]
