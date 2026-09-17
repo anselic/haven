@@ -329,16 +329,26 @@ impl<'a, 'c> Checker<'a, 'c> {
     }
 
     /// Reading a binding: an error if its value has been moved away.
-    fn read(&mut self, b: Binding<'a>, span: Span) {
+    fn read(&mut self, b: Binding<'a>, span: Span, expr_id: usize) {
         let Some(state) = self.moved.get(&b).cloned() else { return };
         let name = self.binding_name(b);
+        let shown_ty = self.cx.node_types
+            .get(&expr_id)
+            .map(|ty| self.cx.show(ty));
         // the move site is the other half of the story, so it gets its own
         // underline rather than being described in prose at the use site.
         let err = match state {
             State::Moved(at) => Error::new(span, format!(
                 "use of '{}' after its value was moved out of it", name))
                 .with_label(span, "used here")
-                .with_label(at, "value moved out here"),
+                .with_label(at, "value moved out here")
+                .with_note(format!(
+                    "{} owns a resource, so only one path can own it at a time",
+                    match shown_ty {
+                        Some(ref s) => format!("`{}`", s),
+                        None => "this type".to_string(),
+                    }
+                )),
             State::Maybe(at) => Error::new(span, format!(
                 "use of '{}', whose value is moved away on some paths", name))
                 .with_label(span, "used here")
@@ -355,7 +365,7 @@ impl<'a, 'c> Checker<'a, 'c> {
         match &e.value {
             ExprNode::Var(_) => {
                 if let Some(b) = self.cx.resolved.get(&e.id).copied() {
-                    self.read(b, e.span);
+                    self.read(b, e.span, e.id);
                 }
             }
             ExprNode::Access { base, .. } => self.visit(base),

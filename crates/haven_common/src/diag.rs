@@ -1,5 +1,6 @@
 use std::io::IsTerminal;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -52,7 +53,7 @@ fn decide_color(no_color: Option<std::ffi::OsString>, stderr_is_tty: bool) -> bo
 /// an index, not a scan, and each path is stored once, not once per token.
 #[derive(Default)]
 pub struct Files<'a> {
-    /// display path per `FileId`, e.g. an absolute path or `std/math`.
+    /// Display path per `FileId`, relative to the working directory when possible.
     paths: Vec<String>,
     srcs: Vec<&'a str>,
 }
@@ -63,7 +64,11 @@ impl<'a> Files<'a> {
     /// Register a file and get the id spans should carry for it.
     pub fn add(&mut self, path: String, src: &'a str) -> FileId {
         let id = FileId(self.paths.len() as u32);
-        self.paths.push(path);
+        let shown = std::env::current_dir()
+            .and_then(std::fs::canonicalize)
+            .map(|cwd| relative_path(&path, &cwd))
+            .unwrap_or(path);
+        self.paths.push(shown);
         self.srcs.push(src);
         id
     }
@@ -88,6 +93,25 @@ impl<'a> Files<'a> {
             self.paths.iter().cloned().zip(self.srcs.iter().copied())
         )
     }
+}
+
+/// Keep virtual dependency paths such as `std/src/lib.hv` as they are. For real
+/// source files, use a path the user can resolve from the compiler's cwd.
+fn relative_path(path: &str, cwd: &Path) -> String {
+    let path = Path::new(path);
+    if !path.is_absolute() { return path.to_string_lossy().into_owned(); }
+
+    let target: Vec<_> = path.components().collect();
+    let base: Vec<_> = cwd.components().collect();
+    let common = target.iter().zip(&base).take_while(|(a, b)| a == b).count();
+    // Different Windows drives have no relative path between them.
+    if common == 0 { return path.to_string_lossy().into_owned(); }
+
+    let mut result = PathBuf::new();
+    for _ in common..base.len() { result.push(".."); }
+    for component in &target[common..] { result.push(component.as_os_str()); }
+    if result.as_os_str().is_empty() { ".".to_string() }
+    else { result.to_string_lossy().into_owned() }
 }
 
 /// How diagnostics are rendered. `Human` is the ariadne pretty-printer for a

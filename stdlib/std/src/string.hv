@@ -48,6 +48,11 @@ extend str {
     pub proc eq(*self, other: str) bool {
         return strcmp(*self, other) == 0i32;
     }
+
+    /// Render a `str` as an owned `String`.
+    pub proc to_string(*self) String {
+        return String::from_str(*self);
+    }
 }
 
 pub struct String {
