@@ -1,9 +1,9 @@
-/// std/math: scalar math constants and the C standard-library math functions.
-///
-/// Two layers: a handful of convenience constants/helpers written in haven, and
-/// direct bindings to libm. Every libm function comes in an `f64` form and an
-/// `f32` form (suffixed `f`) so single-precision DSP code never widens to double.
-/// Angles are in radians throughout.
+//! Scalar math constants and the C standard-library math functions.
+//!
+//! Two layers: a handful of convenience constants/helpers written in haven, and
+//! direct bindings to libm. Every libm function comes in an `f64` form and an
+//! `f32` form (suffixed `f`) so single-precision DSP code never widens to double.
+//! Angles are in radians throughout.
 
 /// `x` squared (`x * x`).
 pub proc square(x: f64) f64 { return x * x; }

@@ -1,5 +1,5 @@
-/// Bit counting, rotation, reversal, and power-of-two helpers for unsigned
-/// integers. These functions do not allocate.
+//! Bit counting, rotation, reversal, and power-of-two helpers for unsigned
+//! integers. These functions do not allocate.
 
 // These implementations use shifts and masks directly in Haven, with no C shim
 // or compiler intrinsic. Keep the steps recognizable when changing them.

@@ -1,4 +1,4 @@
-//! # haven's standard library.
+//! Core types, memory management, I/O, and other facilities available to every Haven program.
 //!
 //! The haven's standard library (`std`) is a package of modules that every program
 //! can use. It provides core types, memory management, I/O, and other facilities.
@@ -15,8 +15,7 @@
 
 @!prelude
 
-// The prelude proper: what every module in every program using this package
-// sees without an import.
+// what every module in every program using this package sees without an import.
 pub import clone { Clone }
 pub import fmt { Display, print, println }
 pub import string { String }
@@ -27,11 +26,8 @@ pub import iter { IntoIterator, Iterator } // needed for `for` loops
 
 import fmt { display_print, display_println }
 
-// Everything else the package ships, pulled in so that it *exists*. A `.hvmeta`
-// carries the modules that were loaded, and loading starts here - so a module
-// this root cannot reach is not merely unused, it is absent from the artifact
-// and no consumer can import it. These bind a module-private qualifier and
-// export nothing, so nothing here reaches a consumer's scope.
+// everything else std provides, available via `import std/...` in user code.
+
 import alloc
 import atomic
 import bits

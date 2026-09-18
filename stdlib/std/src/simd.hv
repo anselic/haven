@@ -1,14 +1,14 @@
-/// Portable wrappers over the compiler's SIMD intrinsics. `simd<T, N>` is a
-/// fixed-width numeric vector with lane-wise arithmetic.
-///
-/// Constraints shared by every proc here:
-///   - `T` must be a numeric scalar (`iN`, `uN`, or `fN`) - the valid SIMD
-///     element types. Structs, pointers and `bool` are rejected.
-///   - `N` (a `u64` lane count) must be in `1..=64`.
-///   - The width-changing ops (`simd_concat`, `simd_low`, `simd_high`)
-///     additionally require even lane counts.
-///
-/// Slice and pointer loads have separate names because Haven has no overloading.
+//! SIMD related operations and wrappers over the compiler's SIMD intrinsics and
+//! type.
+//!
+//! Constraints shared by every proc here:
+//!   - `T` must be a numeric scalar (`iN`, `uN`, or `fN`) - the valid SIMD
+//!     element types. Structs, pointers and `bool` are rejected.
+//!   - `N` (a `u64` lane count) must be in `1..=64`.
+//!   - The width-changing ops (`simd_concat`, `simd_low`, `simd_high`)
+//!     additionally require even lane counts.
+//!
+//! Slice and pointer loads have separate names because Haven has no overloading.
 
 // each proc is a one-line forward to the corresponding `__simd_*` intrinsic; the
 // intrinsic is what the middle-end recognizes and lowers, the wrapper only gives

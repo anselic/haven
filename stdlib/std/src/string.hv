@@ -1,19 +1,12 @@
-/// An owned, growable byte string backed by `Vec<u8>`. Use `as_str` to borrow it
-/// as a NUL-terminated `str`.
-///
-/// `str` - borrowed text, what a literal is - gets an `eq` of its own here, so
-/// comparing against a literal never needs a `String` built to hold it:
-/// ```hv
-/// if (name.as_str().eq("macos")) { /* ... */ }
-/// ```
-///
-/// A `String` owns its heap allocation and frees it for you: it holds a `Vec<u8>`
-/// field, and `Vec` implements `Delete`, so a String is destroyed - buffer freed
-/// - when it goes out of scope, with no manual free to call. A fresh `String::new`
-/// allocates nothing, so an empty String is cheap and the first push performs the
-/// initial allocation. No UTF-8 validation is done: `s.push_byte` can build
-/// ill-formed sequences, so treat the contents as raw bytes unless you know they
-/// are valid text.
+//! An owned, growable byte string backed by `Vec<u8>`.
+//!
+//! A `String` owns its heap allocation and frees it for you: it holds a `Vec<u8>`
+//! field, and `Vec` implements `Delete`, so a String is destroyed - buffer freed
+//! - when it goes out of scope, with no manual free to call. A fresh `String::new`
+//! allocates nothing, so an empty String is cheap and the first push performs the
+//! initial allocation. No UTF-8 validation is done: `s.push_byte` can build
+//! ill-formed sequences, so treat the contents as raw bytes unless you know they
+//! are valid text.
 
 // All the growth/allocation machinery is inherited from `Vec<u8>` (see std/vec);
 // this module only adds string-flavored operations, built entirely on Vec's

@@ -1,12 +1,13 @@
-/// Copy, fill, and compare memory through typed pointers. Counts are in elements,
-/// not bytes. These operations do not allocate or perform bounds checks.
-/// ```hv
-/// mem::copy::<f32>(out, input, frames);
-/// mem::zero::<f32>(tail, frames);
-/// ```
-/// Raw memory operations do not manage ownership. Callers must provide valid,
-/// sufficiently large storage and must not copy or overwrite owning values.
-/// `set` requires a `Copy` element type.
+//! Copy, fill, and compare memory through typed pointers. Counts are in elements,
+//! not bytes. These operations do not allocate or perform bounds checks.
+//!
+//! ```hv
+//! mem::copy::<f32>(out, input, frames);
+//! mem::zero::<f32>(tail, frames);
+//! ```
+//! Raw memory operations do not manage ownership. Callers must provide valid,
+//! sufficiently large storage and must not copy or overwrite owning values.
+//! `set` requires a `Copy` element type.
 
 // libc takes untyped pointers and byte counts. The wrappers below convert
 // from typed pointers and element counts. These externs do not allocate.

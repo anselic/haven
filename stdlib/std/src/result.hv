@@ -1,5 +1,5 @@
-/// A success value (`Ok(T)`) or an error (`Err(E)`). Methods that extract a value
-/// consume the `Result`; `unwrap` and `expect` abort on the wrong variant.
+//! A success value (`Ok(T)`) or an error (`Err(E)`). Methods that extract a value
+//! consume the `Result`; `unwrap` and `expect` abort on the wrong variant.
 
 pub enum Result<T, E> {
     Ok(T),

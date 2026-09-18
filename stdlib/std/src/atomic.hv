@@ -1,9 +1,9 @@
-/// Atomic `u32` and `u64` values.
-///
-/// Share pointers to atomic values between threads and check `is_lock_free()`
-/// before using them where blocking is forbidden. Names ending in `_relaxed`,
-/// `_acquire`, `_release`, and `_seqcst` state their memory ordering; the other
-/// read-modify-write operations use acquire-release ordering.
+//! Atomic `u32` and `u64` values.
+//!
+//! Share pointers to atomic values between threads and check `is_lock_free()`
+//! before using them where blocking is forbidden. Names ending in `_relaxed`,
+//! `_acquire`, `_release`, and `_seqcst` state their memory ordering; the other
+//! read-modify-write operations use acquire-release ordering.
 
 // These functions are implemented in std/c/atomic.c using C11 atomics.
 // Each ordering has its own function, so the C compiler knows it at compile time.

@@ -1,7 +1,9 @@
-/// A growable, heap-backed array. It owns its buffer and destroys its elements
-/// when dropped. Use `with_capacity` and `push_within_capacity` when growth must
-/// not allocate. Consuming iteration walks front to back, moves each element out
-/// of the Vec, and leaves the original Vec unavailable after the loop.
+//! A growable, heap-backed array that owns its elements.
+//!
+//! It destroys its elements when dropped. Use `with_capacity` and
+//! `push_within_capacity` when growth must not allocate. Consuming iteration
+//! walks front to back, moves each element out
+//! of the Vec, and leaves the original Vec unavailable after the loop.
 
 // Growth doubles the capacity. `ptr_write` initializes unused slots without
 // trying to destroy their old contents.

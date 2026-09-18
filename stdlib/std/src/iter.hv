@@ -1,9 +1,10 @@
-/// The iterator protocol used by `for` loops. `next` returns `Some(item)` until
-/// exhausted, then `None`. Each implementation defines its associated `Item`.
-/// ```hv
-/// for (x in it) { ... }
-/// ```
-/// The iterand is evaluated once, then `next` is called until it returns `None`.
+//! The iterator protocol used by `for` loops. `next` returns `Some(item)` until
+//! exhausted, then `None`. Each implementation defines its associated `Item`.
+//!
+//! ```hv
+//! for (x in it) { ... }
+//! ```
+//! The iterand is evaluated once, then `next` is called until it returns `None`.
 
 import option { Option }
 

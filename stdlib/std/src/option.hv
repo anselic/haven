@@ -1,14 +1,14 @@
-/// std/option: an optional value, backed by a real (data-carrying) enum.
-///
-/// `Option<T>` holds either nothing (`None`) or a value (`Some(T)`), for any `T` -
-/// a pointer, an integer, an owning `Vec`, anything. Test it with `is_some`/
-/// `is_none` (which borrow), then take the value out with `unwrap`/`expect`/
-/// `unwrap_or` (which consume the `Option`), or transform it with `map`/`and_then`.
-///
-/// Taking the value out is a by-value move: for an owning `T` the contained value
-/// is handed to the caller and the `Option` is spent. `unwrap` and `expect` have
-/// no value to return on `None`, so they `abort` - guard with `is_some` (or use
-/// `unwrap_or`) when `None` is a real possibility.
+//! Optional values, backed by a data-carrying enum.
+//!
+//! `Option<T>` holds either nothing (`None`) or a value (`Some(T)`), for any `T` -
+//! a pointer, an integer, an owning `Vec`, anything. Test it with `is_some`/
+//! `is_none` (which borrow), then take the value out with `unwrap`/`expect`/
+//! `unwrap_or` (which consume the `Option`), or transform it with `map`/`and_then`.
+//!
+//! Taking the value out is a by-value move: for an owning `T` the contained value
+//! is handed to the caller and the `Option` is spent. `unwrap` and `expect` have
+//! no value to return on `None`, so they `abort` - guard with `is_some` (or use
+//! `unwrap_or`) when `None` is a real possibility.
 
 pub enum Option<T> {
     None,

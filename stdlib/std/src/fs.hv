@@ -1,14 +1,15 @@
-/// Portable file and directory operations. Paths are plain `str`s.
-/// Fallible calls return an `FsError` containing the underlying C `errno`.
-/// ```hv
-/// import fs
-/// import result { Result }
-///
-/// match (fs::read("config.txt")) {
-///     Result::Ok(text) -> { /* use text */ }
-///     Result::Err(e)   -> { println(e.message()); }
-/// }
-/// ```
+//! Portable file and directory operations. Paths are plain `str`s.
+//! Fallible calls return an `FsError` containing the underlying C `errno`.
+//!
+//! ```hv
+//! import fs
+//! import result { Result }
+//!
+//! match (fs::read("config.txt")) {
+//!     Result::Ok(text) -> { /* use text */ }
+//!     Result::Err(e)   -> { println(e.message()); }
+//! }
+//! ```
 
 // Every operation is a thin wrapper over a platform-normalized `rt_fs_*` shim in
 // std/c/fs.c (see there for the Windows/POSIX differences it papers over). The

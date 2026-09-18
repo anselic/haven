@@ -1,11 +1,11 @@
-/// A fixed-capacity queue for one producer and one consumer.
-///
-/// Only the producer may push, and only the consumer may pop or peek. Create it
-/// before starting either thread and use a `Copy` element type. Check that
-/// `AtomicU64` is lock-free if either thread must not block.
-///
-/// Head and tail updates use acquire-release ordering to protect slot contents;
-/// the slots themselves are not atomic.
+//! A fixed-capacity queue for one producer and one consumer.
+//!
+//! Only the producer may push, and only the consumer may pop or peek. Create it
+//! before starting either thread and use a `Copy` element type. Check that
+//! `AtomicU64` is lock-free if either thread must not block.
+//!
+//! Head and tail updates use acquire-release ordering to protect slot contents;
+//! the slots themselves are not atomic.
 
 import alloc { alloc, dealloc }
 import atomic { AtomicU64 }
