@@ -208,7 +208,9 @@ pub struct Vec<T> {
     }
 }
 
-/// The iterator returned by `Vec::iter`.
+/// Walk a Vec from front to back by pointer, without taking its elements.
+/// The Vec must outlive this iterator. Do not change the Vec's length or
+/// capacity while iterating: doing so may invalidate yielded pointers.
 pub struct VecIter<T> {
     vec: *Vec<T>,  /// the Vec being walked
     pos: u64,      /// index of the next element to yield
@@ -226,11 +228,10 @@ extend VecIter<T>: Iterator {
     }
 }
 
-/// An owning iterator over a Vec's allocation. Elements before `pos` have been
-/// moved out and are no longer live; elements in `pos..len` remain initialized.
-/// Dropping the iterator destroys only that remaining suffix, then frees the
-/// allocation. This makes an early exit from iteration behave like dropping the
-/// unconsumed part of the original Vec.
+/// Walk a Vec from front to back by value, moving each element out.
+/// This iterator owns the Vec's buffer, so the original Vec cannot be used after
+/// `into_iter`. Dropping the iterator destroys any elements not yet yielded and
+/// frees the buffer, including when iteration ends early.
 pub struct VecIntoIter<T> {
     data: *T,
     pos: u64,

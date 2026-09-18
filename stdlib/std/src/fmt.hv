@@ -121,3 +121,16 @@ extend String: Display {
 extend *T: Display where T: Display {
     proc display(*self) String { return (**self).display(); }
 }
+
+// --- printing functions
+
+extern rt_puts(s: str) void;
+
+/// Write `s` to stdout with no trailing newline.
+pub proc print<T: Display>(x: T) void {
+    rt_puts(x.display().as_str());
+}
+/// Write `s` to stdout followed by a newline.
+pub proc println<T: Display>(x: T) void {
+    print(x); print("\n");
+}

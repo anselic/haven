@@ -113,6 +113,7 @@ fn walk_dir(base: &Path, dir: &Path, prefix: Option<&str>, out: &mut Vec<SourceF
 fn push_source(base: &Path, prefix: Option<&str>, file: &Path, out: &mut Vec<SourceFile>) {
     let relative = module_title(base, file);
     let title = match prefix {
+        Some(prefix) if relative == "lib" => prefix.to_string(),
         Some(prefix) => format!("{}/{}", prefix, relative),
         None => relative,
     };
@@ -180,7 +181,7 @@ pub(super) fn extract_module(source: &SourceFile) -> Result<ModuleDoc, ()> {
     // as standalone blocks. Extensions of builtins, imported types, and generic
     // parameters are intentionally omitted until havendoc has a proper
     // implementations view that can show their trait and bounds.
-    let mut method_groups: BTreeMap<String, Vec<&Method>> = BTreeMap::new();
+    let mut method_groups: BTreeMap<String, (Vec<&Method>, Vec<&Method>)> = BTreeMap::new();
     for item in &items {
         if let TopLevelNode::Extend {
             methods,
@@ -191,9 +192,23 @@ pub(super) fn extract_module(source: &SourceFile) -> Result<ModuleDoc, ()> {
         {
             let key = extend_target_key(target);
             let group = method_groups.entry(key).or_default();
+            // Inline methods are emitted as a synthetic `Extend` with the same
+            // span as their enclosing type. Explicit `extend` blocks have their
+            // own span, even when they implement no trait.
+            let inline = items.iter().any(|candidate| {
+                matches!(&candidate.value,
+                    TopLevelNode::Struct { name, .. } | TopLevelNode::Enum { name, .. }
+                        if *name == extend_target_key(target))
+                    && candidate.span.start == item.span.start
+                    && candidate.span.end == item.span.end
+            });
             for m in methods {
                 if method_visible(&m.value, trait_.is_some()) {
-                    group.push(m);
+                    if inline {
+                        group.0.push(m);
+                    } else {
+                        group.1.push(m);
+                    }
                 }
             }
         }
@@ -210,14 +225,20 @@ pub(super) fn extract_module(source: &SourceFile) -> Result<ModuleDoc, ()> {
             node if !item_is_pub(node) => continue,
             node => {
                 // a type carries its methods directly beneath its declaration.
-                let methods = if let TopLevelNode::Struct { name, .. }
+                let (methods, extended_methods) = if let TopLevelNode::Struct { name, .. }
                 | TopLevelNode::Enum { name, .. } = node
                 {
                     method_groups.remove(*name).unwrap_or_default()
                 } else {
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 };
-                documented_items.push(extract_item(item, &src, &lines, &methods));
+                documented_items.push(extract_item(
+                    item,
+                    &src,
+                    &lines,
+                    &methods,
+                    &extended_methods,
+                ));
             }
         }
     }
@@ -229,13 +250,23 @@ pub(super) fn extract_module(source: &SourceFile) -> Result<ModuleDoc, ()> {
     })
 }
 
-fn extract_item(item: &TopLevel, src: &str, lines: &LineIndex, methods: &[&Method]) -> ItemDoc {
+fn extract_item(
+    item: &TopLevel,
+    src: &str,
+    lines: &LineIndex,
+    methods: &[&Method],
+    extended_methods: &[&Method],
+) -> ItemDoc {
     ItemDoc {
         kind: item_kind(&item.value),
         name: item_name(&item.value).to_string(),
         signature: Some(signature(&item.value, src, item.span.start, item.span.end)),
         docs: lines.doc_above(item.span.start),
         methods: methods
+            .iter()
+            .map(|method| extract_method(method, lines))
+            .collect(),
+        extended_methods: extended_methods
             .iter()
             .map(|method| extract_method(method, lines))
             .collect(),

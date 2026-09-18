@@ -8,6 +8,7 @@
 //! ```text
 //! docs/
 //!   index.md
+//!   std/index.md
 //!   std/alloc.md
 //!   std/dsp/osc.md
 //!   ...
@@ -136,6 +137,7 @@ struct ItemDoc {
     signature: Option<String>,
     docs: Option<String>,
     methods: Vec<MethodDoc>,
+    extended_methods: Vec<MethodDoc>,
 }
 
 #[derive(Debug, PartialEq, Eq)]

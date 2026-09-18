@@ -13,7 +13,7 @@ pub(super) fn render_markdown(docs: &Documentation, out_dir: &Path) -> Result<()
 
     let mut pages = Vec::with_capacity(docs.modules.len());
     for module in &docs.modules {
-        let relative = title_to_rel_path(&module.title);
+        let relative = module_markdown_path(docs, &module.title);
         let path = out_dir.join(&relative);
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
@@ -31,7 +31,11 @@ pub(super) fn render_markdown(docs: &Documentation, out_dir: &Path) -> Result<()
 }
 
 fn render_module_markdown(module: &ModuleDoc) -> String {
-    let mut markdown = format!("# `{}`\n\n", module.title);
+    let mut markdown = if module.docs.as_deref().is_some_and(starts_with_h1) {
+        String::new()
+    } else {
+        format!("# `{}`\n\n", module.title)
+    };
     if let Some(docs) = &module.docs {
         markdown.push_str(docs);
         markdown.push_str("\n\n");
@@ -53,15 +57,32 @@ fn render_module_markdown(module: &ModuleDoc) -> String {
             markdown.push_str("\n\n");
         }
         render_methods_markdown(&mut markdown, &item.methods);
+        render_method_section_markdown(&mut markdown, "Extended Methods", &item.extended_methods);
     }
     markdown
 }
 
+fn module_markdown_path(docs: &Documentation, title: &str) -> PathBuf {
+    if docs.package.as_deref() == Some(title) {
+        PathBuf::from(title).join("index.md")
+    } else {
+        title_to_rel_path(title)
+    }
+}
+
+fn starts_with_h1(markdown: &str) -> bool {
+    markdown.trim_start().starts_with("# ")
+}
+
 fn render_methods_markdown(markdown: &mut String, methods: &[MethodDoc]) {
+    render_method_section_markdown(markdown, "Methods", methods);
+}
+
+fn render_method_section_markdown(markdown: &mut String, heading: &str, methods: &[MethodDoc]) {
     if methods.is_empty() {
         return;
     }
-    markdown.push_str("### Methods\n\n");
+    markdown.push_str(&format!("### {heading}\n\n"));
     for method in methods {
         markdown.push_str(&format!("#### `{}`\n\n", method.name));
         markdown.push_str("```hv\n");

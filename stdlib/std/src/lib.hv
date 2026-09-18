@@ -18,7 +18,7 @@
 // The prelude proper: what every module in every program using this package
 // sees without an import.
 pub import clone { Clone }
-pub import fmt { Display }
+pub import fmt { Display, print, println }
 pub import string { String }
 pub import vec { Vec }
 pub import result { Result, Unit }
@@ -66,11 +66,9 @@ pub trait Delete {
 
 // backing symbols from std/c/rt.c (always linked in)
 extern strlen(s: str) u64;
-extern rt_puts(s: str) void;
 
 @alloc(false) extern rt_abort(msg: str) !;
 @alloc(false) extern rt_slice_len<T>(slice: *[T]) u64;
-extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];
 
 /// Print `msg` and terminate the process. Its result type is the bottom type `!`,
 /// so it coerces to any expected type - `return abort("...")` type-checks in a
@@ -78,15 +76,6 @@ extern rt_slice_from_raw_parts<T>(ptr: *T, len: u64) *[T];
 /// without a value.
 @alloc(false)
 pub proc abort(msg: str) ! { rt_abort(msg); }
-
-/// Write `s` to stdout with no trailing newline.
-pub proc print<T: Display>(x: T) void {
-    rt_puts(x.display().as_str());
-}
-/// Write `s` to stdout followed by a newline.
-pub proc println<T: Display>(x: T) void {
-    print(x); print("\n");
-}
 
 /// The number of elements in the runtime slice `slice`.
 @alloc(false)

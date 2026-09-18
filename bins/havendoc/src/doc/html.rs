@@ -26,7 +26,7 @@ pub(super) fn render_html(docs: &Documentation, out_dir: &Path) -> Result<(), ()
 
     let mut pages = Vec::with_capacity(docs.modules.len());
     for module in &docs.modules {
-        let relative = title_to_html_path(&module.title);
+        let relative = module_html_path(docs, &module.title);
         let path = out_dir.join(&relative);
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
@@ -61,10 +61,18 @@ fn title_to_html_path(title: &str) -> PathBuf {
     PathBuf::from(format!("{}.html", title))
 }
 
+fn module_html_path(docs: &Documentation, title: &str) -> PathBuf {
+    if docs.package.as_deref() == Some(title) {
+        PathBuf::from(title).join("index.html")
+    } else {
+        title_to_html_path(title)
+    }
+}
+
 fn render_search_index(docs: &Documentation) -> String {
     let mut output = String::from("window.havenSearchEntries=[");
     for module in &docs.modules {
-        let path = title_to_html_path(&module.title)
+        let path = module_html_path(docs, &module.title)
             .to_string_lossy()
             .replace('\\', "/");
         push_search_entry(&mut output, &module.title, "module", &path);
@@ -76,7 +84,7 @@ fn render_search_index(docs: &Documentation) -> String {
                 item.kind.label(),
                 &format!("{path}#{anchor}"),
             );
-            for method in &item.methods {
+            for method in item.methods.iter().chain(&item.extended_methods) {
                 push_search_entry(
                     &mut output,
                     &format!("{}::{}::{}", module.title, item.name, method.name),
@@ -115,9 +123,13 @@ fn push_search_entry(output: &mut String, label: &str, kind: &str, path: &str) {
 
 fn render_module_html(module: &ModuleDoc, current: &Path) -> String {
     let mut output = render_breadcrumbs(&module.title, current);
-    output.push_str("<header class=\"page-heading\"><p class=\"eyebrow\">Module</p><h1><code>");
-    output.push_str(&escape_html(&module.title));
-    output.push_str("</code></h1></header>");
+    output.push_str("<header class=\"page-heading\"><p class=\"eyebrow\">Module</p>");
+    if !module.docs.as_deref().is_some_and(starts_with_h1) {
+        output.push_str("<h1><code>");
+        output.push_str(&escape_html(&module.title));
+        output.push_str("</code></h1>");
+    }
+    output.push_str("</header>");
     if let Some(docs) = &module.docs {
         output.push_str("<div class=\"prose module-docs\">");
         output.push_str(&markdown_to_html(docs));
@@ -148,31 +160,48 @@ fn render_module_html(module: &ModuleDoc, current: &Path) -> String {
             output.push_str(&markdown_to_html(docs));
             output.push_str("</div>");
         }
-        if !item.methods.is_empty() {
-            output.push_str("<div class=\"methods\"><h3>Methods</h3>");
-            for method in &item.methods {
-                let method_anchor = format!("{}-method-{}", anchor, slug(&method.name));
-                output.push_str("<article class=\"method\" id=\"");
-                output.push_str(&method_anchor);
-                output.push_str("\"><h4><a href=\"#");
-                output.push_str(&method_anchor);
-                output.push_str("\"><code>");
-                output.push_str(&escape_html(&method.name));
-                output.push_str("</code></a></h4>");
-                output.push_str(&code_block(&method.signature));
-                if let Some(docs) = &method.docs {
-                    output.push_str("<div class=\"prose\">");
-                    output.push_str(&markdown_to_html(docs));
-                    output.push_str("</div>");
-                }
-                output.push_str("</article>");
-            }
-            output.push_str("</div>");
-        }
+        render_method_section_html(&mut output, &anchor, "Methods", &item.methods);
+        render_method_section_html(
+            &mut output,
+            &anchor,
+            "Extended Methods",
+            &item.extended_methods,
+        );
         output.push_str("</section>");
     }
     output.push_str("</div>");
     output
+}
+
+fn render_method_section_html(
+    output: &mut String,
+    anchor: &str,
+    heading: &str,
+    methods: &[MethodDoc],
+) {
+    if !methods.is_empty() {
+        output.push_str("<div class=\"methods\"><h3>");
+        output.push_str(heading);
+        output.push_str("</h3>");
+        for method in methods {
+            let method_anchor = format!("{}-method-{}", anchor, slug(&method.name));
+            output.push_str("<article class=\"method\" id=\"");
+            output.push_str(&method_anchor);
+            output.push_str("\"><h4><a href=\"#");
+            output.push_str(&method_anchor);
+            output.push_str("\"><code>");
+            output.push_str(&escape_html(&method.name));
+            output.push_str("</code></a></h4>");
+            output.push_str(&code_block(&method.signature));
+            if let Some(docs) = &method.docs {
+                output.push_str("<div class=\"prose\">");
+                output.push_str(&markdown_to_html(docs));
+                output.push_str("</div>");
+            }
+            output.push_str("</article>");
+        }
+        output.push_str("</div>");
+    }
 }
 
 fn render_breadcrumbs(title: &str, current: &Path) -> String {
@@ -220,36 +249,9 @@ fn render_html_landing(docs: &Documentation, pages: &[(String, PathBuf)]) -> Str
             "Generated API documentation.".to_string(),
         ),
     };
-    let lib_title = docs.package.as_ref().map(|name| format!("{name}/lib"));
-    let lib_docs = docs
-        .modules
-        .iter()
-        .find(|module| match &lib_title {
-            Some(expected) => module.title == *expected,
-            None => module.title.rsplit('/').next() == Some("lib"),
-        })
-        .and_then(|module| module.docs.as_deref());
-    let mut output = String::from(
-        "<header class=\"page-heading landing-heading\"><p class=\"eyebrow\">Haven documentation</p>",
+    let mut output = format!(
+        "<header class=\"page-heading landing-heading\"><p class=\"eyebrow\">Haven documentation</p><h1>{title}</h1><p>{intro}</p></header><section><h2>Modules</h2><div class=\"module-grid\">"
     );
-    if let Some(markdown) = lib_docs {
-        let has_title = matches!(
-            MarkdownParser::new(markdown).next(),
-            Some(Event::Start(Tag::Heading {
-                level: HeadingLevel::H1,
-                ..
-            }))
-        );
-        if !has_title {
-            output.push_str(&format!("<h1>{title}</h1>"));
-        }
-        output.push_str("<div class=\"prose\">");
-        output.push_str(&markdown_to_html(markdown));
-        output.push_str("</div>");
-    } else {
-        output.push_str(&format!("<h1>{title}</h1><p>{intro}</p>"));
-    }
-    output.push_str("</header><section><h2>Modules</h2><div class=\"module-grid\">");
     for (name, path) in pages {
         output.push_str("<a class=\"module-card\" href=\"");
         output.push_str(&escape_html(&path.to_string_lossy().replace('\\', "/")));
@@ -259,6 +261,16 @@ fn render_html_landing(docs: &Documentation, pages: &[(String, PathBuf)]) -> Str
     }
     output.push_str("</div></section>");
     output
+}
+
+fn starts_with_h1(markdown: &str) -> bool {
+    matches!(
+        MarkdownParser::new(markdown).next(),
+        Some(Event::Start(Tag::Heading {
+            level: HeadingLevel::H1,
+            ..
+        }))
+    )
 }
 
 fn html_shell(docs: &Documentation, title: &str, current: &Path, body: &str) -> String {
@@ -317,7 +329,7 @@ const HTML_PAGE_TEMPLATE: &str = include_str!("../../assets/page.html");
 fn render_html_navigation(docs: &Documentation, current: &Path, prefix: &str) -> String {
     let mut output = String::new();
     for module in &docs.modules {
-        let path = title_to_html_path(&module.title);
+        let path = module_html_path(docs, &module.title);
         let active = if path == current {
             " class=\"active\" aria-current=\"page\""
         } else {
@@ -588,6 +600,7 @@ mod tests {
                         signature: String::new(),
                         docs: None,
                     }],
+                    extended_methods: Vec::new(),
                 }],
             }],
         };
