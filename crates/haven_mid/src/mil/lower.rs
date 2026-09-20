@@ -678,6 +678,7 @@ pub fn lower<'a>(
                     name,
                     attributes: attributes.clone(),
                     params: param_regs,
+                    noalias_params: Default::default(),
                     return_type: return_type.clone(),
                     blocks: cx.blocks.clone(),
                     sret,

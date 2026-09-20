@@ -9,7 +9,7 @@ use clap::Parser;
 use haven_common::{ast, diag};
 use haven_common::defs::Origin;
 use haven_front::module;
-use haven_mid::{typecheck, mono, own, safecheck, reach, mil};
+use haven_mid::{typecheck, mono, own, safecheck, opt, mil};
 use haven_back::llvm;
 
 mod args;
@@ -18,9 +18,8 @@ fn main() {
     let args = args::Args::parse();
     let input = &args.input;
 
-    // Pick the diagnostic format before any stage can emit one, so every
-    // `diag::report*` call below - including those inside `load_and_merge` -
-    // renders in the requested format.
+    // pick the diagnostic format, so every `diag::report*` call below renders
+    // in the requested format.
     diag::set_format(args.message_format.into());
     // and, in that format, turn any panic below into an internal-compiler-error
     // report instead of Rust's `thread 'main' panicked at ...`.
@@ -154,10 +153,11 @@ fn main() {
             // what lets the second typecheck pass below match a match-arm pattern
             // (which names the template) against a scrutinee whose type names the
             // instance.
-            let mut mono_ast = mono::monomorphize(&ast, &mut defs, &arena, &cx.node_types, &cx.inferred_type_args, &impls).unwrap_or_else(|e| {
-                diag::report_error("Monomorphization error", &e, &files);
-                std::process::exit(1);
-            });
+            let mut mono_ast = mono::monomorphize(&ast, &mut defs, &arena, &cx.node_types, &cx.inferred_type_args, &impls)
+                .unwrap_or_else(|e| {
+                    diag::report_error("Monomorphization error", &e, &files);
+                    std::process::exit(1);
+                });
             // mono dropped all trait nodes and substituted every bounded type
             // param, so the concrete program has no impls left to check.
             // A method of a *generic* `extend` is a template, and mono rewrote
@@ -195,12 +195,11 @@ fn main() {
                 std::process::exit(1);
             });
 
-            // drop every function nothing reachable from an `@export` calls, so
-            // MIL/LLVM (and clang's parser) never see the unused bulk of `std`.
-            // Must follow ownership, the last pass that synthesizes calls.
-            reach::prune_unreachable(&mut mono_ast, &cx);
+            opt::optimize_ast(&mut mono_ast, &cx);
 
-            let mil = mil::lower(&mono_ast, &cx, &defs, &arena);
+            let mut mil = mil::lower(&mono_ast, &cx, &defs, &arena);
+            opt::optimize_mil(&mut mil);
+
             let llvm_ir = llvm::emit(mil);
 
             let llvm_ir_output_path = args.output.with_extension("ll");

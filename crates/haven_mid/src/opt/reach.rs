@@ -1,4 +1,4 @@
-//! Remove functions and externs that cannot be reached.
+//! Reachability optimization: remove functions and externs that cannot be reached.
 //!
 //! This runs after ownership, the last pass that inserts calls, and before MIL.
 //! The worklist follows callable `Var` nodes (including function values) and

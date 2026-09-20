@@ -782,6 +782,7 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
     let mut sig_params: Vec<String> = Vec::new();
     let mut param_rebuilds: Vec<(Register, Type<'a>, Vec<Reg>, Vec<String>)> = Vec::new();
     for (reg, ty) in &func.params {
+        let noalias = if func.noalias_params.contains(reg) { " noalias" } else { "" };
         match ty {
             _ if cx.is_aggregate_ty(ty) => match cx.abi_of(ty) {
                 Abi::Direct(regs) => {
@@ -797,7 +798,7 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
                 Abi::Memory => sig_params.push(format!(
                     "ptr byval({}) align {} {reg}", cx.abi_storage_ty(ty), cx.abi_align(ty))),
             },
-            _ => sig_params.push(format!("{} {reg}", emit_type(ty, &cx.types, &cx.symbols))),
+            _ => sig_params.push(format!("{}{noalias} {reg}", emit_type(ty, &cx.types, &cx.symbols))),
         }
     }
 

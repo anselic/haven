@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use haven_common::ast::*;
 use haven_common::defs::DefId;
@@ -219,6 +219,9 @@ pub struct Function<'a> {
     pub name: &'a str,
     pub attributes: Vec<Attribute<'a>>,
     pub params: Vec<(Register, Type<'a>)>,
+    /// Pointer parameters proven or promised not to alias. Filled by middle-end
+    /// optimization passes and emitted as LLVM parameter attributes.
+    pub noalias_params: HashSet<Register>,
     pub return_type: Type<'a>,
     pub blocks: Vec<BasicBlock<'a>>, // blocks[0] is always the entry
     // for aggregate-returning functions: the hidden sret out-pointer parameter

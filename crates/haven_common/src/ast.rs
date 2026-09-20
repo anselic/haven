@@ -1157,6 +1157,13 @@ pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
         values: Some(&["fast", "reassoc", "nnan", "ninf", "nsz", "arcp", "contract"]),
         targets: &[AttrTarget::Function],
     },
+    // Unsafe optimization contract: memory accessed through each `*T`
+    // parameter is not accessed through an unrelated pointer for the duration
+    // of the call. The middle end lowers this to LLVM `noalias` parameters.
+    AttrSpec {
+        name: "noalias", value: AttrValue::Never, values: None,
+        targets: &[AttrTarget::Function],
+    },
 ];
 
 /// Check one attribute written on `target`. `Err` carries the headline and note

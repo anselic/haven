@@ -1,6 +1,5 @@
-//! The codegen-hint attributes, `@inline` and `@fastmath`, checked at the IR
-//! they produce: a run fixture cannot see whether `alwaysinline` or a
-//! fast-math flag was actually emitted.
+//! Codegen attributes checked at the IR they produce: a run fixture cannot see
+//! whether LLVM received inline, fast-math, or aliasing information.
 
 use std::path::Path;
 
@@ -19,9 +18,16 @@ proc scaled(x: f32) f32 { return x * 2.0; }
 // follows `scaled`: its flags must not leak into this one
 proc plain(x: f32) f32 { return x * 2.0; }
 
+@noalias
+proc disjoint(a: *f32, b: *f32) void {}
+
+proc may_alias(a: *f32, b: *f32) void {}
+
 proc main() i32 {
     let a: i32 = hot(1) + cold(1);
     let b: f32 = scaled(1.0) + plain(1.0);
+    disjoint(null::<*f32>(), null::<*f32>());
+    may_alias(null::<*f32>(), null::<*f32>());
     return 0;
 }
 ";
@@ -65,4 +71,12 @@ fn fastmath_flags_apply_to_that_function_only() {
     let all = ir.matches("fmul").count();
     assert_eq!(fast, 1, "one `fmul` carries the flag - `scaled`'s:\n{ir}");
     assert_eq!(all, 2, "`plain` has its own, unflagged `fmul`:\n{ir}");
+}
+
+#[test]
+fn noalias_marks_only_the_annotated_functions_pointer_parameters() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = ir(dir.path());
+    assert_eq!(define_line(&ir, "$disjoint").matches("noalias").count(), 2);
+    assert!(!define_line(&ir, "$may_alias").contains("noalias"));
 }
