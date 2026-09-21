@@ -7,6 +7,9 @@
 //! Head and tail updates use acquire-release ordering to protect slot contents;
 //! the slots themselves are not atomic.
 
+// Do not promise @noalias on queue operations: the other thread may access the
+// same queue through an independently obtained pointer during the call.
+
 import alloc { alloc, dealloc }
 import atomic { AtomicU64 }
 import bits { next_power_of_two_u64 }

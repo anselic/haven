@@ -49,6 +49,7 @@ pub proc simd_store<T, const N: u64>(dst: [T], offset: u64, value: simd<T, N>) v
 /// than slices. Reads `src[offset .. offset + N]`; `offset` is an element (not
 /// byte) index and bounds are the caller's responsibility (a raw pointer carries
 /// no length).
+@noalias
 pub proc simd_load_ptr<T, const N: u64>(src: *T, offset: u64) simd<T, N> {
     return __simd_load::<T, N>(src, offset);
 }
@@ -59,6 +60,7 @@ pub proc simd_load_ptr<T, const N: u64>(src: *T, offset: u64) simd<T, N> {
 /// The `*T` counterpart to `simd_store`. Writes `value` to
 /// `dst[offset .. offset + N]`; `offset` is an element (not byte) index and
 /// bounds are the caller's responsibility (a raw pointer carries no length).
+@noalias
 pub proc simd_store_ptr<T, const N: u64>(dst: *T, offset: u64, value: simd<T, N>) void {
     __simd_store::<T, N>(dst, offset, value);
 }
@@ -110,8 +112,9 @@ pub proc simd_copy<T, const N: u64>(dst: [T], src: [T], count: u64) void {
 }
 
 /// Copy `count` elements from `src` to `dst`, `N` lanes at a time (raw pointers).
-/// Because raw pointers carry no length, the caller is responsible for ensuring
-/// that `count` is within the bounds of both buffers.
+/// The buffers must not overlap. Because raw pointers carry no length, the caller
+/// is responsible for ensuring that `count` is within the bounds of both buffers.
+@noalias
 pub proc simd_copy_ptr<T, const N: u64>(dst: *T, src: *T, count: u64) void {
     let i: u64 = 0u64;
     while (i + N <= count) {

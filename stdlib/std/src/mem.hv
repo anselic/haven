@@ -19,6 +19,7 @@
 /// Copy `count` elements from `src` to `dst`. The buffers must not overlap.
 /// Use `copy_overlapping` if they might; overlap here is undefined behavior.
 @alloc(false)
+@noalias
 pub proc copy<T>(dst: *T, src: *T, count: u64) void {
     memcpy(ptr_cast::<*void>(dst), ptr_cast::<*void>(src), count * sizeof::<T>());
 }
@@ -36,6 +37,7 @@ pub proc copy_overlapping<T>(dst: *T, src: *T, count: u64) void {
 /// Write one element at a time because `memset` repeats a byte, not a `T`.
 /// `ptr_write` does not destroy the previous contents of a slot.
 @alloc(false)
+@noalias
 pub proc set<T>(dst: *T, value: T, count: u64) void {
     let i: u64 = 0u64;
     while (i < count) {
@@ -50,6 +52,7 @@ pub proc set<T>(dst: *T, value: T, count: u64) void {
 /// a sample buffer to silence, but is not a general way to create default
 /// values. Any resources owned by overwritten values are not freed.
 @alloc(false)
+@noalias
 pub proc zero<T>(dst: *T, count: u64) void {
     memset(ptr_cast::<*void>(dst), 0, count * sizeof::<T>());
 }
@@ -82,6 +85,7 @@ pub proc swap<T>(a: *T, b: *T) void {
 
 /// Write `value` into `slot` and return its previous value.
 @alloc(false)
+@noalias
 pub proc replace<T>(slot: *T, value: T) T {
     let old: T = ptr_read::<T>(slot);
     ptr_write::<T>(slot, value);

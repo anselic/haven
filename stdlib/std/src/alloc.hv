@@ -31,6 +31,7 @@ pub proc alloc<T>(count: u64) Option<*T> {
 /// existing contents. Returns `some` new pointer on success, or `none` on
 /// failure (in which case the original allocation is left untouched).
 @alloc(true)
+@noalias
 pub proc realloc<T>(ptr: *T, count: u64) Option<*T> {
     let new_ptr: *void = rt_realloc(ptr_cast::<*void>(ptr), count * sizeof::<T>());
     if (new_ptr == null::<*void>()) {
@@ -42,6 +43,7 @@ pub proc realloc<T>(ptr: *T, count: u64) Option<*T> {
 /// Release an allocation obtained from `alloc`/`realloc`. Using `ptr` afterward
 /// is undefined.
 @alloc(true)
+@noalias
 pub proc dealloc<T>(ptr: *T) void {
     rt_free(ptr_cast::<*void>(ptr));
 }

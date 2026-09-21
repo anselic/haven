@@ -43,6 +43,7 @@ extend str {
     }
 
     /// Render a `str` as an owned `String`.
+    @noalias
     pub proc to_string(*self) String {
         return String::from_str(*self);
     }
@@ -76,19 +77,24 @@ pub struct String {
     }
 
     /// The number of bytes in the String (not counting any scratch NUL).
+    @noalias
     pub proc len(*self) u64 { return self.buf.len(); }
     /// The number of bytes the buffer can hold before it must grow.
+    @noalias
     pub proc cap(*self) u64 { return self.buf.cap(); }
     /// Whether the String holds no bytes.
+    @noalias
     pub proc is_empty(*self) bool { return self.buf.is_empty(); }
 
     /// Append a single raw byte, growing the buffer if it is full. No UTF-8
     /// checking is done.
+    @noalias
     pub proc push_byte(*self, b: u8) {
         self.buf.push(b);
     }
 
     /// Append a copy of the bytes of the `str` `text`.
+    @noalias
     pub proc push_str(*self, text: str) {
         let n: u64 = strlen(text);
         let src: *u8 = rt_str_as_bytes(text);
@@ -120,6 +126,8 @@ pub struct String {
         return self;
     }
 
+    /// `self` and `other` must be distinct strings with disjoint storage.
+    @noalias
     pub proc push_string(*self, other: *String) {
         let n: u64 = other.len();
         let src: *u8 = other.buf.as_ptr();
@@ -133,6 +141,7 @@ pub struct String {
 
     /// Logically empty the String without shrinking its buffer. The bytes own
     /// nothing, so this just resets the length.
+    @noalias
     pub proc clear(*self) { self.buf.clear(); }
 
     /// Whether this String and `other` hold exactly the same bytes.
@@ -153,6 +162,7 @@ pub struct String {
     /// so a leading/trailing `sep` produces an empty segment at that end and a run
     /// of `sep`s produces empty segments between them. Splitting an empty String
     /// yields a single empty segment. Each segment owns a fresh copy of its bytes.
+    @noalias
     pub proc split(*self, sep: u8) Vec<String> {
         let result: Vec<String> = Vec::<String>::new();
         let n: u64 = self.len();
@@ -182,6 +192,7 @@ pub struct String {
     /// exactly `len` bytes are valid. Points into the buffer, so it is invalidated
     /// by the next mutation or free; for an empty String it is null. Pair it with
     /// `len` to hand the bytes to a byte-oriented sink like `fs::write`.
+    @noalias
     pub proc as_bytes(*self) *u8 {
         return self.buf.as_ptr();
     }
@@ -190,6 +201,7 @@ pub struct String {
     /// mutation or free. Writes a scratch NUL one past the last byte (growing the
     /// buffer if needed) without changing the logical length, so the returned
     /// `str` stops exactly where the String's bytes do.
+    @noalias
     pub proc as_str(*self) str {
         self.buf.reserve(self.len() + 1u64);
         self.buf.set(self.len(), 0u8);
@@ -201,5 +213,6 @@ pub struct String {
 // as `Display for String`, and for the same reason: `from_str` copies the bytes
 // into a buffer the result owns independently.
 extend String: Clone {
+    @noalias
     proc clone(*self) String { return String::from_str(self.as_str()); }
 }

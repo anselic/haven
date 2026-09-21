@@ -75,4 +75,5 @@ pub proc abort(msg: str) ! { rt_abort(msg); }
 
 /// The number of elements in the runtime slice `slice`.
 @alloc(false)
+@noalias
 pub proc slice_len<T>(slice: *[T]) u64 { return rt_slice_len::<T>(slice); }

@@ -50,12 +50,16 @@ pub struct Vec<T> {
         return Vec::<T> { data: data, len: len, cap: cap };
     }
 
+    @noalias
     pub proc len(*self) u64 { return self.len; }
+    @noalias
     pub proc cap(*self) u64 { return self.cap; }
+    @noalias
     pub proc is_empty(*self) bool { return self.len == 0u64; }
 
     /// Ensure the buffer can hold at least `needed` elements, reallocating (and
     /// doubling) if it currently cannot. Does nothing when there is already room.
+    @noalias
     pub proc reserve(*self, needed: u64) {
         if (self.cap < needed) {
             let new_cap: u64 = self.cap;
@@ -69,6 +73,7 @@ pub struct Vec<T> {
 
     /// Append `value` to the end, growing the buffer if it is full. `value` is
     /// moved into the Vec (for an owning `T`, the caller's copy is consumed).
+    @noalias
     pub proc push(*self, value: T) {
         self.reserve(self.len + 1u64);
         // the slot is fresh capacity, uninitialized, so this initializes it rather
@@ -94,6 +99,7 @@ pub struct Vec<T> {
     /// if (slot.is_none()) { ... }   // `slot` is destroyed at end of scope
     /// ```
     @alloc(false)
+    @noalias
     pub proc push_within_capacity(*self, value: T) Option<T> {
         if (self.len >= self.cap) {
             return Option::Some(value);
@@ -107,10 +113,12 @@ pub struct Vec<T> {
     /// Whether `push_within_capacity` would refuse: `len == cap`. Says nothing
     /// about `push`, which grows.
     @alloc(false)
+    @noalias
     pub proc is_full(*self) bool { return self.len >= self.cap; }
 
     /// How many more elements fit before the buffer would have to grow.
     @alloc(false)
+    @noalias
     pub proc remaining(*self) u64 { return self.cap - self.len; }
 
     /// Shorten to `len` elements, destroying those dropped. Given a length at or
@@ -130,6 +138,7 @@ pub struct Vec<T> {
     /// plain struct); for an owning `T` it would duplicate ownership, and
     /// instantiating it is a move error - reach the element by pointer with
     /// `get_ptr` instead.
+    @noalias
     pub proc get(*self, i: u64) Option<T> {
         if (i >= self.len) {
             return Option::None;
@@ -139,6 +148,7 @@ pub struct Vec<T> {
 
     /// A pointer to the element at `i`, for in-place mutation of the slot, or
     /// `none` when `i` is out of bounds.
+    @noalias
     pub proc get_ptr(*self, i: u64) Option<*T> {
         if (i >= self.len) {
             return Option::None;
@@ -149,6 +159,7 @@ pub struct Vec<T> {
     /// Return the buffer's base pointer, or null if it has never allocated.
     /// The pointer is not bounds-checked and is invalidated by reallocation or
     /// destruction.
+    @noalias
     pub proc as_ptr(*self) *T {
         return self.data;
     }
@@ -157,6 +168,7 @@ pub struct Vec<T> {
     /// Out-of-bounds is undefined; guard with len. Because it does not drop the
     /// previous occupant, this is for a `Copy` `T` or a slot known to be
     /// uninitialized; overwriting a live owning value with it would leak that value.
+    @noalias
     pub proc set(*self, i: u64, value: T) {
         ptr_write::<T>(&self.data[i], value);
     }
@@ -164,6 +176,7 @@ pub struct Vec<T> {
     /// Remove and return the last element. Returns `Option<*T>`: `some` pointing
     /// at the (now logically dead but still resident) slot, or `none` when empty.
     /// The pointer is valid until the next push or free.
+    @noalias
     pub proc pop(*self) Option<*T> {
         if (self.len == 0u64) {
             return Option::None;
@@ -205,6 +218,7 @@ pub struct Vec<T> {
 
     /// Iterate front to back by pointer. The iterator borrows this Vec, reads its
     /// length on every step, and must not outlive it.
+    @noalias
     pub proc iter(*self) VecIter<T> {
         return VecIter::<T> { vec: self, pos: 0u64 };
     }
@@ -220,6 +234,7 @@ pub struct VecIter<T> {
 
 extend VecIter<T>: Iterator {
     type Item = *T;
+    @noalias
     proc next(*self) Option<*T> {
         if (self.pos >= self.vec.len()) {
             return Option::None;
@@ -244,6 +259,7 @@ pub struct VecIntoIter<T> {
 extend VecIntoIter<T>: Iterator {
     type Item = T;
 
+    @noalias
     proc next(*self) Option<T> {
         if (self.pos >= self.len) {
             return Option::None;
