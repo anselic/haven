@@ -141,7 +141,10 @@ fn main() {
             // past this point (mono, MIL, LLVM, and the post-mono ownership/alloc
             // checks) operates on concrete instances a lib does not have; those
             // are deferred to the leaf, where instantiation happens.
-            write_lib_metadata(input, &package_name, &defs, &files, &args.c_file, &args.link_lib, &args.output);
+            write_lib_metadata(
+                input, &package_name, &defs, &files, &args.c_file,
+                &args.link_lib, &args.link_search, &args.link_arg, &args.output,
+            );
         } else {
             // expand generics into concrete instances, then re-typecheck the
             // now fully-concrete program so node_types is populated for the
@@ -267,6 +270,8 @@ fn main() {
             let mut native_temps: Vec<tempfile::NamedTempFile> = Vec::new();
             let mut native_objs: Vec<std::path::PathBuf> = Vec::new();
             let mut link_libs: Vec<String> = Vec::new();
+            let mut link_search: Vec<String> = Vec::new();
+            let mut link_args: Vec<String> = Vec::new();
             // Only deps whose modules were actually loaded contribute native C and
             // link libs. A dep that is bound but never imported (and is not the
             // prelude) pulls nothing in - so the discovered std costs a freestanding
@@ -286,6 +291,14 @@ fn main() {
                     if !link_libs.iter().any(|l| l == lib) {
                         link_libs.push(lib.clone());
                     }
+                }
+                for path in &meta.link_search {
+                    if !link_search.iter().any(|p| p == path) {
+                        link_search.push(path.clone());
+                    }
+                }
+                for arg in &meta.link_args {
+                    link_args.push(arg.clone());
                 }
                 for src in &meta.native {
                     let mut c_temp = temp_file(".c");
@@ -346,6 +359,14 @@ fn main() {
                     link_libs.push(lib.clone());
                 }
             }
+            for path in &args.link_search {
+                if !link_search.iter().any(|p| p == path) {
+                    link_search.push(path.clone());
+                }
+            }
+            for arg in &args.link_arg {
+                link_args.push(arg.clone());
+            }
 
             // `-l` flags for every library the deps and the leaf declared (e.g.
             // std's `libs = ["m"]`, or a binary's `libs = ["raylib"]`). Owned here
@@ -375,6 +396,8 @@ fn main() {
             compiler_args.extend(args.compiler_flags.split_whitespace().map(Into::into));
             // dependency C objects, ahead of the `-l` flags they may reference
             compiler_args.extend(native_objs.iter().map(|p| p.clone().into_os_string()));
+            compiler_args.extend(link_search.iter().map(|p| format!("-L{}", p).into()));
+            compiler_args.extend(link_args.iter().map(Into::into));
 
             // add -lm on non-Windows platforms because math library is
             // in the CRT for MSVC and MinGW. Skipped when a dependency already
@@ -627,6 +650,8 @@ fn write_lib_metadata(
     files: &haven_common::diag::Files<'_>,
     c_files: &[std::path::PathBuf],
     link_libs: &[String],
+    link_search: &[String],
+    link_args: &[String],
     output: &std::path::Path,
 ) {
     // the package root is the entry file's directory; module keys are the
@@ -701,9 +726,14 @@ fn write_lib_metadata(
         native.push(haven_meta::NativeSource { name, source });
     }
     let link_libs = link_libs.to_vec();
+    let link_search = link_search.to_vec();
+    let link_args = link_args.to_vec();
 
     let havenc_version = env!("CARGO_PKG_VERSION").to_string();
-    let fingerprint = haven_meta::fingerprint(package_name, &havenc_version, &modules, &native, &link_libs);
+    let fingerprint = haven_meta::fingerprint(
+        package_name, &havenc_version, &modules, &native,
+        &link_libs, &link_search, &link_args,
+    );
     let meta = haven_meta::HavenMeta {
         header: haven_meta::Header {
             format_version: haven_meta::FORMAT_VERSION,
@@ -714,6 +744,8 @@ fn write_lib_metadata(
         modules,
         native,
         link_libs,
+        link_search,
+        link_args,
     };
 
     let out_path = output.with_extension("hvmeta");

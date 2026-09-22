@@ -328,7 +328,7 @@ fn version_mismatch_errors_cleanly() {
         source: "pub proc thing() i32 { return 1; }\n".into(),
         is_root: true,
     }];
-    let fp = haven_meta::fingerprint("qux", "0.0.0", &modules, &[], &[]);
+    let fp = haven_meta::fingerprint("qux", "0.0.0", &modules, &[], &[], &[], &[]);
     let bad = haven_meta::HavenMeta {
         header: haven_meta::Header {
             format_version: haven_meta::FORMAT_VERSION + 1,
@@ -339,6 +339,8 @@ fn version_mismatch_errors_cleanly() {
         modules,
         native: vec![],
         link_libs: vec![],
+        link_search: vec![],
+        link_args: vec![],
     };
     let art = dir.path().join("qux.hvmeta");
     haven_meta::write(&art, &bad).unwrap();

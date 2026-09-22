@@ -16,3 +16,4 @@ colored = "3.1.1"
 
 [dev-dependencies]
 tempfile.workspace = true
+haven_meta.workspace = true

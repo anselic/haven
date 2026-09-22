@@ -1,6 +1,4 @@
-//! The `build` post-build script: `vestry` compiles the named Haven program, runs
-//! it once the artifact exists, and describes the build to it through the
-//! environment.
+//! Pre-build `build` scripts and artifact-time `post-build` scripts.
 //!
 //! The point of the hook is that `vestry` stays ignorant of what the script does -
 //! bundling a `.clap`, stamping a version, signing - so what these tests pin down
@@ -15,7 +13,7 @@ use common::{err, vestry, out, scaffold};
 /// A script that reports its whole environment and proves the artifact is really
 /// on disk by the time it runs. Also drops a file in the working directory, which
 /// is how the tests check `vestry` runs it from the project root.
-const PROBE: &str = "\
+const POST_PROBE: &str = "\
 import std/env
 import std/fs
 import std/result { Result }
@@ -49,21 +47,101 @@ proc main() i32 {
 }
 ";
 
-/// A binary project whose manifest declares `build = \"build.hv\"`.
-fn app_with_script(root: &Path, script: &str) {
+/// A binary project whose manifest declares `post-build = \"package.hv\"`.
+fn app_with_post_script(root: &Path, script: &str) {
     scaffold(root, &[
         ("vestry.toml",
             "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\
-             build = \"build.hv\"\n"),
+             post-build = \"package.hv\"\n"),
         ("src/main.hv", "proc main() i32 {\n    println(1);\n    return 0;\n}\n"),
-        ("build.hv", script),
+        ("package.hv", script),
     ]);
+}
+
+const PRE_PROBE: &str = "\
+import std/env
+import std/string { String }
+
+proc main() i32 {
+    let out: String = env::var(\"VESTRY_OUT_DIR\").unwrap();
+    let arch: String = env::var(\"VESTRY_TARGET_ARCH\").unwrap();
+    print(\"OUT=\"); println(out.as_str());
+    print(\"ARCH=\"); println(arch.as_str());
+    println(\"pre-ran\");
+    println(\"vestry::warning=hello from build.hv\");
+    return 0;
+}
+";
+
+#[test]
+fn build_script_runs_before_compilation() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("vestry.toml",
+            "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\
+             build = \"build.hv\"\n"),
+        ("src/main.hv", "proc main() i32 { return 0; }\n"),
+        ("build.hv", PRE_PROBE),
+    ]);
+
+    let res = vestry(dir.path(), &["build"]);
+    assert!(res.status.success(), "build failed: {}", err(&res));
+    let stdout = out(&res);
+    let script_at = stdout.find("pre-ran").expect("pre-build output missing");
+    let compile_at = stdout.find("Compiling app v0.1.0 (executable)")
+        .expect("package compile status missing");
+    assert!(script_at < compile_at, "build.hv must run before compilation:\n{stdout}");
+    assert!(stdout.contains(&format!("ARCH={}", std::env::consts::ARCH)), "got:\n{stdout}");
+    assert!(stdout.contains("Warning") && stdout.contains("hello from build.hv"), "got:\n{stdout}");
+    assert!(dir.path().join(".vestry/out").is_dir());
+}
+
+#[test]
+fn build_directives_are_stored_in_library_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("vestry.toml",
+            "[project]\nname = \"native_provider\"\nkind = [\"lib\"]\n\
+             build = \"build.hv\"\n"),
+        ("src/lib.hv", "pub proc answer() i32 { return 42; }\n"),
+        ("build.hv",
+            "proc main() i32 {\n\
+             \x20   println(\"vestry::link-search=native=/native/lib\");\n\
+             \x20   println(\"vestry::link-lib=SDL3\");\n\
+             \x20   println(\"vestry::link-archive=native/helper.a\");\n\
+             \x20   println(\"vestry::link-arg=-pthread\");\n\
+             \x20   return 0;\n}\n"),
+    ]);
+
+    let res = vestry(dir.path(), &["build"]);
+    assert!(res.status.success(), "build failed: {}", err(&res));
+    let meta = haven_meta::read(
+        &dir.path().join(".vestry/target/native-provider.hvmeta")).unwrap();
+    assert_eq!(meta.link_search, vec!["/native/lib"]);
+    assert_eq!(meta.link_libs, vec!["SDL3"]);
+    assert_eq!(meta.link_args, vec![
+        dir.path().join("native/helper.a").to_string_lossy().into_owned(),
+        "-pthread".to_string(),
+    ]);
+}
+
+#[test]
+fn rejects_unknown_build_directive() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("vestry.toml", "[project]\nname = \"app\"\nbuild = \"build.hv\"\n"),
+        ("src/main.hv", "proc main() i32 { return 0; }\n"),
+        ("build.hv", "proc main() i32 { println(\"vestry::mystery=value\"); return 0; }\n"),
+    ]);
+    let res = vestry(dir.path(), &["build"]);
+    assert!(!res.status.success());
+    assert!(err(&res).contains("unknown directive"), "got: {}", err(&res));
 }
 
 #[test]
 fn runs_the_script_once_the_artifact_exists() {
     let dir = tempfile::tempdir().unwrap();
-    app_with_script(dir.path(), PROBE);
+    app_with_post_script(dir.path(), POST_PROBE);
 
     let res = vestry(dir.path(), &["build"]);
     assert!(res.status.success(), "build failed: {}", err(&res));
@@ -88,7 +166,7 @@ fn runs_the_script_once_the_artifact_exists() {
 #[test]
 fn the_environment_describes_the_build() {
     let dir = tempfile::tempdir().unwrap();
-    app_with_script(dir.path(), PROBE);
+    app_with_post_script(dir.path(), POST_PROBE);
 
     let res = vestry(dir.path(), &["build"]);
     assert!(res.status.success(), "build failed: {}", err(&res));
@@ -113,9 +191,9 @@ fn output_kind_is_the_manifest_spelling() {
     scaffold(dir.path(), &[
         ("vestry.toml",
             "[project]\nname = \"plug\"\nversion = \"0.1.0\"\nkind = [\"cdylib\"]\n\
-             build = \"build.hv\"\n"),
+             post-build = \"package.hv\"\n"),
         ("src/lib.hv", "@export\nproc thing() i32 {\n    return 7;\n}\n"),
-        ("build.hv", PROBE),
+        ("package.hv", POST_PROBE),
     ]);
 
     let res = vestry(dir.path(), &["build"]);
@@ -131,13 +209,13 @@ fn output_kind_is_the_manifest_spelling() {
 #[test]
 fn a_failing_script_fails_the_build() {
     let dir = tempfile::tempdir().unwrap();
-    app_with_script(dir.path(),
+    app_with_post_script(dir.path(),
         "proc main() i32 {\n    println(\"packaging went wrong\");\n    return 3;\n}\n");
 
     let res = vestry(dir.path(), &["build"]);
     assert!(!res.status.success(), "a nonzero script exit must fail the build");
     let e = err(&res);
-    assert!(e.contains("build.hv"), "the error should name the script; got: {e}");
+    assert!(e.contains("package.hv"), "the error should name the script; got: {e}");
     assert!(e.contains('3'), "the error should carry the script's status; got: {e}");
     // whatever it printed on the way out still reaches the user.
     assert!(out(&res).contains("packaging went wrong"), "got:\n{}", out(&res));
@@ -149,7 +227,7 @@ fn a_missing_script_is_reported() {
     scaffold(dir.path(), &[
         ("vestry.toml",
             "[project]\nname = \"app\"\nversion = \"0.1.0\"\nkind = [\"bin\"]\n\
-             build = \"nowhere.hv\"\n"),
+             post-build = \"nowhere.hv\"\n"),
         ("src/main.hv", "proc main() i32 {\n    return 0;\n}\n"),
     ]);
 
@@ -165,7 +243,7 @@ fn a_missing_script_is_reported() {
 #[test]
 fn the_script_is_reused_until_it_changes() {
     let dir = tempfile::tempdir().unwrap();
-    app_with_script(dir.path(), "proc main() i32 {\n    println(\"first\");\n    return 0;\n}\n");
+    app_with_post_script(dir.path(), "proc main() i32 {\n    println(\"first\");\n    return 0;\n}\n");
 
     let first = vestry(dir.path(), &["build"]);
     assert!(first.status.success(), "build failed: {}", err(&first));
@@ -178,7 +256,7 @@ fn the_script_is_reused_until_it_changes() {
         "an unchanged script must not be recompiled:\n{}", out(&second));
     assert!(out(&second).contains("first"), "it should still run:\n{}", out(&second));
 
-    std::fs::write(dir.path().join("build.hv"),
+    std::fs::write(dir.path().join("package.hv"),
         "proc main() i32 {\n    println(\"second\");\n    return 0;\n}\n").unwrap();
 
     let third = vestry(dir.path(), &["build"]);

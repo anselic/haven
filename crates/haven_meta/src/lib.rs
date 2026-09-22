@@ -34,7 +34,9 @@ use sha2::{Digest, Sha256};
 /// source and the native libraries it needs, so a consumer can compile and link
 /// them without the compiler embedding any of it. Still source, never objects, so
 /// the artifact stays target-independent (see [`fingerprint`]).
-pub const FORMAT_VERSION: u32 = 2;
+///
+/// v3 added build-script-provided library search paths and raw linker arguments.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// A complete `.hvmeta` artifact: a header, the package's own source modules, and
 /// its native code (C source + libraries to link).
@@ -55,6 +57,12 @@ pub struct HavenMeta {
     /// links them transitively without the package knowing who consumes it.
     #[serde(default)]
     pub link_libs: Vec<String>,
+    /// Native library directories contributed by the package's pre-build script.
+    #[serde(default)]
+    pub link_search: Vec<String>,
+    /// Extra linker arguments contributed by the package's pre-build script.
+    #[serde(default)]
+    pub link_args: Vec<String>,
 }
 
 /// One C source file a package ships, carried verbatim in its artifact.
@@ -106,11 +114,10 @@ pub struct MetaModule {
 ///
 /// Hashes the package name, the producing `havenc` version, every module's
 /// `(key, source)` **sorted by key**, every native source's `(name, source)`
-/// **sorted by name**, and the `link_libs` in declared order — so import order
-/// cannot change the result, but the *link* order of libraries (which can matter)
-/// does. No absolute paths, no timestamps, no target triple: a source-blob lib is
-/// target-independent (compiled fresh per target at the leaf), so the same source
-/// from any checkout on any machine fingerprints identically.
+/// **sorted by name**, and native link configuration in declared order — so
+/// import order cannot change the result, but linker order (which can matter)
+/// does. Build-script paths can make a v3 artifact host-local; that is deliberate,
+/// because they name native output produced for this host and target.
 ///
 /// The native code participates because a consumer links it: two libraries that
 /// differ only in their C, or only in a `-l` they request, must not fingerprint
@@ -125,6 +132,8 @@ pub fn fingerprint(
     modules: &[MetaModule],
     native: &[NativeSource],
     link_libs: &[String],
+    link_search: &[String],
+    link_args: &[String],
 ) -> [u8; 32] {
     fn feed(h: &mut Sha256, bytes: &[u8]) {
         h.update((bytes.len() as u64).to_le_bytes());
@@ -151,6 +160,14 @@ pub fn fingerprint(
     feed(&mut h, &(link_libs.len() as u64).to_le_bytes());
     for lib in link_libs {
         feed(&mut h, lib.as_bytes());
+    }
+    feed(&mut h, &(link_search.len() as u64).to_le_bytes());
+    for path in link_search {
+        feed(&mut h, path.as_bytes());
+    }
+    feed(&mut h, &(link_args.len() as u64).to_le_bytes());
+    for arg in link_args {
+        feed(&mut h, arg.as_bytes());
     }
     h.finalize().into()
 }
@@ -207,7 +224,7 @@ mod tests {
     use super::*;
 
     fn sample(modules: Vec<MetaModule>) -> HavenMeta {
-        let fp = fingerprint("foo", "0.1.0", &modules, &[], &[]);
+        let fp = fingerprint("foo", "0.1.0", &modules, &[], &[], &[], &[]);
         HavenMeta {
             header: Header {
                 format_version: FORMAT_VERSION,
@@ -218,6 +235,8 @@ mod tests {
             modules,
             native: vec![],
             link_libs: vec![],
+            link_search: vec![],
+            link_args: vec![],
         }
     }
 
@@ -242,6 +261,8 @@ mod tests {
         let mut meta = sample(mods_a());
         meta.native = native_a();
         meta.link_libs = vec!["m".into()];
+        meta.link_search = vec!["/native/lib".into()];
+        meta.link_args = vec!["-pthread".into()];
         write(&path, &meta).unwrap();
         let back = read(&path).unwrap();
         assert_eq!(meta, back);
@@ -256,36 +277,38 @@ mod tests {
         let mut native_reordered = native_a();
         native_reordered.reverse();
         assert_eq!(
-            fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &["m".into()]),
-            fingerprint("foo", "0.1.0", &reordered, &native_reordered, &["m".into()]),
+            fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &["m".into()], &[], &[]),
+            fingerprint("foo", "0.1.0", &reordered, &native_reordered, &["m".into()], &[], &[]),
         );
     }
 
     #[test]
     fn fingerprint_changes_with_content() {
-        let base = fingerprint("foo", "0.1.0", &mods_a(), &[], &[]);
+        let base = fingerprint("foo", "0.1.0", &mods_a(), &[], &[], &[], &[]);
         let mut changed = mods_a();
         changed[0].source.push_str(" // tweak");
-        assert_ne!(base, fingerprint("foo", "0.1.0", &changed, &[], &[]));
+        assert_ne!(base, fingerprint("foo", "0.1.0", &changed, &[], &[], &[], &[]));
         // name and compiler version both participate
-        assert_ne!(base, fingerprint("bar", "0.1.0", &mods_a(), &[], &[]));
-        assert_ne!(base, fingerprint("foo", "0.2.0", &mods_a(), &[], &[]));
+        assert_ne!(base, fingerprint("bar", "0.1.0", &mods_a(), &[], &[], &[], &[]));
+        assert_ne!(base, fingerprint("foo", "0.2.0", &mods_a(), &[], &[], &[], &[]));
     }
 
     #[test]
     fn fingerprint_changes_with_native_code() {
         // a lib that differs only in its C source, or only in a `-l` it requests,
         // must not fingerprint identically - else a stale-dep check links old code.
-        let base = fingerprint("foo", "0.1.0", &mods_a(), &[], &[]);
-        assert_ne!(base, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[]));
+        let base = fingerprint("foo", "0.1.0", &mods_a(), &[], &[], &[], &[]);
+        assert_ne!(base, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[], &[], &[]));
 
-        let with_native = fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[]);
+        let with_native = fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[], &[], &[]);
         let mut tweaked = native_a();
         tweaked[0].source.push_str(" /* tweak */");
-        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &tweaked, &[]));
+        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &tweaked, &[], &[], &[]));
 
         // a changed link-lib set participates too
-        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &["m".into()]));
+        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &["m".into()], &[], &[]));
+        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[], &["lib".into()], &[]));
+        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[], &[], &["archive.a".into()]));
     }
 
     #[test]

@@ -3,9 +3,8 @@
 //! A project is any directory tree with a `vestry.toml` at its root. The manifest
 //! is deliberately small: a `[project]` table with a name, an optional `entry`,
 //! a `kind` list declaring what the project builds to (`bin`, `lib`, `cdylib`,
-//! `staticlib`) and an optional `build` script to run afterwards, plus an
-//! optional `[dependencies]` table naming the Haven libraries this project
-//! consumes.
+//! `staticlib`), optional pre-build and post-build scripts, plus an optional
+//! `[dependencies]` table naming the Haven libraries this project consumes.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -139,11 +138,16 @@ pub struct ProjectTable {
     #[serde(default)]
     pub kind: Option<Vec<Kind>>,
 
-    /// A post-build script: a Haven source file, relative to the project root,
-    /// compiled and run once the build's artifact exists. See
-    /// [`Project::build_script`] and `vestry`'s `run_build_script`.
+    /// A pre-build script: a Haven source file, relative to the project root,
+    /// compiled and run before this package is compiled. Its `vestry::...`
+    /// stdout directives contribute native linker configuration to the package.
     #[serde(default)]
     pub build: Option<String>,
+
+    /// A post-build script run once the package artifact exists. This is for
+    /// packaging, signing and staging; it cannot affect compilation or linking.
+    #[serde(default, rename = "post-build")]
+    pub post_build: Option<String>,
 
     /// Whether this package *provides* the implicit prelude and so must nominate
     /// itself when compiling its own sources (`havenc --prelude <self>`). The
@@ -392,10 +396,14 @@ impl Project {
             .collect()
     }
 
-    /// Absolute path to the post-build script, when the manifest declares one.
-    /// Resolved against the project root like `entry`.
+    /// Absolute path to the pre-build script, when the manifest declares one.
     pub fn build_script(&self) -> Option<PathBuf> {
         self.project.build.as_ref().map(|rel| self.root.join(rel))
+    }
+
+    /// Absolute path to the post-build script, when the manifest declares one.
+    pub fn post_build_script(&self) -> Option<PathBuf> {
+        self.project.post_build.as_ref().map(|rel| self.root.join(rel))
     }
 
     /// The build-output directory, `.vestry/target/` under the project root.
@@ -408,6 +416,11 @@ impl Project {
     /// mistaken for the project's artifact.
     pub fn build_dir(&self) -> PathBuf {
         self.root.join(".vestry").join("build")
+    }
+
+    /// Stable scratch/output directory made available to pre-build scripts.
+    pub fn out_dir(&self) -> PathBuf {
+        self.root.join(".vestry").join("out")
     }
 
     /// The documentation-output directory, `.vestry/doc/` under the project root.
@@ -523,5 +536,15 @@ mod tests {
         let err = project_from("[project]\nnaem = \"std\"\nkind = [\"lib\"]\n").unwrap_err();
         assert!(err.contains("naem") || err.contains("unknown") || err.contains("missing"),
             "got: {err}");
+    }
+
+    #[test]
+    fn parses_pre_and_post_build_scripts() {
+        let p = project_from(
+            "[project]\nname = \"hooks\"\nkind = [\"lib\"]\n\
+             build = \"build.hv\"\npost-build = \"package.hv\"\n",
+        ).unwrap();
+        assert_eq!(p.build_script(), Some(PathBuf::from("/pkg/build.hv")));
+        assert_eq!(p.post_build_script(), Some(PathBuf::from("/pkg/package.hv")));
     }
 }

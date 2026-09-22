@@ -124,6 +124,16 @@ pub struct Args {
     #[arg(long = "link-lib", value_name = "NAME")]
     pub link_lib: Vec<String>,
 
+    /// Add a native library search directory (`-L<path>`). With `--lib` this is
+    /// recorded in `.hvmeta` and inherited by consumers.
+    #[arg(long = "link-search", value_name = "PATH")]
+    pub link_search: Vec<String>,
+
+    /// Pass one argument through to the final native linker. With `--lib` this
+    /// is recorded in `.hvmeta` and inherited by consumers.
+    #[arg(long = "link-arg", value_name = "ARG", allow_hyphen_values = true)]
+    pub link_arg: Vec<String>,
+
     /// Diagnostic output format. `human` (default) is the pretty terminal
     /// renderer; `json` emits one NDJSON diagnostic per line on stderr for
     /// tooling (LSP, the `vestry` build orchestrator) to parse.

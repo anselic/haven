@@ -12,6 +12,7 @@
 //!   doc          generate docs into `.vestry/doc/`
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -128,6 +129,14 @@ struct BuildOpts<'a> {
     emit_ir: bool,
     /// Forwarded to `havenc --emit-optimized-ir`: emit the `.opt.ll`.
     emit_optimized_ir: bool,
+}
+
+/// Native linker configuration emitted by a package's pre-build script.
+#[derive(Default)]
+struct BuildDirectives {
+    link_search: Vec<String>,
+    link_libs: Vec<String>,
+    link_args: Vec<String>,
 }
 
 impl<'a> BuildOpts<'a> {
@@ -319,9 +328,8 @@ fn build_dependency(
     Ok((artifact, deps))
 }
 
-/// Compile one project's entry file with `havenc`, binding `deps` as `--dep`
-/// and running its post-build script if it declared one. Dependency resolution
-/// and building is the caller's job; this is the single compiler invocation.
+/// Run one project's pre-build hook, compile its entry file with `havenc`, then
+/// run its post-build hook. Dependency resolution is the caller's job.
 fn compile_project(
     project: &Project,
     deps: &[(String, PathBuf)],
@@ -343,6 +351,13 @@ fn compile_project(
         Output::Executable
     } else {
         project.output_kind()
+    };
+
+    // A Cargo-style build script runs before this package is compiled, so its
+    // output can affect both the current link and the metadata of a library.
+    let directives = match project.build_script() {
+        Some(script) => run_pre_build_script(project, &script, output, opts.fmt)?,
+        None => BuildDirectives::default(),
     };
 
     let havenc = tool_path("havenc");
@@ -407,6 +422,15 @@ fn compile_project(
     for lib in project.link_libs() {
         cmd.arg("--link-lib").arg(lib);
     }
+    for path in directives.link_search {
+        cmd.arg("--link-search").arg(path);
+    }
+    for lib in directives.link_libs {
+        cmd.arg("--link-lib").arg(lib);
+    }
+    for arg in directives.link_args {
+        cmd.arg("--link-arg").arg(arg);
+    }
 
     let label = describe(project);
     status(Status::Compiling, format_args!("{} ({})", label, output.label()));
@@ -420,14 +444,9 @@ fn compile_project(
     // extension choices, so callers (chiefly `run`) know what to launch.
     let artifact = artifact_path(&out_base, output);
 
-    // The artifact exists; hand it to the project's own post-build script, if it
-    // declared one. Runs for dependencies too, since a library's packaging step
-    // is as much its own business as a leaf's.
-    if let Some(script) = project.build_script() {
-        // `opts.fmt` only: a packaging script is a host program compiled against
-        // `std` alone, and flags aimed at the artifact's codegen (an optimization
-        // report, say) have no business turning up in its build.
-        run_build_script(project, &script, &artifact, output, opts.fmt)?;
+    // Packaging remains a separate, explicitly post-build hook.
+    if let Some(script) = project.post_build_script() {
+        run_post_build_script(project, &script, &artifact, output, opts.fmt)?;
     }
 
     status(Status::Finished, &label);
@@ -464,72 +483,153 @@ fn artifact_path(base: &Path, output: Output) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// post-build script
+// build scripts
 // ---------------------------------------------------------------------------
 
-/// Compile a stale build script and run it after the project artifact is ready.
-///
-/// Build scripts receive artifact details through the environment and compile
-/// against `std` only, without the project's dependencies. A nonzero exit fails
-/// the build; stdout and stderr are inherited.
-fn run_build_script(
+/// Compile and run a Cargo-style pre-build script, collecting `vestry::...`
+/// directives from stdout. Non-directive output is forwarded unchanged.
+fn run_pre_build_script(
+    project: &Project,
+    script: &Path,
+    output: Output,
+    fmt: MessageFormat,
+) -> Result<BuildDirectives, String> {
+    let (shown, exe) = compile_build_script(project, script, "build", fmt)?;
+    let out_dir = project.out_dir();
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("cannot create `{}`: {}", out_dir.display(), e))?;
+
+    let result = base_script_command(project, &exe, output)
+        .env("VESTRY_OUT_DIR", &out_dir)
+        .output()
+        .map_err(|e| format!("failed to run build script `{}`: {}", exe.display(), e))?;
+
+    std::io::stderr().write_all(&result.stderr)
+        .map_err(|e| format!("cannot forward build script stderr: {}", e))?;
+    let stdout = String::from_utf8(result.stdout)
+        .map_err(|_| format!("build script `{}` wrote non-UTF-8 stdout", shown))?;
+    let directives = parse_build_directives(&shown, &stdout, &project.root)?;
+
+    if !result.status.success() {
+        return Err(script_exit_error("build", &shown, result.status));
+    }
+    Ok(directives)
+}
+
+/// Run an artifact-time packaging script. It deliberately has no directive
+/// protocol: by this point compilation and linking have already finished.
+fn run_post_build_script(
     project: &Project,
     script: &Path,
     artifact: &Path,
     output: Output,
     fmt: MessageFormat,
 ) -> Result<(), String> {
+    let (shown, exe) = compile_build_script(project, script, "post-build", fmt)?;
+    let exit = base_script_command(project, &exe, output)
+        .env("VESTRY_ARTIFACT", artifact)
+        .status()
+        .map_err(|e| format!("failed to run post-build script `{}`: {}", exe.display(), e))?;
+    if !exit.success() {
+        return Err(script_exit_error("post-build", &shown, exit));
+    }
+    Ok(())
+}
+
+/// Compile a script when its source is newer than the cached executable.
+fn compile_build_script(
+    project: &Project,
+    script: &Path,
+    manifest_key: &str,
+    fmt: MessageFormat,
+) -> Result<(String, PathBuf), String> {
     let shown = relative_to(&project.root, script).display().to_string();
     if !script.is_file() {
         return Err(format!(
-            "build script `{}` does not exist (declared as `build` in {})",
-            shown, config::MANIFEST));
+            "build script `{}` does not exist (declared as `{}` in {})",
+            shown, manifest_key, config::MANIFEST));
     }
-
     let build_dir = project.build_dir();
     std::fs::create_dir_all(&build_dir)
         .map_err(|e| format!("cannot create `{}`: {}", build_dir.display(), e))?;
-
     let stem = script.file_stem().and_then(|s| s.to_str()).unwrap_or("build");
-    let out_base = build_dir.join(stem);
+    let out_base = build_dir.join(format!("{}-{}", manifest_key, stem));
     let exe = artifact_path(&out_base, Output::Executable);
-
     if is_stale(script, &exe) {
         status(Status::Compiling, format_args!("{} (build script)", shown));
         let havenc = tool_path("havenc");
         let exit = Command::new(&havenc)
             .arg(script)
-            .arg("--output")
-            .arg(&out_base)
-            .arg("--message-format")
-            .arg(fmt.as_str())
+            .arg("--output").arg(&out_base)
+            .arg("--message-format").arg(fmt.as_str())
             .status()
             .map_err(|e| format!("failed to run `{}`: {}", havenc.display(), e))?;
         havenc_outcome(exit, format!("build script `{}` failed to compile", shown))?;
     }
+    Ok((shown, exe))
+}
 
-    // The build's details, passed as environment variables rather than argv: a
-    // positional contract rots the moment a field is added, and an environment
-    // can be reproduced by hand, so a script can be run standalone under a
-    // debugger without a build to drive it.
-    let exit = Command::new(&exe)
-        .current_dir(&project.root)
+/// Common environment shared by pre-build and post-build scripts.
+fn base_script_command(project: &Project, exe: &Path, output: Output) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.current_dir(&project.root)
+        .env_remove("VESTRY_ARTIFACT")
+        .env_remove("VESTRY_OUT_DIR")
         .env("VESTRY_PROJECT_ROOT", &project.root)
         .env("VESTRY_PKG_NAME", &project.project.name)
         .env("VESTRY_PKG_VERSION", project.version_display())
         .env("VESTRY_TARGET_DIR", project.target_dir())
-        .env("VESTRY_ARTIFACT", artifact)
         .env("VESTRY_OUTPUT_KIND", output.manifest_kind())
         .env("VESTRY_TARGET_OS", target_os())
-        .status()
-        .map_err(|e| format!("failed to run build script `{}`: {}", exe.display(), e))?;
-    if !exit.success() {
-        return Err(match exit.code() {
-            Some(code) => format!("build script `{}` exited with status {}", shown, code),
-            None => format!("build script `{}` terminated by signal", shown),
-        });
+        .env("VESTRY_TARGET_ARCH", std::env::consts::ARCH);
+    cmd
+}
+
+fn parse_build_directives(
+    shown: &str,
+    stdout: &str,
+    project_root: &Path,
+) -> Result<BuildDirectives, String> {
+    const PREFIX: &str = "vestry::";
+    let mut out = BuildDirectives::default();
+    for line in stdout.lines() {
+        let Some(directive) = line.strip_prefix(PREFIX) else {
+            println!("{}", line);
+            continue;
+        };
+        let (key, value) = directive.split_once('=').ok_or_else(|| format!(
+            "build script `{}` emitted malformed directive `{}`", shown, line))?;
+        if value.is_empty() {
+            return Err(format!("build script `{}` emitted empty `{}` directive", shown, key));
+        }
+        match key {
+            "link-search" => out.link_search.push(absolute_directive_path(
+                project_root, value.strip_prefix("native=").unwrap_or(value))),
+            "link-lib" => out.link_libs.push(value.to_string()),
+            "link-archive" => out.link_args.push(absolute_directive_path(project_root, value)),
+            "link-arg" => out.link_args.push(value.to_string()),
+            "warning" => status(Status::Warning, value),
+            _ => return Err(format!(
+                "build script `{}` emitted unknown directive `{}`", shown, key)),
+        }
     }
-    Ok(())
+    Ok(out)
+}
+
+fn absolute_directive_path(project_root: &Path, value: &str) -> String {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        value.to_string()
+    } else {
+        project_root.join(path).to_string_lossy().into_owned()
+    }
+}
+
+fn script_exit_error(kind: &str, shown: &str, status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("{} script `{}` exited with status {}", kind, shown, code),
+        None => format!("{} script `{}` terminated by signal", kind, shown),
+    }
 }
 
 /// Whether `exe` needs rebuilding from `src`, by modification time.
@@ -645,6 +745,8 @@ enum Status {
     Finished,
     /// Running a built executable.
     Running,
+    /// A non-fatal warning emitted by a build script.
+    Warning,
 
     Error,
 }
@@ -661,6 +763,7 @@ impl std::fmt::Display for Status {
             Status::Compiling => write!(f, "{:>width$}", "Compiling".blue()),
             Status::Finished  => write!(f, "{:>width$}", "Finished".green()),
             Status::Running   => write!(f, "{:>width$}", "Running".green()),
+            Status::Warning   => write!(f, "{:>width$}", "Warning".yellow()),
             Status::Error     => write!(f, "{:>width$}", "Error".red()),
         }
     }

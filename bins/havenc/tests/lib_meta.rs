@@ -88,6 +88,8 @@ fn embeds_c_sources_and_link_libs() {
         .arg("--c-file").arg("c/rt.c")
         .arg("--c-file").arg("c/util.c")
         .arg("--link-lib").arg("m")
+        .arg("--link-search").arg("/native/lib")
+        .arg("--link-arg=-pthread")
         .arg("-o").arg(&out)
         .output().expect("failed to spawn havenc");
     assert!(res.status.success(), "havenc --lib failed: {}", String::from_utf8_lossy(&res.stderr));
@@ -99,15 +101,18 @@ fn embeds_c_sources_and_link_libs() {
     assert!(by_name["rt.c"].source.contains("rt_thing"));
     assert!(by_name["util.c"].source.contains("util_thing"));
     assert_eq!(meta.link_libs, vec!["m".to_string()]);
+    assert_eq!(meta.link_search, vec!["/native/lib".to_string()]);
+    assert_eq!(meta.link_args, vec!["-pthread".to_string()]);
 
     // the native code is in the fingerprint: the header matches a fresh recompute
     // that includes it, and dropping it changes the digest.
     let recomputed = haven_meta::fingerprint(
         &meta.header.package_name, &meta.header.havenc_version, &meta.modules,
-        &meta.native, &meta.link_libs);
+        &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args);
     assert_eq!(meta.header.fingerprint, recomputed);
     let without_native = haven_meta::fingerprint(
-        &meta.header.package_name, &meta.header.havenc_version, &meta.modules, &[], &[]);
+        &meta.header.package_name, &meta.header.havenc_version, &meta.modules,
+        &[], &[], &[], &[]);
     assert_ne!(meta.header.fingerprint, without_native);
 }
 
@@ -169,7 +174,7 @@ fn round_trips_with_correct_modules_and_no_std() {
     // fingerprint in the header matches a fresh recompute over the modules.
     let recomputed = haven_meta::fingerprint(
         &meta.header.package_name, &meta.header.havenc_version, &meta.modules,
-        &meta.native, &meta.link_libs);
+        &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args);
     assert_eq!(meta.header.fingerprint, recomputed);
 }
 
@@ -269,8 +274,8 @@ fn fingerprint_ignores_module_load_order() {
     let mut reversed = meta.modules.clone();
     reversed.reverse();
     assert_eq!(
-        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &meta.modules, &meta.native, &meta.link_libs),
-        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &reversed, &meta.native, &meta.link_libs),
+        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &meta.modules, &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args),
+        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &reversed, &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args),
     );
 }
 
