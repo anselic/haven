@@ -8,3 +8,4 @@ pub mod diag;
 // error would otherwise fire on every `sizeof`/`null`/`__simd_*` call).
 pub mod intrinsics;
 pub mod layout;
+pub mod target;

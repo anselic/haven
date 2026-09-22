@@ -8,6 +8,7 @@ use clap::Parser;
 //   haven_back   - ABI/layout, LLVM IR emission
 use haven_common::{ast, diag};
 use haven_common::defs::Origin;
+use haven_common::target::TargetSpec;
 use haven_front::module;
 use haven_mid::{typecheck, mono, own, safecheck, opt, mil};
 use haven_back::llvm;
@@ -27,6 +28,12 @@ fn main() {
     if args.internal_panic || std::env::var_os("HAVENC_INTERNAL_PANIC").is_some() {
         panic!("deliberate internal panic (--internal-panic)");
     }
+
+    // All target-dependent compiler decisions will be driven by this value.
+    // Compilation is host-only today, but TargetSpec uses the same model that a
+    // future `--target <triple>` flag will select through `from_triple`.
+    let target = TargetSpec::host()
+        .unwrap_or_else(|e| fatal(format!("cannot describe compilation target: {e}")));
 
     // arena backing every `&'a str` in the AST (module sources, token streams,
     // and the synthetic mangled/prefixed names minted during module resolution
@@ -78,7 +85,8 @@ fn main() {
     // diagnostics below quote the span's owning module, not just the entry file.
     // `defs` owns every definition's identity: it produced the symbol names now
     // in `ast`, and carries the member table both typecheck passes use.
-    let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(input, args.package_name.as_deref(), prelude, &deps, default_std, &arena) {
+    let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(
+        input, args.package_name.as_deref(), prelude, &deps, default_std, &arena, &target) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };

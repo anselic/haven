@@ -73,7 +73,7 @@ pub(crate) fn payload_blob_type<'a>(bytes: usize, needed_align: usize) -> Type<'
 pub(crate) fn enum_repr<'a>(attributes: &[Attribute<'a>]) -> Result<(Type<'a>, bool), String> {
     for a in attributes {
         if a.value.name == "repr" {
-            return match a.value.value.as_deref() {
+            return match a.value.scalar() {
                 None | Some("C") | Some("i32") => Ok((Type::Int32, true)),
                 Some("i8")  => Ok((Type::Int8, true)),
                 Some("i16") => Ok((Type::Int16, true)),

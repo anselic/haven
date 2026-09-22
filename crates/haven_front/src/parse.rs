@@ -1327,23 +1327,74 @@ fn parse_stmt<'tks, 'src: 'tks>() -> P<'tks, 'src, Stmt<'src>> {
     .boxed()
 }
 
-/// Everything in an attribute after the sigil: `name` and an optional
-/// `(value)`. Shared so that the item and module spellings cannot drift into
-/// accepting different values.
+/// A structured target predicate used by `@cfg(...)`.
+///
+/// Predicates compare one compiler-known target property with a string. `all`,
+/// `any`, and `not` compose recursively, so adding boolean combinations later
+/// does not require reparsing an opaque attribute string.
+fn parse_cfg_expr<'tks, 'src: 'tks>() -> P<'tks, 'src, CfgExpr<'src>> {
+    recursive(|expr| {
+        let predicate = select_ref! { Token::Var(key) => *key }
+            .then_ignore(just(Token::Assign))
+            .then(select_ref! { Token::Str(value) => *value })
+            .map(|(key, value)| CfgExpr::Predicate { key, value });
+
+        let many = select_ref! {
+                Token::Var("all") => true,
+                Token::Var("any") => false,
+            }
+            .then(
+                expr.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .at_least(1)
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+            )
+            .map(|(all, exprs)| if all { CfgExpr::All(exprs) } else { CfgExpr::Any(exprs) });
+
+        let not = select_ref! { Token::Var("not") => () }
+            .ignore_then(expr.clone().delimited_by(just(Token::LParen), just(Token::RParen)))
+            .map(|expr| CfgExpr::Not(Box::new(expr)));
+
+        choice((many, not, predicate)).boxed()
+    })
+    .boxed()
+}
+
+/// Everything in an attribute after the sigil: `name` and optional arguments.
+/// Shared so that the item and module spellings cannot drift. Ordinary
+/// attributes take one scalar; `@cfg` takes the structured grammar above.
 fn attribute_tail<'tks, 'src: 'tks>() -> P<'tks, 'src, AttributeNode<'src>> {
     select_ref! { Token::Var(ident) => ident }
         .then(
             just(Token::LParen)
-                .ignore_then(select_ref! {
-                    Token::Var(s) => s.to_string(),
-                    Token::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-                    Token::IntLit(i) => i.to_string(),
-                    // Token::Str(s) => s.to_string()
-                })
+                .ignore_then(choice((
+                    parse_cfg_expr().map(AttributeArgs::Cfg),
+                    select_ref! {
+                        Token::Var(s) => AttributeArgs::Scalar(s.to_string()),
+                        Token::Bool(b) => AttributeArgs::Scalar(
+                            if *b { "true" } else { "false" }.to_string()),
+                        Token::IntLit(i) => AttributeArgs::Scalar(i.to_string()),
+                    },
+                )))
                 .then_ignore(just(Token::RParen))
                 .or_not()
         )
-        .map(|(name, value)| AttributeNode::new(name, value))
+        .try_map(|(name, args), span| match (*name, args) {
+            ("cfg", Some(AttributeArgs::Cfg(expr))) => Ok(AttributeNode::cfg(expr)),
+            ("cfg", _) => Err(Rich::custom(
+                span,
+                "@cfg expects a target predicate, e.g. @cfg(target_os = \"windows\")",
+            )),
+            (name, Some(AttributeArgs::Cfg(_))) => Err(Rich::custom(
+                span,
+                format!("@{name} takes one simple value, not a cfg expression"),
+            )),
+            (name, Some(AttributeArgs::Scalar(value))) =>
+                Ok(AttributeNode::new(name, Some(value))),
+            (name, None) => Ok(AttributeNode::new(name, None)),
+        })
         .boxed()
 }
 
@@ -1923,7 +1974,9 @@ fn parse_import<'tks, 'src: 'tks>() -> P<'tks, 'src, Import<'src>> {
     // TODO: path segments are `var` only, so a segment that lexes to a keyword
     // (`import std/const`) won't parse. and `{}` is `.at_least(1)`, so an empty
     // selective import is a hard error rather than a no-op.
-    just(Token::Pub).or_not().map(|p| p.is_some())
+    parse_attribute()
+        .repeated().collect::<Vec<_>>()
+        .then(just(Token::Pub).or_not().map(|p| p.is_some()))
         .then_ignore(just(Token::Import))
         .then(
             var.separated_by(just(Token::BinaryOp(BinaryOp::Div)))
@@ -1938,7 +1991,9 @@ fn parse_import<'tks, 'src: 'tks>() -> P<'tks, 'src, Import<'src>> {
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
                 .or_not()
         )
-        .map_with(|((is_pub, path), symbols), e| Import { span: e.span(), path, symbols, is_pub })
+        .map_with(|(((attributes, is_pub), path), symbols), e| Import {
+            span: e.span(), attributes, path, symbols, is_pub,
+        })
         .boxed()
 }
 

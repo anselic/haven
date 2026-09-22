@@ -1,0 +1,58 @@
+//! C ABI integer types whose representation varies by compilation target.
+//!
+//! Fixed-width C types should use Haven's `i8`/`u8`/... directly. These aliases
+//! exist for the implementation-defined C types that cannot be represented by
+//! one portable Haven primitive.
+
+/// Plain `char` is signed.
+/// e.g. all x86 and x86-64 targets (Windows, Linux, macOS, BSD),
+/// Windows on ARM64, and Apple ARM64 (macOS, iOS).
+@cfg(target_c_char_signed = "true")
+pub type c_char = i8;
+
+/// Plain `char` is unsigned. This comes from the old ARM and PowerPC ABIs,
+/// where loading an unsigned byte was cheaper.
+/// e.g. Linux on AArch64, 32-bit ARM, PowerPC, and RISC-V. Also Android on ARM.
+@cfg(target_c_char_signed = "false")
+pub type c_char = u8;
+
+/// `long` is 32-bit.
+/// e.g. all Windows targets (LLP64: MSVC and MinGW, on x86, x86-64, and ARM64),
+/// and all 32-bit Unix targets (i686 Linux, ARMv7 Linux, wasm32).
+@cfg(target_c_long_width = "32")
+pub type c_long = i32;
+
+/// `long` is 64-bit (LP64).
+/// e.g. 64-bit Unix: x86-64 and AArch64 Linux, macOS, BSD, RISC-V 64.
+/// Also Cygwin on x86-64, even though it runs on Windows.
+@cfg(target_c_long_width = "64")
+pub type c_long = i64;
+
+/// Unsigned version of the 32-bit `long` above. Same targets.
+@cfg(target_c_long_width = "32")
+pub type c_ulong = u32;
+
+/// Unsigned version of the 64-bit `long` above. Same targets.
+@cfg(target_c_long_width = "64")
+pub type c_ulong = u64;
+
+/// 16-bit signed `wchar_t`. No mainstream target uses this.
+/// It is here only so that all combinations have a definition.
+@cfg(all(target_c_wchar_width = "16", target_c_wchar_signed = "true"))
+pub type c_wchar = i16;
+
+/// 16-bit unsigned `wchar_t`, holds one UTF-16 code unit.
+/// e.g. all Windows targets (MSVC and MinGW), and Cygwin.
+@cfg(all(target_c_wchar_width = "16", target_c_wchar_signed = "false"))
+pub type c_wchar = u16;
+
+/// 32-bit signed `wchar_t` (`int`), holds one UTF-32 code point.
+/// e.g. x86 and x86-64 Linux, all macOS (x86-64 and ARM64), FreeBSD on x86-64,
+/// RISC-V Linux.
+@cfg(all(target_c_wchar_width = "32", target_c_wchar_signed = "true"))
+pub type c_wchar = i32;
+
+/// 32-bit unsigned `wchar_t` (`unsigned int`), holds one UTF-32 code point.
+/// e.g. AArch64 Linux and 32-bit ARM Linux (the ARM ABI says so).
+@cfg(all(target_c_wchar_width = "32", target_c_wchar_signed = "false"))
+pub type c_wchar = u32;

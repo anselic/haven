@@ -1039,32 +1039,91 @@ impl<'a> Stmt<'a> {
     }
 }
 
+/// One predicate inside `@cfg(...)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CfgExpr<'a> {
+    /// A target property compared with a string, e.g.
+    /// `target_c_long_width = "32"`.
+    Predicate { key: &'a str, value: &'a str },
+    All(Vec<CfgExpr<'a>>),
+    Any(Vec<CfgExpr<'a>>),
+    Not(Box<CfgExpr<'a>>),
+}
+
+impl Display for CfgExpr<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CfgExpr::Predicate { key, value } =>
+                write!(f, "{} = \"{}\"", key, value.escape_default()),
+            CfgExpr::All(xs) | CfgExpr::Any(xs) => {
+                let op = if matches!(self, CfgExpr::All(_)) { "all" } else { "any" };
+                write!(f, "{}(", op)?;
+                for (i, x) in xs.iter().enumerate() {
+                    if i != 0 { write!(f, ", ")?; }
+                    write!(f, "{}", x)?;
+                }
+                write!(f, ")")
+            }
+            CfgExpr::Not(x) => write!(f, "not({})", x),
+        }
+    }
+}
+
+/// The contents of an attribute's parentheses. Most attributes take one simple
+/// scalar; `@cfg` keeps a structured expression so nested boolean predicates do
+/// not get flattened into an unvalidated string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttributeArgs<'a> {
+    Scalar(String),
+    Cfg(CfgExpr<'a>),
+}
+
 #[derive(Clone, Debug)]
 pub struct AttributeNode<'a> {
     pub name: &'a str,
-    pub value: Option<String>,
+    pub args: Option<AttributeArgs<'a>>,
 }
 
 impl<'a> AttributeNode<'a> {
+    /// Construct an ordinary scalar-valued attribute. Compiler-synthesized
+    /// attributes use this path; parsed `@cfg` uses [`Self::cfg`].
     pub fn new(name: &'a str, value: Option<String>) -> Self {
-        Self { name, value }
+        Self { name, args: value.map(AttributeArgs::Scalar) }
+    }
+
+    pub fn cfg(expr: CfgExpr<'a>) -> Self {
+        Self { name: "cfg", args: Some(AttributeArgs::Cfg(expr)) }
+    }
+
+    pub fn scalar(&self) -> Option<&str> {
+        match &self.args {
+            Some(AttributeArgs::Scalar(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn cfg_expr(&self) -> Option<&CfgExpr<'a>> {
+        match &self.args {
+            Some(AttributeArgs::Cfg(expr)) if self.name == "cfg" => Some(expr),
+            _ => None,
+        }
     }
 
     pub fn is_true(&self, name: &'a str) -> bool {
-        self.name == name && self.value.is_some() && self.value.as_deref() == Some("true")
+        self.name == name && self.scalar() == Some("true")
     }
 
     pub fn is_false(&self, name: &'a str) -> bool {
-        self.name == name && self.value.is_some() && self.value.as_deref() == Some("false")
+        self.name == name && self.scalar() == Some("false")
     }
 }
 
 impl<'a> Display for AttributeNode<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(value) = &self.value {
-            write!(f, "@{}({})", self.name, value)
-        } else {
-            write!(f, "@{}", self.name)
+        match &self.args {
+            Some(AttributeArgs::Scalar(value)) => write!(f, "@{}({})", self.name, value),
+            Some(AttributeArgs::Cfg(expr)) => write!(f, "@{}({})", self.name, expr),
+            None => write!(f, "@{}", self.name),
         }
     }
 }
@@ -1078,7 +1137,7 @@ pub type Attribute<'a> = Metadata<AttributeNode<'a>>;
 /// is no item to attach to. Without the `!` a mark meant for the file would be
 /// swallowed by whatever declaration happened to follow it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AttrTarget { Function, Extern, Struct, Enum, Global, Trait, Alias, Module }
+pub enum AttrTarget { Function, Extern, Struct, Enum, Global, Trait, Alias, Import, Module }
 
 impl AttrTarget {
     fn label(self) -> &'static str {
@@ -1090,6 +1149,7 @@ impl AttrTarget {
             AttrTarget::Global   => "a global",
             AttrTarget::Trait    => "a trait",
             AttrTarget::Alias    => "a type alias",
+            AttrTarget::Import   => "an import",
             AttrTarget::Module   => "a module",
         }
     }
@@ -1107,7 +1167,7 @@ pub const PRELUDE_ATTR: &str = "prelude";
 /// Whether an attribute is written bare (`@export`) or with a value
 /// (`@alloc(false)`).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum AttrValue { Never, Always, Optional }
+enum AttrValue { Never, Always, Optional, Cfg }
 
 /// One attribute the compiler acts on: where it may be written, what shape it
 /// takes, and - where the set is small and this is the only place that knows it
@@ -1124,6 +1184,12 @@ pub struct AttrSpec {
 /// Attributes recognized by the compiler, including their allowed targets and
 /// value syntax. Module attributes use the same table with a module target.
 pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
+    AttrSpec {
+        name: "cfg", value: AttrValue::Cfg, values: None,
+        targets: &[AttrTarget::Function, AttrTarget::Extern, AttrTarget::Struct,
+                   AttrTarget::Enum, AttrTarget::Global, AttrTarget::Trait,
+                   AttrTarget::Alias, AttrTarget::Import],
+    },
     AttrSpec {
         name: LANG_ATTR, value: AttrValue::Always, values: Some(crate::defs::LANG_ITEMS),
         targets: &[AttrTarget::Trait],
@@ -1181,17 +1247,23 @@ pub fn check_attribute(
             format!("unknown attribute `@{}`", attr.name),
             format!("known attributes are {}", known)));
     };
-    match (spec.value, attr.value.is_some()) {
-        (AttrValue::Never, true) => return Err((
+    match (spec.value, &attr.args) {
+        (AttrValue::Never, Some(_)) => return Err((
             format!("`@{}` takes no value", attr.name),
             format!("write `@{}` on its own", attr.name))),
-        (AttrValue::Always, false) => return Err((
+        (AttrValue::Always | AttrValue::Cfg, None) => return Err((
             format!("`@{}` needs a value", attr.name),
             format!("e.g. `@{}({})`", attr.name,
                 spec.values.and_then(|v| v.first()).unwrap_or(&"...")))),
+        (AttrValue::Cfg, Some(AttributeArgs::Scalar(_))) => return Err((
+            "`@cfg` needs a target predicate".to_string(),
+            "e.g. `@cfg(target_os = \"windows\")`".to_string())),
+        (AttrValue::Always | AttrValue::Optional, Some(AttributeArgs::Cfg(_))) => return Err((
+            format!("`@{}` takes one simple value", attr.name),
+            format!("write `@{}(<value>)`", attr.name))),
         _ => {}
     }
-    if let (Some(allowed), Some(written)) = (spec.values, attr.value.as_deref())
+    if let (Some(allowed), Some(written)) = (spec.values, attr.scalar())
         && !allowed.contains(&written) {
             return Err((
                 format!("`@{}({})` is not a valid value", attr.name, written),
@@ -1688,6 +1760,9 @@ pub type TopLevel<'a> = Metadata<TopLevelNode<'a>>;
 #[derive(Clone, Debug)]
 pub struct Import<'a> {
     pub span: Span,
+    /// Attributes controlling whether this import exists for the target.
+    /// `@cfg` is consumed by the module loader before imports are resolved.
+    pub attributes: Vec<Attribute<'a>>,
     /// path segments as written, e.g. `["std", "math"]` or `["utils", "foo"]`
     pub path: Vec<&'a str>,
     /// `pub import`: the imported symbols are also *re-exported*, so a module

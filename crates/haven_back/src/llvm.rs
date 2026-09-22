@@ -752,7 +752,7 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
     cx.current_fast_math_flags = FastMathFlags::None;
 
     let attrs = func.attributes.iter()
-        .filter_map(|a| match (a.value.name, a.value.value.as_deref()) {
+        .filter_map(|a| match (a.value.name, a.value.scalar()) {
             // the value sets below are the ones `ast::KNOWN_ATTRIBUTES` admits;
             // anything else was rejected as a diagnostic long before codegen
             ("inline", Some("always")) => Some(String::from("alwaysinline")),
@@ -859,7 +859,7 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
 
 fn emit_extern<'a>(cx: &mut EmitCtx<'a>, ext: ExternDecl<'a>) {
     let attrs = ext.attributes.iter()
-        .filter_map(|a| match (a.value.name, a.value.value.as_deref()) {
+        .filter_map(|a| match (a.value.name, a.value.scalar()) {
             ("inline", Some("always")) => Some("alwaysinline"),
             ("inline", Some("never"))  => Some("noinline"),
             _ => None,

@@ -32,6 +32,7 @@ import alloc
 import atomic
 import bits
 import env
+import ffi
 import fs
 import iter
 import math

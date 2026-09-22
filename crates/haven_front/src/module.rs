@@ -42,6 +42,7 @@ use haven_common::defs::{Def, DefKind, DefId, Defs, Linkage, Member, MemberTable
 
 use haven_common::diag::{self, Files};
 use haven_common::intrinsics::Intrinsic;
+use haven_common::target::TargetSpec;
 
 use haven_common::defs::LangItems;
 
@@ -1056,7 +1057,102 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
 type ModuleParse<'a> =
     (Vec<Attribute<'a>>, Vec<Import<'a>>, Vec<TopLevel<'a>>, Vec<RawImpl<'a>>, Vec<RawMethod<'a>>);
 
-fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'a>)
+fn eval_cfg(expr: &CfgExpr<'_>, target: &TargetSpec) -> Result<bool, String> {
+    match expr {
+        CfgExpr::Predicate { key, value } => target.matches_cfg(key, value),
+        CfgExpr::All(exprs) => {
+            let mut result = true;
+            for expr in exprs { result &= eval_cfg(expr, target)?; }
+            Ok(result)
+        }
+        CfgExpr::Any(exprs) => {
+            let mut result = false;
+            for expr in exprs { result |= eval_cfg(expr, target)?; }
+            Ok(result)
+        }
+        CfgExpr::Not(expr) => Ok(!eval_cfg(expr, target)?),
+    }
+}
+
+fn cfg_enabled(attrs: &[Attribute<'_>], target: &TargetSpec, errs: &mut Vec<Error>) -> bool {
+    let mut enabled = true;
+    for attr in attrs.iter().filter(|a| a.value.name == "cfg") {
+        let Some(expr) = attr.value.cfg_expr() else {
+            // The parser and attribute checker normally make this impossible,
+            // but keep malformed synthesized AST from turning cfg into a no-op.
+            errs.push(Error::new(attr.span, "malformed `@cfg` attribute".to_string()));
+            enabled = false;
+            continue;
+        };
+        match eval_cfg(expr, target) {
+            Ok(matches) => enabled &= matches,
+            Err(msg) => {
+                errs.push(Error::new(attr.span, msg));
+                enabled = false;
+            }
+        }
+    }
+    enabled
+}
+
+fn item_attributes_mut<'t, 'a>(item: &'t mut TopLevelNode<'a>)
+    -> Option<&'t mut Vec<Attribute<'a>>>
+{
+    match item {
+        TopLevelNode::Function { attributes, .. }
+        | TopLevelNode::Extern { attributes, .. }
+        | TopLevelNode::Struct { attributes, .. }
+        | TopLevelNode::Enum { attributes, .. }
+        | TopLevelNode::Global { attributes, .. }
+        | TopLevelNode::Trait { attributes, .. }
+        | TopLevelNode::Alias { attributes, .. } => Some(attributes),
+        TopLevelNode::Extend { .. } => None,
+    }
+}
+
+/// Remove declarations disabled for this target before symbol collection. This
+/// is what permits two mutually exclusive aliases with the same source name.
+fn apply_cfg(items: &mut Vec<TopLevel<'_>>, target: &TargetSpec) -> Vec<Error> {
+    let mut errs = Vec::new();
+    items.retain_mut(|item| match &mut item.value {
+        TopLevelNode::Extend { methods, .. } => {
+            methods.retain_mut(|method|
+                cfg_enabled(&method.value.attributes, target, &mut errs));
+            true
+        }
+        node => {
+            let attrs = item_attributes_mut(node).expect("declaration has attributes");
+            cfg_enabled(attrs, target, &mut errs)
+        }
+    });
+    errs
+}
+
+fn apply_import_cfg(imports: &mut Vec<Import<'_>>, target: &TargetSpec,
+                    errs: &mut Vec<Error>) {
+    imports.retain_mut(|import| cfg_enabled(&import.attributes, target, errs));
+}
+
+fn strip_cfg(items: &mut [TopLevel<'_>]) {
+    let strip = |attrs: &mut Vec<Attribute<'_>>| attrs.retain(|a| a.value.name != "cfg");
+    for item in items {
+        match &mut item.value {
+            TopLevelNode::Extend { methods, .. } => {
+                for method in methods { strip(&mut method.value.attributes); }
+            }
+            node => strip(item_attributes_mut(node).expect("declaration has attributes")),
+        }
+    }
+}
+
+fn strip_import_cfg(imports: &mut [Import<'_>]) {
+    for import in imports {
+        import.attributes.retain(|a| a.value.name != "cfg");
+    }
+}
+
+fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'a>,
+                    target: &TargetSpec)
     -> Result<ModuleParse<'a>, ()>
 {
     let (tokens, lex_errs) = parse::lex(file, src);
@@ -1073,23 +1169,37 @@ fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'
     for e in &parse_errs {
         diag::report("Parse error", &e.reason().to_string(), e.span(), files);
     }
-    let (mod_attrs, imports, mut items) = match parsed {
+    let (mod_attrs, mut imports, mut items) = match parsed {
         Some(pi) if parse_errs.is_empty() => pi,
         _ => return Err(()),
     };
+
+    // Conditional declarations disappear before duplicate-name collection,
+    // method lowering, name resolution, or typechecking. Keep `@cfg` itself on
+    // enabled declarations through attribute checking, then consume it.
+    let mut cfg_errs = apply_cfg(&mut items, target);
+    apply_import_cfg(&mut imports, target, &mut cfg_errs);
+    if !cfg_errs.is_empty() {
+        for e in &cfg_errs {
+            diag::report_error("Cfg error", e, files);
+        }
+        return Err(());
+    }
 
     // reject attributes the compiler does not act on, before any stage reads the
     // ones it does. Runs here, ahead of `lower_methods`, because an `extend`
     // block's methods still exist as methods at this point - once desugared they
     // are indistinguishable from top-level functions, which happens to be the
     // right target for them anyway, but their spans read better this way.
-    let attr_errs = check_attributes(&mod_attrs, &items);
+    let attr_errs = check_attributes(&mod_attrs, &imports, &items);
     if !attr_errs.is_empty() {
         for e in &attr_errs {
             diag::report_error("Attribute error", e, files);
         }
         return Err(());
     }
+    strip_cfg(&mut items);
+    strip_import_cfg(&mut imports);
 
     // desugar `extend`/method blocks into functions before anything else looks at
     // the items.
@@ -1112,7 +1222,8 @@ fn parse_module<'a>(file: FileId, src: &'a str, arena: &'a Bump, files: &Files<'
 /// grammar serve every attribute - but it also meant an attribute the compiler
 /// had never heard of, or one written somewhere it is never read, compiled
 /// silently and did nothing.
-fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], items: &[TopLevel<'a>]) -> Vec<Error> {
+fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], imports: &[Import<'a>],
+                        items: &[TopLevel<'a>]) -> Vec<Error> {
     let mut errs = Vec::new();
     let check = |attrs: &[Attribute<'a>], target: AttrTarget, errs: &mut Vec<Error>| {
         for a in attrs {
@@ -1122,6 +1233,9 @@ fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], items: &[TopLevel<'a>]) -> 
         }
     };
     check(mod_attrs, AttrTarget::Module, &mut errs);
+    for import in imports {
+        check(&import.attributes, AttrTarget::Import, &mut errs);
+    }
     for tl in items {
         match &tl.value {
             TopLevelNode::Function { attributes, .. } =>
@@ -2389,7 +2503,8 @@ type LoadedProgram<'a> = (Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'
 // loading failed.
 #[allow(clippy::result_unit_err)]
 pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: PreludeSource<'_>,
-                          deps: &HashMap<String, HavenMeta>, default_std: Option<&str>, arena: &'a Bump)
+                          deps: &HashMap<String, HavenMeta>, default_std: Option<&str>, arena: &'a Bump,
+                          target: &TargetSpec)
     -> Result<LoadedProgram<'a>, ()>
 {
     let mut worklist: VecDeque<Pending<'a>> = VecDeque::new();
@@ -2539,7 +2654,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         // register the source before parsing: its spans carry this id, and any
         // lex/parse diagnostic has to be able to quote it.
         let file = files.add(p.key.clone(), p.src);
-        let (mod_attrs, imports, mut items, impls, methods) = match parse_module(file, p.src, arena, &files) {
+        let (mod_attrs, imports, mut items, impls, methods) = match parse_module(
+            file, p.src, arena, &files, target) {
             Ok(pi) => pi,
             Err(()) => { had_error = true; continue; }
         };
@@ -2835,7 +2951,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             let Some(attr) = attributes.iter().find(|a| a.value.name == LANG_ATTR) else { continue };
             // `check_attributes` already rejected a `@lang` with no value or an
             // unrecognized one, so this names something in `LANG_ITEMS`.
-            let item = attr.value.value.as_deref().unwrap_or_default();
+            let item = attr.value.scalar().unwrap_or_default();
 
             // only the package supplying the prelude may claim a lang item, and
             // claiming one is not a local decision: `@lang(delete)` decides what
