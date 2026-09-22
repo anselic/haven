@@ -178,7 +178,7 @@ fn check_const_arithmetic<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), E
         ExprNode::Unary { op: UnaryOp::Neg, .. } | ExprNode::Binary { .. } =>
             crate::mil::eval_const_scalar(expr, &cx.node_types)
                 .map(|_| ())
-                .map_err(|msg| Error::new(expr.span, msg)),
+                .map_err(|err| Error::new(err.span, err.message)),
         ExprNode::Struct { fields, .. } => {
             for (_, field) in fields { check_const_arithmetic(cx, field)?; }
             Ok(())

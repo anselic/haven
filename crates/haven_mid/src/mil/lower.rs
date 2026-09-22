@@ -401,7 +401,8 @@ fn lower_const_init<'a>(
         | ExprNode::Unary { op: UnaryOp::Neg, .. }
         | ExprNode::Binary { .. } => ConstInit::Scalar(
             eval_const_scalar(expr, &cx.node_types)
-                .unwrap_or_else(|msg| unreachable!("invalid constant initializer reached lowering: {msg}"))
+                .unwrap_or_else(|err| unreachable!(
+                    "invalid constant initializer reached lowering: {}", err.message))
         ),
         // a string literal: intern the blob and take its address (`@.str.N`), a
         // link-time-constant `ptr` - the same value `ExprNode::Str` lowers to in

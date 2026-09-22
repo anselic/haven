@@ -50,13 +50,24 @@ pub(crate) fn lit_const(ty: &Type<'_>, node: &ExprNode<'_>) -> Const {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConstEvalError {
+    pub span: Span,
+    pub message: &'static str,
+}
+
+fn const_eval_error(span: Span, message: &'static str) -> ConstEvalError {
+    ConstEvalError { span, message }
+}
+
 /// Fold scalar literal arithmetic to the exact constant emitted for a global.
-/// Width-less leaves use their inferred type, and fixed-width integer
-/// arithmetic wraps like normal LLVM `add`/`sub`/`mul` instructions.
+/// Width-less leaves use their inferred type. Integer operations are checked so
+/// a constant cannot silently produce a value that its literal spelling would
+/// have been forbidden to represent.
 pub(crate) fn eval_const_scalar<'a>(
     expr: &Expr<'a>,
     node_types: &HashMap<usize, Type<'a>>,
-) -> Result<Const, &'static str> {
+) -> Result<Const, ConstEvalError> {
     let literal = match &expr.value {
         ExprNode::Bool(b)    => Some(Const::Bool(*b)),
         ExprNode::Int8(n)    => Some(Const::Int8(*n)),
@@ -77,44 +88,79 @@ pub(crate) fn eval_const_scalar<'a>(
 
     match &expr.value {
         ExprNode::Unary { op: UnaryOp::Neg, operand } => {
+            // An unsuffixed negative literal is one context-typed unit. Fold the
+            // sign before narrowing so `-128: i8` remains valid even though its
+            // positive magnitude is not an `i8` value by itself.
+            match &operand.value {
+                ExprNode::IntLit(v) => return Ok(lit_const(
+                    &node_types[&operand.id], &ExprNode::IntLit(-*v))),
+                ExprNode::FloatLit(v) => return Ok(lit_const(
+                    &node_types[&operand.id], &ExprNode::FloatLit(-*v))),
+                _ => {}
+            }
+
             Ok(match eval_const_scalar(operand, node_types)? {
-                Const::Int8(n)    => Const::Int8(n.wrapping_neg()),
-                Const::Int16(n)   => Const::Int16(n.wrapping_neg()),
-                Const::Int32(n)   => Const::Int32(n.wrapping_neg()),
-                Const::Int64(n)   => Const::Int64(n.wrapping_neg()),
-                Const::Uint8(n)   => Const::Uint8(n.wrapping_neg()),
-                Const::Uint16(n)  => Const::Uint16(n.wrapping_neg()),
-                Const::Uint32(n)  => Const::Uint32(n.wrapping_neg()),
-                Const::Uint64(n)  => Const::Uint64(n.wrapping_neg()),
+                Const::Int8(n)    => Const::Int8(n.checked_neg().ok_or_else(||
+                    const_eval_error(expr.span, "overflow in constant expression during negation"))?),
+                Const::Int16(n)   => Const::Int16(n.checked_neg().ok_or_else(||
+                    const_eval_error(expr.span, "overflow in constant expression during negation"))?),
+                Const::Int32(n)   => Const::Int32(n.checked_neg().ok_or_else(||
+                    const_eval_error(expr.span, "overflow in constant expression during negation"))?),
+                Const::Int64(n)   => Const::Int64(n.checked_neg().ok_or_else(||
+                    const_eval_error(expr.span, "overflow in constant expression during negation"))?),
+                Const::Uint8(n)   => Const::Uint8(n.checked_neg().ok_or_else(||
+                    const_eval_error(expr.span, "overflow in constant expression during negation"))?),
+                Const::Uint16(n)  => Const::Uint16(n.checked_neg().ok_or_else(||
+                    const_eval_error(expr.span, "overflow in constant expression during negation"))?),
+                Const::Uint32(n)  => Const::Uint32(n.checked_neg().ok_or_else(||
+                    const_eval_error(expr.span, "overflow in constant expression during negation"))?),
+                Const::Uint64(n)  => Const::Uint64(n.checked_neg().ok_or_else(||
+                    const_eval_error(expr.span, "overflow in constant expression during negation"))?),
                 Const::Float32(f) => Const::Float32(-f),
                 Const::Float64(f) => Const::Float64(-f),
-                _ => return Err("constant negation needs a numeric operand"),
+                _ => return Err(const_eval_error(
+                    expr.span, "constant negation needs a numeric operand")),
             })
         }
         ExprNode::Binary { op, left, right } => {
             let lhs = eval_const_scalar(left, node_types)?;
             let rhs = eval_const_scalar(right, node_types)?;
-            eval_const_binary(*op, lhs, rhs)
+            eval_const_binary(expr.span, *op, lhs, rhs)
         }
-        _ => Err("expression is not a scalar constant"),
+        _ => Err(const_eval_error(expr.span, "expression is not a scalar constant")),
     }
 }
 
-fn eval_const_binary(op: BinaryOp, lhs: Const, rhs: Const) -> Result<Const, &'static str> {
+fn eval_const_binary(
+    span: Span,
+    op: BinaryOp,
+    lhs: Const,
+    rhs: Const,
+) -> Result<Const, ConstEvalError> {
     use BinaryOp::*;
 
     macro_rules! integer {
         ($variant:ident, $a:expr, $b:expr) => {{
             let value = match op {
-                Add => $a.wrapping_add($b),
-                Sub => $a.wrapping_sub($b),
-                Mul => $a.wrapping_mul($b),
-                Div if $b == 0 => return Err("division by zero in constant expression"),
-                Div => $a.wrapping_div($b),
-                Mod if $b == 0 => return Err("remainder by zero in constant expression"),
-                Mod => $a.wrapping_rem($b),
-                _ => return Err("operator is not supported in a constant arithmetic expression"),
-            };
+                Add => $a.checked_add($b),
+                Sub => $a.checked_sub($b),
+                Mul => $a.checked_mul($b),
+                Div if $b == 0 => return Err(const_eval_error(
+                    span, "division by zero in constant expression")),
+                Div => $a.checked_div($b),
+                Mod if $b == 0 => return Err(const_eval_error(
+                    span, "remainder by zero in constant expression")),
+                Mod => $a.checked_rem($b),
+                _ => return Err(const_eval_error(
+                    span, "operator is not supported in a constant arithmetic expression")),
+            }.ok_or_else(|| const_eval_error(span, match op {
+                Add => "overflow in constant expression during addition",
+                Sub => "overflow in constant expression during subtraction",
+                Mul => "overflow in constant expression during multiplication",
+                Div => "overflow in constant expression during division",
+                Mod => "overflow in constant expression during remainder",
+                _ => unreachable!(),
+            }))?;
             Const::$variant(value)
         }};
     }
@@ -126,7 +172,8 @@ fn eval_const_binary(op: BinaryOp, lhs: Const, rhs: Const) -> Result<Const, &'st
                 Mul => $a * $b,
                 Div => $a / $b,
                 Mod => $a % $b,
-                _ => return Err("operator is not supported in a constant arithmetic expression"),
+                _ => return Err(const_eval_error(
+                    span, "operator is not supported in a constant arithmetic expression")),
             };
             Const::$variant(value)
         }};
@@ -143,7 +190,8 @@ fn eval_const_binary(op: BinaryOp, lhs: Const, rhs: Const) -> Result<Const, &'st
         (Const::Uint64(a), Const::Uint64(b))   => integer!(Uint64, a, b),
         (Const::Float32(a), Const::Float32(b)) => float!(Float32, a, b),
         (Const::Float64(a), Const::Float64(b)) => float!(Float64, a, b),
-        _ => return Err("constant arithmetic operands have different types"),
+        _ => return Err(const_eval_error(
+            span, "constant arithmetic operands have different types")),
     })
 }
 

@@ -1,0 +1,16 @@
+//@ error: overflow in constant expression during addition
+//@ error: overflow in constant expression during subtraction
+//@ error: overflow in constant expression during multiplication
+//@ error: overflow in constant expression during negation
+//@ error: overflow in constant expression during division
+
+pub const ADD: i8 = 127i8 + 1i8;
+pub const SUB: i8 = -128 - 1;
+pub const MUL: i8 = 64i8 * 2i8;
+pub const NEG: i8 = -(-127i8 - 1i8);
+pub const DIV: i8 = (-127i8 - 1i8) / -1i8;
+
+@export
+proc main() i32 {
+    return 0;
+}
