@@ -113,7 +113,7 @@ fn check_export_type<'a>(
 }
 
 /// Verify that a global's initializer is a compile-time constant we can emit as
-/// an LLVM `constant` aggregate: literals (optionally negated), struct literals of
+/// an LLVM `constant` aggregate: literal arithmetic, struct literals of
 /// constants, and bare function names (a function's address is a link-time
 /// constant). Anything that would need to run code - a call, a load of another
 /// global's value, indexing - is rejected.
@@ -127,13 +127,16 @@ fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), 
         // a string literal is the address of a read-only global blob (`@.str.N`),
         // a link-time constant - exactly like a function's address below.
         ExprNode::Str(_) => Ok(()),
-        // a negated numeric literal, e.g. `-1.0`, is still a constant
-        ExprNode::Unary { op: UnaryOp::Neg, operand }
-            if matches!(operand.value,
-                ExprNode::Int8(_) | ExprNode::Int16(_) | ExprNode::Int32(_) | ExprNode::Int64(_)
-                | ExprNode::Uint8(_) | ExprNode::Uint16(_) | ExprNode::Uint32(_) | ExprNode::Uint64(_)
-                | ExprNode::Float32(_) | ExprNode::Float64(_)
-                | ExprNode::IntLit(_) | ExprNode::FloatLit(_)) => Ok(()),
+        // Numeric negation and arithmetic remain constants when their operands
+        // do. Type checking later ensures the operands are numeric.
+        ExprNode::Unary { op: UnaryOp::Neg, operand } =>
+            check_const_initializer(cx, operand),
+        ExprNode::Binary { op, left, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+                | BinaryOp::Div | BinaryOp::Mod) => {
+            check_const_initializer(cx, left)?;
+            check_const_initializer(cx, right)
+        }
         // an `Enum::Variant` is a compile-time integer constant.
         ExprNode::Path(path) if enum_variant(cx, path).is_some() => Ok(()),
         // a bare top-level function name: its address is a link-time constant.
@@ -162,8 +165,29 @@ fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), 
             Ok(())
         }
         _ => Err(Error::new(expr.span, "global initializer is not a constant")
-            .with_note("a global may be initialized with a literal, a string, a \
+            .with_note("a global may be initialized with literal arithmetic, a string, a \
                         struct/array literal of constants, or a function name")),
+    }
+}
+
+/// Arithmetic is folded before globals reach MIL. Validate it after type
+/// checking so invalid operations receive a source diagnostic and lowering can
+/// remain infallible.
+fn check_const_arithmetic<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), Error> {
+    match &expr.value {
+        ExprNode::Unary { op: UnaryOp::Neg, .. } | ExprNode::Binary { .. } =>
+            crate::mil::eval_const_scalar(expr, &cx.node_types)
+                .map(|_| ())
+                .map_err(|msg| Error::new(expr.span, msg)),
+        ExprNode::Struct { fields, .. } => {
+            for (_, field) in fields { check_const_arithmetic(cx, field)?; }
+            Ok(())
+        }
+        ExprNode::Slice(elements) => {
+            for element in elements { check_const_arithmetic(cx, element)?; }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -364,6 +388,7 @@ fn check_toplevel<'a>(
             }
             check_const_initializer(cx, value)?;
             check_expr(cx, ty, value)?;
+            check_const_arithmetic(cx, value)?;
         }
         // field-less enums are fully validated in the forward-declaration pass
         // (duplicate variants, `@repr` value); nothing more to check here.

@@ -1,0 +1,8 @@
+//@ error: division by zero in constant expression
+
+const BAD: i32 = 4 / (2 - 2);
+
+@export
+proc main() i32 {
+    return BAD;
+}

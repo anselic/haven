@@ -50,6 +50,103 @@ pub(crate) fn lit_const(ty: &Type<'_>, node: &ExprNode<'_>) -> Const {
     }
 }
 
+/// Fold scalar literal arithmetic to the exact constant emitted for a global.
+/// Width-less leaves use their inferred type, and fixed-width integer
+/// arithmetic wraps like normal LLVM `add`/`sub`/`mul` instructions.
+pub(crate) fn eval_const_scalar<'a>(
+    expr: &Expr<'a>,
+    node_types: &HashMap<usize, Type<'a>>,
+) -> Result<Const, &'static str> {
+    let literal = match &expr.value {
+        ExprNode::Bool(b)    => Some(Const::Bool(*b)),
+        ExprNode::Int8(n)    => Some(Const::Int8(*n)),
+        ExprNode::Int16(n)   => Some(Const::Int16(*n)),
+        ExprNode::Int32(n)   => Some(Const::Int32(*n)),
+        ExprNode::Int64(n)   => Some(Const::Int64(*n)),
+        ExprNode::Uint8(n)   => Some(Const::Uint8(*n)),
+        ExprNode::Uint16(n)  => Some(Const::Uint16(*n)),
+        ExprNode::Uint32(n)  => Some(Const::Uint32(*n)),
+        ExprNode::Uint64(n)  => Some(Const::Uint64(*n)),
+        ExprNode::Float32(f) => Some(Const::Float32(*f)),
+        ExprNode::Float64(f) => Some(Const::Float64(*f)),
+        ExprNode::IntLit(_) | ExprNode::FloatLit(_) =>
+            Some(lit_const(&node_types[&expr.id], &expr.value)),
+        _ => None,
+    };
+    if let Some(value) = literal { return Ok(value); }
+
+    match &expr.value {
+        ExprNode::Unary { op: UnaryOp::Neg, operand } => {
+            Ok(match eval_const_scalar(operand, node_types)? {
+                Const::Int8(n)    => Const::Int8(n.wrapping_neg()),
+                Const::Int16(n)   => Const::Int16(n.wrapping_neg()),
+                Const::Int32(n)   => Const::Int32(n.wrapping_neg()),
+                Const::Int64(n)   => Const::Int64(n.wrapping_neg()),
+                Const::Uint8(n)   => Const::Uint8(n.wrapping_neg()),
+                Const::Uint16(n)  => Const::Uint16(n.wrapping_neg()),
+                Const::Uint32(n)  => Const::Uint32(n.wrapping_neg()),
+                Const::Uint64(n)  => Const::Uint64(n.wrapping_neg()),
+                Const::Float32(f) => Const::Float32(-f),
+                Const::Float64(f) => Const::Float64(-f),
+                _ => return Err("constant negation needs a numeric operand"),
+            })
+        }
+        ExprNode::Binary { op, left, right } => {
+            let lhs = eval_const_scalar(left, node_types)?;
+            let rhs = eval_const_scalar(right, node_types)?;
+            eval_const_binary(*op, lhs, rhs)
+        }
+        _ => Err("expression is not a scalar constant"),
+    }
+}
+
+fn eval_const_binary(op: BinaryOp, lhs: Const, rhs: Const) -> Result<Const, &'static str> {
+    use BinaryOp::*;
+
+    macro_rules! integer {
+        ($variant:ident, $a:expr, $b:expr) => {{
+            let value = match op {
+                Add => $a.wrapping_add($b),
+                Sub => $a.wrapping_sub($b),
+                Mul => $a.wrapping_mul($b),
+                Div if $b == 0 => return Err("division by zero in constant expression"),
+                Div => $a.wrapping_div($b),
+                Mod if $b == 0 => return Err("remainder by zero in constant expression"),
+                Mod => $a.wrapping_rem($b),
+                _ => return Err("operator is not supported in a constant arithmetic expression"),
+            };
+            Const::$variant(value)
+        }};
+    }
+    macro_rules! float {
+        ($variant:ident, $a:expr, $b:expr) => {{
+            let value = match op {
+                Add => $a + $b,
+                Sub => $a - $b,
+                Mul => $a * $b,
+                Div => $a / $b,
+                Mod => $a % $b,
+                _ => return Err("operator is not supported in a constant arithmetic expression"),
+            };
+            Const::$variant(value)
+        }};
+    }
+
+    Ok(match (lhs, rhs) {
+        (Const::Int8(a), Const::Int8(b))       => integer!(Int8, a, b),
+        (Const::Int16(a), Const::Int16(b))     => integer!(Int16, a, b),
+        (Const::Int32(a), Const::Int32(b))     => integer!(Int32, a, b),
+        (Const::Int64(a), Const::Int64(b))     => integer!(Int64, a, b),
+        (Const::Uint8(a), Const::Uint8(b))     => integer!(Uint8, a, b),
+        (Const::Uint16(a), Const::Uint16(b))   => integer!(Uint16, a, b),
+        (Const::Uint32(a), Const::Uint32(b))   => integer!(Uint32, a, b),
+        (Const::Uint64(a), Const::Uint64(b))   => integer!(Uint64, a, b),
+        (Const::Float32(a), Const::Float32(b)) => float!(Float32, a, b),
+        (Const::Float64(a), Const::Float64(b)) => float!(Float64, a, b),
+        _ => return Err("constant arithmetic operands have different types"),
+    })
+}
+
 /// If `r` is an `Enum::Variant` reference, the discriminant as a typed const.
 pub(crate) fn enum_const<'a>(enums: &HashMap<DefId, EnumDef<'a>>, r: &NameRef<'a>) -> Option<Const> {
     let def = enums.get(&r.def)?;

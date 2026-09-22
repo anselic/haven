@@ -13,4 +13,5 @@ mod lower;
 // Public surface: `use haven_mid::mil::*;` in the backend pulls these in.
 pub use ir::*;
 pub use ctx::{LowerCtx, LoopTargets, aggregate_def};
+pub(crate) use ctx::eval_const_scalar;
 pub use lower::lower;

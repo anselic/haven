@@ -3,7 +3,7 @@ use haven_common::ast::*;
 use crate::typecheck::EnumDef;
 use super::ir::*;
 use haven_common::defs::DefId;
-use super::ctx::{LowerCtx, LoopTargets, int_const, lit_const, pattern_variant_const, aggregate_def, is_aggregate_ty, coerce, enum_const};
+use super::ctx::{LowerCtx, LoopTargets, int_const, eval_const_scalar, pattern_variant_const, aggregate_def, is_aggregate_ty, coerce, enum_const};
 use super::expr::{lower_expr, lower_lvalue, copy_struct, copy_aggregate, alloca_aggregate};
 
 fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
@@ -383,8 +383,8 @@ fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<DefId, EnumDef<'a>>, out:
     }
 }
 
-/// Lower a global's initializer expression to a constant. Scalar literals
-/// (optionally negated), struct/array literals of constants, and function names
+/// Lower a global's initializer expression to a constant. Scalar literal
+/// arithmetic, struct/array literals of constants, and function names
 /// are supported; the typechecker has already rejected anything else, so the
 /// unreachable arms indicate a compiler bug. Struct/array field types are read
 /// from `cx.structs` / `cx.node_types`.
@@ -393,45 +393,20 @@ fn lower_const_init<'a>(
     expr: &Expr<'a>,
 ) -> ConstInit<'a> {
     match &expr.value {
-        ExprNode::Bool(b)    => ConstInit::Scalar(Const::Bool(*b)),
-        ExprNode::Int8(n)    => ConstInit::Scalar(Const::Int8(*n)),
-        ExprNode::Int16(n)   => ConstInit::Scalar(Const::Int16(*n)),
-        ExprNode::Int32(n)   => ConstInit::Scalar(Const::Int32(*n)),
-        ExprNode::Int64(n)   => ConstInit::Scalar(Const::Int64(*n)),
-        ExprNode::Uint8(n)   => ConstInit::Scalar(Const::Uint8(*n)),
-        ExprNode::Uint16(n)  => ConstInit::Scalar(Const::Uint16(*n)),
-        ExprNode::Uint32(n)  => ConstInit::Scalar(Const::Uint32(*n)),
-        ExprNode::Uint64(n)  => ConstInit::Scalar(Const::Uint64(*n)),
-        ExprNode::Float32(f) => ConstInit::Scalar(Const::Float32(*f)),
-        ExprNode::Float64(f) => ConstInit::Scalar(Const::Float64(*f)),
-        // width-less literals take the global's declared type, which `check_expr`
-        // recorded for this node when it checked the initializer against it.
-        ExprNode::IntLit(_) | ExprNode::FloatLit(_) =>
-            ConstInit::Scalar(lit_const(&cx.node_types[&expr.id], &expr.value)),
+        ExprNode::Bool(_)
+        | ExprNode::Int8(_) | ExprNode::Int16(_) | ExprNode::Int32(_) | ExprNode::Int64(_)
+        | ExprNode::Uint8(_) | ExprNode::Uint16(_) | ExprNode::Uint32(_) | ExprNode::Uint64(_)
+        | ExprNode::Float32(_) | ExprNode::Float64(_)
+        | ExprNode::IntLit(_) | ExprNode::FloatLit(_)
+        | ExprNode::Unary { op: UnaryOp::Neg, .. }
+        | ExprNode::Binary { .. } => ConstInit::Scalar(
+            eval_const_scalar(expr, &cx.node_types)
+                .unwrap_or_else(|msg| unreachable!("invalid constant initializer reached lowering: {msg}"))
+        ),
         // a string literal: intern the blob and take its address (`@.str.N`), a
         // link-time-constant `ptr` - the same value `ExprNode::Str` lowers to in
         // expression position.
         ExprNode::Str(s) => ConstInit::Scalar(Const::GlobalStr(cx.intern_string(s))),
-        ExprNode::Unary { op: UnaryOp::Neg, operand } => match &operand.value {
-            ExprNode::Int8(n)    => ConstInit::Scalar(Const::Int8(-*n)),
-            ExprNode::Int16(n)   => ConstInit::Scalar(Const::Int16(-*n)),
-            ExprNode::Int32(n)   => ConstInit::Scalar(Const::Int32(-*n)),
-            ExprNode::Int64(n)   => ConstInit::Scalar(Const::Int64(-*n)),
-            ExprNode::Uint8(n)   => ConstInit::Scalar(Const::Uint8(n.wrapping_neg())),
-            ExprNode::Uint16(n)  => ConstInit::Scalar(Const::Uint16(n.wrapping_neg())),
-            ExprNode::Uint32(n)  => ConstInit::Scalar(Const::Uint32(n.wrapping_neg())),
-            ExprNode::Uint64(n)  => ConstInit::Scalar(Const::Uint64(n.wrapping_neg())),
-            ExprNode::Float32(f) => ConstInit::Scalar(Const::Float32(-*f)),
-            ExprNode::Float64(f) => ConstInit::Scalar(Const::Float64(-*f)),
-            // `-<literal>` is one context-typed unit, so the negation is folded
-            // into the value before it is narrowed to the global's type - `-128`
-            // fits an `i8` even though `128` alone does not.
-            ExprNode::IntLit(v) =>
-                ConstInit::Scalar(lit_const(&cx.node_types[&operand.id], &ExprNode::IntLit(-*v))),
-            ExprNode::FloatLit(f) =>
-                ConstInit::Scalar(lit_const(&cx.node_types[&operand.id], &ExprNode::FloatLit(-*f))),
-            other => unreachable!("non-constant global initializer reached lowering: -{}", other),
-        },
         // struct literal: pair each field's declared type with its constant.
         // typecheck guarantees the fields match the definition in order.
         ExprNode::Struct { name, fields, .. } => {

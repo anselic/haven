@@ -1,0 +1,23 @@
+const MIN_I64: i64 = -9223372036854775807 - 1;
+const INTEGER: i32 = (6 + 2) * 5 / 4 % 7;
+const FLOAT: f64 = -(1.5f64 + 2.5f64) * 2.0f64;
+
+struct Limits {
+    low: i64,
+    offset: i32,
+}
+
+const NESTED: Limits = Limits {
+    low: -9223372036854775807 - 1,
+    offset: 20 - 3 * 4,
+};
+
+@export
+proc main() i32 {
+    println(MIN_I64);
+    println(INTEGER);
+    println(FLOAT);
+    println(NESTED.low);
+    println(NESTED.offset);
+    return 0;
+}
