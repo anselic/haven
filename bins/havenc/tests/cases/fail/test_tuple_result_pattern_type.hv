@@ -1,0 +1,10 @@
+//@ error: integer pattern `1` cannot match
+//@ error: Result<u16, i32>
+@export
+proc main() i32 {
+    let audio_format: Result<u16, i32> = Result::Ok(1u16);
+    match ((audio_format, 8u16)) {
+        (1, 8) -> { return 1; }
+        _ -> { return 0; }
+    }
+}

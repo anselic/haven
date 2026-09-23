@@ -76,6 +76,7 @@ pub fn size_of<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> usize {
 
         // n elements at the element stride.
         Array(elem, n) => size_of(elem, types) * n.expect_lit(),
+        Tuple(fields) => aggregate_layout(fields.iter(), types).0,
 
         // n packed elements, no interior padding.
         Simd(elem, n) => size_of(elem, types) * n.expect_lit(),
@@ -114,6 +115,7 @@ pub fn align_of<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> usize {
 
         // as aligned as its element.
         Array(elem, _) => align_of(elem, types),
+        Tuple(fields) => aggregate_layout(fields.iter(), types).1,
 
         // SysV aligns a vector to its size, rounded up to a power of two (an
         // 8-byte vector => 8, a 16-byte vector => 16), but never below the

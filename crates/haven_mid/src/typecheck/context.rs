@@ -436,6 +436,7 @@ impl<'a> Context<'a> {
             }),
             Type::Pointer(inner) => Ok(Type::Pointer(Box::new(recurse(inner)?))),
             Type::Array(inner, n) => Ok(Type::Array(Box::new(recurse(inner)?), n.clone())),
+            Type::Tuple(fields) => Ok(Type::Tuple(fields.iter().map(recurse).collect::<Result<_, _>>()?)),
             Type::Slice(inner) => Ok(Type::Slice(Box::new(recurse(inner)?))),
             Type::Simd(inner, n) => Ok(Type::Simd(Box::new(recurse(inner)?), n.clone())),
             Type::Function { params, return_type } => Ok(Type::Function {
@@ -484,6 +485,7 @@ impl<'a> Context<'a> {
             Type::Pointer(i) => format!("*{}", self.show(i)),
             Type::Slice(i) => format!("[{}]", self.show(i)),
             Type::Array(i, n) => format!("[{}; {}]", self.show(i), n),
+            Type::Tuple(fields) => format!("({})", fields.iter().map(|t| self.show(t)).collect::<Vec<_>>().join(", ")),
             Type::Simd(i, n) => format!("simd[{}, {}]", self.show(i), n),
             Type::Function { params, return_type } => {
                 let ps = params.iter().map(|p| self.show(p)).collect::<Vec<_>>().join(", ");

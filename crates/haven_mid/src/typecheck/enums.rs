@@ -34,6 +34,7 @@ pub(crate) fn enum_agg_deps_ready<'a>(
             // own layout, so it never blocks readiness.
             Type::Pointer(_) => true,
             Type::Array(inner, _) | Type::Slice(inner) | Type::Simd(inner, _) => ty_ready(inner, types),
+            Type::Tuple(fields) => fields.iter().all(|t| ty_ready(t, types)),
             _ => true,
         }
     }

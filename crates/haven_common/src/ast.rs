@@ -390,6 +390,7 @@ pub enum Type<'a> {
         params: Vec<Type<'a>>,
         return_type: Box<Type<'a>>,
     },
+    Tuple(Vec<Type<'a>>),
     Pointer(Box<Self>),
     /// Fixed-size array type, e.g., `[T; N]`
     Array(Box<Self>, ConstVal<'a>),
@@ -490,6 +491,7 @@ impl<'a> Display for Type<'a> {
                 let params_str = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
                 write!(f, "proc({}) {}", params_str, return_type)
             },
+            Tuple(fields) => write!(f, "({})", fields.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")),
             Pointer(inner) => write!(f, "*{}", inner),
             Array(inner, size) => write!(f, "[{}; {}]", inner, size),
             Slice(inner) => write!(f, "[{}]", inner),
@@ -553,6 +555,7 @@ impl<'a> Unified<'a> {
                 params: params.iter().map(|p| self.apply(p)).collect(),
                 return_type: Box::new(self.apply(return_type)),
             },
+            Type::Tuple(fields) => Type::Tuple(fields.iter().map(|t| self.apply(t)).collect()),
             Type::Projection { base, trait_, assoc } => Type::Projection {
                 base: Box::new(self.apply(base)),
                 trait_: *trait_,
@@ -605,6 +608,8 @@ pub fn unify<'a>(
             pp.len() == cp.len()
                 && pp.iter().zip(cp).all(|(p, c)| unify(p, c, params, out))
                 && unify(pr, cr, params, out),
+        (Type::Tuple(pp), Type::Tuple(cp)) => pp.len() == cp.len()
+            && pp.iter().zip(cp).all(|(p, c)| unify(p, c, params, out)),
         (Type::Projection { base: pb, trait_: pt, assoc: pa },
          Type::Projection { base: cb, trait_: ct, assoc: ca }) =>
             pa == ca && (pt.is_none() || ct.is_none() || pt == ct)
@@ -681,6 +686,7 @@ pub enum ExprNode<'a> {
     /// whose `def` is the enum and whose `variant()` is the variant.
     Path(NameRef<'a>),
     Slice(Vec<Expr<'a>>),
+    Tuple(Vec<Expr<'a>>),
     /// A repeated array literal, `[value; N]`: `N` copies of one element,
     /// yielding a `[T; N]`.
     ///
@@ -767,6 +773,7 @@ impl<'a> Display for ExprNode<'a> {
                     .join(", ");
                 write!(f, "[{}]", elements_str)
             },
+            ExprNode::Tuple(elements) => write!(f, "({})", elements.iter().map(|e| e.value.to_string()).collect::<Vec<_>>().join(", ")),
             ExprNode::Repeat { value, count } => write!(f, "[{}; {}]", value.value, count),
             ExprNode::Access { base, field } => write!(f, "{}.{}", base.value, field),
 
@@ -943,6 +950,7 @@ pub enum PatternNode<'a> {
     Wildcard,
     /// an integer-literal pattern, e.g. `5` or `-1`.
     Int(i64),
+    Tuple(Vec<Pattern<'a>>),
     /// a field-less enum-variant pattern, e.g. `Status::Continue`. Always the two
     /// segments `[enum, variant]`; resolution sets `def` to the enum.
     Path(NameRef<'a>),
@@ -968,6 +976,7 @@ impl<'a> Display for PatternNode<'a> {
         match self {
             PatternNode::Wildcard => write!(f, "_"),
             PatternNode::Int(n) => write!(f, "{}", n),
+            PatternNode::Tuple(fields) => write!(f, "({})", fields.iter().map(|p| p.value.to_string()).collect::<Vec<_>>().join(", ")),
             PatternNode::Path(s) => write!(f, "{}", s),
             PatternNode::Bind(name) => write!(f, "{}", name),
             PatternNode::Variant { path, fields } => {

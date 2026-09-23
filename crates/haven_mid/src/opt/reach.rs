@@ -116,7 +116,7 @@ impl<'w, 'a> Walker<'w, 'a> {
                 for a in args { self.expr(a); }
             }
             ExprNode::Struct { fields, .. } => for (_, e) in fields { self.expr(e) },
-            ExprNode::Slice(elements) => for e in elements { self.expr(e) },
+            ExprNode::Slice(elements) | ExprNode::Tuple(elements) => for e in elements { self.expr(e) },
             ExprNode::Access { base, .. } => self.expr(base),
             ExprNode::Index { slice, index } => { self.expr(slice); self.expr(index); }
             ExprNode::Unary { operand, .. } => self.expr(operand),

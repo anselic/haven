@@ -81,6 +81,7 @@ fn emit_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>, symbols: &HashMap<DefId, 
         // then copies `N*8` bytes between inline objects, overrunning both when
         // the element is under 8 bytes and dropping the tail when it is over.
         Array(t, n) => format!("[{} x {}]", n.expect_lit(), emit_field_type(t, types, symbols)),
+        Tuple(fields) => format!("{{ {} }}", fields.iter().map(|t| emit_field_type(t, types, symbols)).collect::<Vec<_>>().join(", ")),
         Slice(_) => "{ ptr, i32 }".to_string(), // struct { ptr, len }
         // `str` is a raw NUL-terminated `*const u8` (a C string), so a bare `ptr`
         Str => "ptr".to_string(),
@@ -228,7 +229,7 @@ impl<'a> EmitCtx<'a> {
     /// caller passed a pointer to it, and the verifier rejected the mismatch.
     fn is_aggregate_ty(&self, ty: &Type<'a>) -> bool {
         match ty {
-            Type::Array(..) => true,
+            Type::Array(..) | Type::Tuple(..) => true,
             Type::Named { def, .. } => !matches!(
                 self.types.get(def),
                 Some(TypeInfo { enum_: Some(EnumRepr { has_payload: false, .. }), .. }),
@@ -492,6 +493,8 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             emitln!(cx, "    {dst} = alloca %{}{}", cx.sym(def), align_suffix(align)),
         FieldPtr { dst, struct_def, base, field_index } =>
             emitln!(cx, "    {dst} = getelementptr %{}, ptr {base}, i32 0, i32 {field_index}", cx.sym(struct_def)),
+        TupleFieldPtr { dst, tuple_ty, base, field_index } =>
+            emitln!(cx, "    {dst} = getelementptr {}, ptr {base}, i32 0, i32 {field_index}", emit_type(&tuple_ty, &cx.types, &cx.symbols)),
         // a zero-offset gep off the global symbol yields its address as a `ptr`
         GlobalPtr { dst, name } =>
             emitln!(cx, "    {dst} = getelementptr i8, ptr @{}, i64 0", ir_symbol(name)),

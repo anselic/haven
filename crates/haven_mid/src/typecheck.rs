@@ -28,6 +28,7 @@ fn check_export_type<'a>(
         // TODO check if this is correct
         Type::Array(inner, _) =>
             Err(format!("fixed-size array type '[{}; N]' is not allowed in @export functions, use a raw pointer '*{}' and an explicit length parameter instead", inner, inner)),
+        Type::Tuple(_) => Err("tuple types are not allowed in @export functions".into()),
         Type::Slice(inner) =>
             Err(format!("slice type '{}' is not allowed in @export functions, use a raw pointer '*{}' and an explicit length parameter instead", ty, inner)),
         Type::Path { path, .. } => Type::unresolved(path),
@@ -158,7 +159,7 @@ fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), 
             Ok(())
         }
         // an array literal is constant iff every element is.
-        ExprNode::Slice(elements) => {
+        ExprNode::Slice(elements) | ExprNode::Tuple(elements) => {
             for elem in elements {
                 check_const_initializer(cx, elem)?;
             }
@@ -183,7 +184,7 @@ fn check_const_arithmetic<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), E
             for (_, field) in fields { check_const_arithmetic(cx, field)?; }
             Ok(())
         }
-        ExprNode::Slice(elements) => {
+        ExprNode::Slice(elements) | ExprNode::Tuple(elements) => {
             for element in elements { check_const_arithmetic(cx, element)?; }
             Ok(())
         }

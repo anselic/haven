@@ -242,7 +242,7 @@ pub fn aggregate_def<'a>(ty: &Type<'a>, enums: &HashMap<DefId, EnumDef<'a>>) -> 
 /// an aggregate", and `aggregate_def` only where a `DefId` is actually needed:
 /// to walk a struct's fields, or to name its LLVM type.
 pub fn is_aggregate_ty<'a>(ty: &Type<'a>, enums: &HashMap<DefId, EnumDef<'a>>) -> bool {
-    matches!(ty, Type::Array(..)) || aggregate_def(ty, enums).is_some()
+    matches!(ty, Type::Array(..) | Type::Tuple(..)) || aggregate_def(ty, enums).is_some()
 }
 
 #[derive(Clone, Debug)]

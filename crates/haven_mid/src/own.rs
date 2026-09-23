@@ -133,6 +133,7 @@ impl<'a> Model<'a> {
                 }
             }
             Type::Array(inner, _) => self.is_copy(inner),
+            Type::Tuple(fields) => fields.iter().all(|t| self.is_copy(t)),
             // primitives, pointers, `str`, slices, SIMD vectors and function
             // pointers are all plain values: a pointer *to* an owner is a
             // borrow, and copying it transfers nothing.
@@ -153,6 +154,15 @@ impl<'a> Model<'a> {
             steps.push(Step::Elems((**inner).clone(), count.expect_lit()));
             self.drop_paths(inner, steps, out);
             steps.pop();
+            return;
+        }
+        if let Type::Tuple(fields) = ty {
+            for (i, field_ty) in fields.iter().enumerate() {
+                let name: &'a str = Box::leak(i.to_string().into_boxed_str());
+                steps.push(Step::Field(name, field_ty.clone()));
+                self.drop_paths(field_ty, steps, out);
+                steps.pop();
+            }
             return;
         }
         let Type::Named { def, .. } = ty else { return };
@@ -384,7 +394,7 @@ impl<'a, 'c> Checker<'a, 'c> {
             ExprNode::Struct { fields, .. } => {
                 for (_, f) in fields { self.consume(f); }
             }
-            ExprNode::Slice(elements) => {
+            ExprNode::Slice(elements) | ExprNode::Tuple(elements) => {
                 for x in elements { self.consume(x); }
             }
             // `[value; N]` puts one value into N slots. For a `Copy` element that
@@ -513,7 +523,7 @@ impl<'a, 'c> Checker<'a, 'c> {
             ExprNode::Struct { fields, .. } => {
                 for (_, f) in fields { self.hoist_temps(f, decls); }
             }
-            ExprNode::Slice(elements) => {
+            ExprNode::Slice(elements) | ExprNode::Tuple(elements) => {
                 for x in elements { self.hoist_temps(x, decls); }
             }
             ExprNode::Repeat { value, .. } => self.hoist_temps(value, decls),
@@ -629,7 +639,7 @@ impl<'a, 'c> Checker<'a, 'c> {
             ExprNode::Unary { operand, .. } => self.walk_reads(operand, f),
             ExprNode::Binary { left, right, .. } => { self.walk_reads(left, f); self.walk_reads(right, f); }
             ExprNode::Struct { fields, .. } => for (_, x) in fields { self.walk_reads(x, f) },
-            ExprNode::Slice(elements) => for x in elements { self.walk_reads(x, f) },
+            ExprNode::Slice(elements) | ExprNode::Tuple(elements) => for x in elements { self.walk_reads(x, f) },
             ExprNode::Repeat { value, .. } => self.walk_reads(value, f),
             ExprNode::Call { func, args, .. } => {
                 self.walk_reads(func, f);
@@ -665,6 +675,7 @@ impl<'a, 'c> Checker<'a, 'c> {
             PatternNode::Variant { fields, .. } => {
                 for f in fields { self.note_pattern_binds(f, src); }
             }
+            PatternNode::Tuple(fields) => for f in fields { self.note_pattern_binds(f, src); },
             PatternNode::StructVariant { fields, .. } => {
                 for (_, f) in fields { self.note_pattern_binds(f, src); }
             }

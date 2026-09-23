@@ -93,7 +93,7 @@ fn infer_pointer_params(function: &mut Function<'_>) {
             }
             Inst::Load { .. } | Inst::Comment(_) | Inst::Sizeof { .. }
             | Inst::GlobalPtr { .. } => {}
-            Inst::FieldPtr { base, .. } => { exposed.insert(*base); }
+            Inst::FieldPtr { base, .. } | Inst::TupleFieldPtr { base, .. } => { exposed.insert(*base); }
             Inst::IndexArray { array, .. } => { exposed.insert(*array); }
             Inst::Index { slice, index, .. } => {
                 exposed.insert(*slice);

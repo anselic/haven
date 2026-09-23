@@ -76,6 +76,7 @@ fn type_depth(ty: &Type) -> usize {
             1 + params.iter().chain(std::iter::once(&**return_type))
                 .map(type_depth).max().unwrap_or(0)
         }
+        Type::Tuple(fields) => 1 + fields.iter().map(type_depth).max().unwrap_or(0),
         _ => 1,
     }
 }
@@ -239,6 +240,7 @@ fn mangle_ty<'a>(defs: &Defs<'a>, arena: &'a Bump, ty: &Type<'a>) -> String {
         Type::Path { path, .. } => Type::unresolved(path),
         Type::Pointer(inner) => format!(".ptr{}", mangle_ty(inner)),
         Type::Array(inner, n) => format!(".arr{}.{}", n.expect_lit(), mangle_ty(inner)),
+        Type::Tuple(fields) => format!(".tuple{}.{}", fields.len(), fields.iter().map(mangle_ty).collect::<Vec<_>>().join(".")),
         Type::Slice(inner) => format!(".slice{}", mangle_ty(inner)),
         Type::Simd(inner, n) => format!(".simd{}.{}", n.expect_lit(), mangle_ty(inner)),
         // a named type mangles as its emitted symbol, which is already unique
@@ -620,6 +622,7 @@ impl<'p, 'a> Mono<'p, 'a> {
             }
             Type::Pointer(inner)  => Type::Pointer(Box::new(self.subst_ty(inner, b))),
             Type::Array(inner, n) => Type::Array(Box::new(self.subst_ty(inner, b)), subst_cv(n, b)),
+            Type::Tuple(fields) => Type::Tuple(fields.iter().map(|t| self.subst_ty(t, b)).collect()),
             Type::Slice(inner)    => Type::Slice(Box::new(self.subst_ty(inner, b))),
             Type::Simd(inner, n)  => Type::Simd(Box::new(self.subst_ty(inner, b)), subst_cv(n, b)),
             Type::Function { params, return_type } => Type::Function {
@@ -961,6 +964,7 @@ impl<'p, 'a> Mono<'p, 'a> {
             }
             ExprNode::Access { base, field } =>
                 ExprNode::Access { base: Box::new(self.rebuild_expr(base, b)), field },
+            ExprNode::Tuple(fields) => ExprNode::Tuple(fields.iter().map(|e| self.rebuild_expr(e, b)).collect()),
             ExprNode::Index { slice, index } => ExprNode::Index {
                 slice: Box::new(self.rebuild_expr(slice, b)),
                 index: Box::new(self.rebuild_expr(index, b)),

@@ -1,0 +1,70 @@
+proc make_pair(a: i32, b: u16) (i32, u16) {
+    return (a, b);
+}
+
+proc choose(pair: (i32, u16)) i32 {
+    match (pair) {
+        (1, 8) -> { return 10; }
+        (1, 16) -> { return 20; }
+        (_, 24) -> { return 30; }
+        _ -> { return 40; }
+    }
+}
+
+proc choose_audio(audio_format: u16, bits_per_sample: u16) i32 {
+    match ((audio_format, bits_per_sample)) {
+        (1, 8) -> { return 8; }
+        (1, 16) -> { return 16; }
+        (3, 32) -> { return 32; }
+        _ -> { return 0; }
+    }
+}
+
+proc unit_value() () {
+    return ();
+}
+
+struct Holder { pair: (i32, u16) }
+enum Wrapped { Value((i32, u16)), Empty }
+const GLOBAL_PAIR: (i32, u16) = (13, 14u16);
+
+proc swap<T, U>(pair: (T, U)) (U, T) {
+    return (pair.1, pair.0);
+}
+
+proc peek_pair(pair: *(i32, u16)) i32 { return pair.0; }
+
+@export
+proc main() i32 {
+    let pair: (i32, u16) = make_pair(1, 16u16);
+    println(pair.0);
+    println(pair.1);
+    println(choose(pair));
+    pair = (3, 24u16);
+    println(choose(pair));
+    println(choose_audio(3u16, 32u16));
+    let one: (i32,) = (9,);
+    println(one.0);
+    let nested: ((i32, u16), i32) = ((2, 4u16), 7);
+    println(nested.0.1);
+    match (nested) {
+        ((2, 4), _) -> { println(1); }
+        _ -> { println(0); }
+    }
+    let unit: () = unit_value();
+    let holder = Holder { pair: (5, 6u16) };
+    println(holder.pair.0);
+    let wrapped = Wrapped::Value((7, 8u16));
+    match (wrapped) {
+        Wrapped::Value(v) -> { println(v.1); }
+        Wrapped::Empty -> { println(0); }
+    }
+    let swapped = swap::<i32, u16>((11, 12u16));
+    println(swapped.0);
+    println(GLOBAL_PAIR.1);
+    println(peek_pair(&pair));
+    match (pair) {
+        (_, _) -> { println(1); }
+    }
+    return 0;
+}

@@ -1,0 +1,6 @@
+//@ error: tuple has 2 fields; index 2 is out of bounds
+@export
+proc main() i32 {
+    let pair = (1, 2);
+    return pair.2;
+}

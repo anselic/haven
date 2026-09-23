@@ -118,6 +118,7 @@ pub enum Inst<'a> {
     ExtractValue { dst: Register, val: Value, index: usize },
     // %dst = getelementptr %Name, ptr %base, i32 0, i32 <field_index>
     FieldPtr { dst: Register, struct_def: DefId, base: Register, field_index: usize },
+    TupleFieldPtr { dst: Register, tuple_ty: Type<'a>, base: Register, field_index: usize },
     // %dst = ptr to a module-level global @name (a zero-offset gep, so %dst == @name)
     GlobalPtr { dst: Register, name: &'a str },
 

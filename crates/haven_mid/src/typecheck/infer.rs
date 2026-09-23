@@ -868,6 +868,14 @@ pub(crate) fn check_expr<'a>(
         ExprNode::Float64(_) => Type::Float64,
         ExprNode::Str(_)     => Type::Str,
 
+        ExprNode::Tuple(fields) => match expected {
+            Type::Tuple(types) if fields.len() == types.len() => {
+                for (field, ty) in fields.iter().zip(types) { check_expr(cx, ty, field)?; }
+                expected.clone()
+            }
+            _ => infer(cx, expr)?,
+        },
+
         // `[value; N]` in a known array position: check the element against the
         // element type being asked for rather than inferring it on its own, for
         // the same reason the list form does - otherwise the width-less literal
@@ -994,6 +1002,8 @@ pub(crate) fn infer<'a>(
         ExprNode::Float32(_) => Type::Float32,
         ExprNode::Float64(_) => Type::Float64,
         ExprNode::Str(_)     => Type::Str,
+        ExprNode::Tuple(fields) => Type::Tuple(fields.iter()
+            .map(|field| infer(cx, field)).collect::<Result<Vec<_>, _>>()?),
 
         // a width-less literal reaching `infer` is one with no expectation to
         // take its type from - `let n = 0;`, or the left operand of a binary
@@ -1297,6 +1307,21 @@ pub(crate) fn infer<'a>(
 
         ExprNode::Access { base, field } => {
             let base_ty = infer(cx, base)?;
+            let tuple = match &base_ty {
+                Type::Tuple(fields) => Some(fields),
+                Type::Pointer(inner) => match inner.as_ref() { Type::Tuple(fields) => Some(fields), _ => None },
+                _ => None,
+            };
+            if let Some(fields) = tuple {
+                let Some(index) = field.parse::<usize>().ok() else {
+                    return Err(Error::new(span, format!("tuple field must be a numeric index, got `{field}`")));
+                };
+                let Some(ty) = fields.get(index).cloned() else {
+                    return Err(Error::new(span, format!("tuple has {} fields; index {} is out of bounds", fields.len(), index)));
+                };
+                cx.node_types.insert(metadata.id, ty.clone());
+                return Ok(ty);
+            }
             let (struct_def, struct_args) = match &base_ty {
                 Type::Named { def, args } => (*def, args.as_slice()),
                 // auto-deref one level of pointer to a struct (like C's `->`)
@@ -1531,6 +1556,35 @@ pub(crate) fn always_returns(stmt: &Stmt, node_types: &HashMap<usize, Type>) -> 
     }
 }
 
+fn check_tuple_pattern<'a>(cx: &Context<'a>, pat: &Pattern<'a>, ty: &Type<'a>) -> Result<(), Error> {
+    match (&pat.value, ty) {
+        (PatternNode::Wildcard, _) => Ok(()),
+        (PatternNode::Int(n), ty) if ty.is_integer() => {
+            if literal_fits(Some(*n as i128), ty) { Ok(()) }
+            else { Err(Error::new(pat.span, format!("integer pattern {} does not fit in {}", n, cx.show(ty)))) }
+        }
+        (PatternNode::Tuple(fields), Type::Tuple(types)) if fields.len() == types.len() => {
+            for (field, ty) in fields.iter().zip(types) { check_tuple_pattern(cx, field, ty)?; }
+            Ok(())
+        }
+        (PatternNode::Tuple(fields), Type::Tuple(types)) => Err(Error::new(pat.span,
+            format!("tuple pattern has {} fields but the value has {}", fields.len(), types.len()))),
+        (PatternNode::Int(_), _) => Err(Error::new(pat.span,
+            format!("integer pattern `{}` cannot match `{}`", pat.value, cx.show(ty)))
+            .with_note("unwrap or destructure the value before matching it against an integer")),
+        _ => Err(Error::new(pat.span,
+            format!("pattern `{}` does not match type `{}`", pat.value, cx.show(ty)))),
+    }
+}
+
+fn tuple_pattern_irrefutable(pat: &Pattern<'_>) -> bool {
+    match &pat.value {
+        PatternNode::Wildcard => true,
+        PatternNode::Tuple(fields) => fields.iter().all(tuple_pattern_irrefutable),
+        _ => false,
+    }
+}
+
 pub(crate) fn check_stmt<'a>(
     cx: &mut Context<'a>,
     return_ty: &Type<'a>,
@@ -1623,9 +1677,9 @@ pub(crate) fn check_stmt<'a>(
             // the scrutinee must be an enum or an integer.
             let enum_name: Option<DefId> = match &scrut_ty {
                 Type::Named { def, .. } if cx.enums.contains_key(def) => Some(*def),
-                t if t.is_integer() => None,
+                t if t.is_integer() || matches!(t, Type::Tuple(_)) => None,
                 other => return Err(Error::new(scrutinee.span, format!(
-                    "match scrutinee must be an enum or integer type, got {}", cx.show(other)))),
+                    "match scrutinee must be an enum, integer, or tuple type, got {}", cx.show(other)))),
             };
             // `cx.enums[&en].payloads` holds the enum's OWN declared payload types
             // (`Type::Param("T")` for a generic enum's field) - if the scrutinee is
@@ -1655,6 +1709,7 @@ pub(crate) fn check_stmt<'a>(
             let mut has_wildcard = false;
             let mut covered_variants: HashSet<&'a str> = HashSet::new();
             let mut covered_ints: HashSet<i64> = HashSet::new();
+            let mut covered_tuples: HashSet<String> = HashSet::new();
 
             for (pat, body) in arms {
                 if has_wildcard {
@@ -1664,7 +1719,17 @@ pub(crate) fn check_stmt<'a>(
                 let mut arm_bindings: Vec<(&'a str, Binding<'a>, Type<'a>)> = Vec::new();
                 match &pat.value {
                     PatternNode::Wildcard => has_wildcard = true,
+                    PatternNode::Tuple(_) => {
+                        check_tuple_pattern(cx, pat, &scrut_ty)?;
+                        if !covered_tuples.insert(pat.value.to_string()) {
+                            return Err(Error::new(pat.span, "duplicate tuple match arm"));
+                        }
+                        if tuple_pattern_irrefutable(pat) { has_wildcard = true; }
+                    }
                     PatternNode::Int(n) => {
+                        if matches!(scrut_ty, Type::Tuple(_)) {
+                            return Err(Error::new(pat.span, "integer pattern cannot match a tuple"));
+                        }
                         if let Some(en) = enum_name {
                             return Err(Error::new(pat.span, format!(
                                 "integer pattern in a match on enum '{}'", cx.name_of(en))));
@@ -1793,8 +1858,11 @@ pub(crate) fn check_stmt<'a>(
                                 .with_note("cover every variant, or add a `_` arm"));
                         }
                     }
-                    None => return Err(Error::new(stmt.span, "non-exhaustive match on an integer type")
-                        .with_note("an integer match needs a `_` arm")),
+                    None => return Err(Error::new(stmt.span, if matches!(scrut_ty, Type::Tuple(_)) {
+                        "non-exhaustive match on a tuple type"
+                    } else {
+                        "non-exhaustive match on an integer type"
+                    }).with_note("add a `_` arm")),
                 }
             }
         },

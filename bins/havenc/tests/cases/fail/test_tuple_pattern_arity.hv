@@ -1,0 +1,8 @@
+//@ error: tuple pattern has 3 fields but the value has 2
+@export
+proc main() i32 {
+    match ((1, 2)) {
+        (1, 2, 3) -> { return 1; }
+        _ -> { return 0; }
+    }
+}

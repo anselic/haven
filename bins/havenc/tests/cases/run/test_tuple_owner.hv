@@ -1,0 +1,13 @@
+struct Marker { tag: i32 }
+
+extend Marker: Delete {
+    proc delete(*self) { println(self.tag); }
+}
+
+@export
+proc main() i32 {
+    let source: (Marker, i32) = (Marker { tag: 5 }, 1);
+    let moved: (Marker, i32) = source;
+    println(moved.1);
+    return 0;
+}

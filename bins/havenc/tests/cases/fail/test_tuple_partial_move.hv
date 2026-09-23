@@ -1,0 +1,13 @@
+//@ error: cannot move a 'Marker' out of a field of 'pair'
+struct Marker { tag: i32 }
+
+extend Marker: Delete {
+    proc delete(*self) { println(self.tag); }
+}
+
+@export
+proc main() i32 {
+    let pair: (Marker, i32) = (Marker { tag: 5 }, 1);
+    let field: Marker = pair.0;
+    return 0;
+}

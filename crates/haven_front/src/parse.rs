@@ -332,6 +332,31 @@ pub fn lex<'a>(file: FileId, source: &'a str) -> LexResult<'a> {
         .parse(source)
         .into_output_errors();
 
+    // After a field-access dot, `0.1` is two numeric fields (`.0.1`), not a
+    // floating literal. The character lexer has no expression context, so
+    // split that token here while the original source spans are available.
+    let tks = tks.map(|tokens| {
+        let mut out: Vec<Metadata<Token<'a>>> = Vec::with_capacity(tokens.len());
+        for token in tokens {
+            if matches!(out.last().map(|t| &t.value), Some(Token::Dot))
+                && matches!(token.value, Token::FloatLit(_))
+            {
+                let raw = &source[token.span.start..token.span.end];
+                if let Some((left, right)) = raw.split_once('.')
+                    && let (Ok(left), Ok(right)) = (left.parse::<i128>(), right.parse::<i128>())
+                {
+                    let mid = token.span.start + raw.find('.').unwrap();
+                    out.push(Metadata::new(Token::IntLit(left), Span::new(file, token.span.start, mid)));
+                    out.push(Metadata::new(Token::Dot, Span::new(file, mid, mid + 1)));
+                    out.push(Metadata::new(Token::IntLit(right), Span::new(file, mid + 1, token.span.end)));
+                    continue;
+                }
+            }
+            out.push(token);
+        }
+        out
+    });
+
     (tks, errs.into_iter()
         .map(|e| {
             e.map_span(|simple_span| {
@@ -772,13 +797,27 @@ fn parse_expr<'tks, 'src: 'tks>() -> P<'tks, 'src, Expr<'src>> {
             )
         })
         .boxed()
+        .or(just(Token::LParen).then_ignore(just(Token::RParen))
+            .map_with(|_, e| Metadata::new(ExprNode::Tuple(Vec::new()), e.span())))
+        .or(expr.clone().then_ignore(just(Token::Comma))
+            .then(expr.clone().separated_by(just(Token::Comma))
+                .allow_trailing().collect::<Vec<_>>())
+            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .map_with(|(first, rest), e| {
+                let mut fields = vec![first];
+                fields.extend(rest);
+                Metadata::new(ExprNode::Tuple(fields), e.span())
+            }))
         .or(expr.clone().delimited_by(just(Token::LParen), just(Token::RParen)))
 
         .pratt((
             postfix(
                 200,
-                just(Token::Dot).ignore_then(var),
-                |base, field: &&str, e| {
+                just(Token::Dot).ignore_then(choice((
+                    var.map(|s| *s),
+                    select_ref! { Token::IntLit(n) if *n >= 0 && *n <= u32::MAX as i128 => tuple_field_name(*n as usize) },
+                ))),
+                |base, field: &str, e| {
                     Metadata::new(
                         ExprNode::Access {
                             base: Box::new(base),
@@ -923,6 +962,15 @@ fn parse_type<'tks, 'src: 'tks>() -> P<'tks, 'src, Type<'src>> {
                     params,
                     return_type: Box::new(ret.unwrap_or(Type::Void)),
                 })
+                .boxed(),
+            just(Token::LParen).then_ignore(just(Token::RParen))
+                .to(Type::Tuple(Vec::new())).boxed(),
+            // (T, U, ...)
+            ty.clone().then_ignore(just(Token::Comma))
+                .then(ty.clone().separated_by(just(Token::Comma))
+                    .allow_trailing().collect::<Vec<_>>())
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .map(|(first, rest)| { let mut fields = vec![first]; fields.extend(rest); Type::Tuple(fields) })
                 .boxed(),
             // [T; N]
             just(Token::LBracket)
@@ -1270,9 +1318,18 @@ fn parse_stmt<'tks, 'src: 'tks>() -> P<'tks, 'src, Stmt<'src>> {
         } else {
             Err(Rich::custom(span, "expected `_`, an enum variant `Enum::Variant`, or an integer literal in a match pattern"))
         });
-        let pattern = choice([path_pat.boxed(), int_pat.boxed(), wild_pat.boxed()])
-            .map_with(|p, e| Metadata::new(p, e.span()))
-            .boxed();
+        let pattern = recursive(|pattern| {
+            let tuple = pattern.clone().then_ignore(just(Token::Comma))
+                .then(pattern.clone().separated_by(just(Token::Comma))
+                    .allow_trailing().collect::<Vec<_>>())
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .map(|(first, rest)| { let mut fields = vec![first]; fields.extend(rest); PatternNode::Tuple(fields) });
+            let unit = just(Token::LParen).then_ignore(just(Token::RParen))
+                .to(PatternNode::Tuple(Vec::new()));
+            choice([unit.boxed(), tuple.boxed(), path_pat.clone().boxed(), int_pat.clone().boxed(), wild_pat.clone().boxed()])
+                .map_with(|p, e| Metadata::new(p, e.span()))
+                .boxed()
+        }).boxed();
 
         // `match (scrutinee) { pattern => body ... }`. Parens on the scrutinee
         // mirror `if`/`while` and avoid the `Name { ... }` struct-literal ambiguity.

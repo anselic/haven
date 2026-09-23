@@ -176,6 +176,7 @@ pub(crate) fn subst_param_type<'a>(
         },
         Type::Pointer(inner)  => Type::Pointer(Box::new(subst_param_type(cx, types, consts, inner))),
         Type::Array(inner, n) => Type::Array(Box::new(subst_param_type(cx, types, consts, inner)), sub_cv(n)),
+        Type::Tuple(fields) => Type::Tuple(fields.iter().map(|t| subst_param_type(cx, types, consts, t)).collect()),
         Type::Slice(inner)    => Type::Slice(Box::new(subst_param_type(cx, types, consts, inner))),
         Type::Simd(inner, n)  => Type::Simd(Box::new(subst_param_type(cx, types, consts, inner)), sub_cv(n)),
         Type::Function { params, return_type } => Type::Function {
@@ -427,6 +428,7 @@ fn mentions_param<'a>(ty: &Type<'a>, params: &[&'a str]) -> bool {
         }),
         Type::Function { params: ps, return_type } =>
             ps.iter().any(|t| mentions_param(t, params)) || mentions_param(return_type, params),
+        Type::Tuple(fields) => fields.iter().any(|t| mentions_param(t, params)),
         Type::Projection { base, .. } => mentions_param(base, params),
         _ => false,
     }
@@ -578,6 +580,7 @@ pub(crate) fn subst_self<'a>(ty: &Type<'a>, self_ty: &Type<'a>) -> Type<'a> {
         Type::Param(name) if *name == "Self" => self_ty.clone(),
         Type::Pointer(inner)  => Type::Pointer(Box::new(subst_self(inner, self_ty))),
         Type::Array(inner, n) => Type::Array(Box::new(subst_self(inner, self_ty)), n.clone()),
+        Type::Tuple(fields) => Type::Tuple(fields.iter().map(|t| subst_self(t, self_ty)).collect()),
         Type::Slice(inner)    => Type::Slice(Box::new(subst_self(inner, self_ty))),
         Type::Simd(inner, n)  => Type::Simd(Box::new(subst_self(inner, self_ty)), n.clone()),
         Type::Function { params, return_type } => Type::Function {
@@ -624,6 +627,7 @@ pub(crate) fn subst_self_assoc<'a>(
         },
         Type::Pointer(inner)  => Type::Pointer(Box::new(subst_self_assoc(inner, self_ty, assoc))),
         Type::Array(inner, n) => Type::Array(Box::new(subst_self_assoc(inner, self_ty, assoc)), n.clone()),
+        Type::Tuple(fields) => Type::Tuple(fields.iter().map(|t| subst_self_assoc(t, self_ty, assoc)).collect()),
         Type::Slice(inner)    => Type::Slice(Box::new(subst_self_assoc(inner, self_ty, assoc))),
         Type::Simd(inner, n)  => Type::Simd(Box::new(subst_self_assoc(inner, self_ty, assoc)), n.clone()),
         Type::Function { params, return_type } => Type::Function {
@@ -658,6 +662,7 @@ pub(crate) fn check_const_scope<'a>(in_scope: &[&'a str], ty: &Type<'a>) -> Resu
             check_const_scope(in_scope, inner)
         }
         Type::Pointer(inner) | Type::Slice(inner) => check_const_scope(in_scope, inner),
+        Type::Tuple(fields) => { for t in fields { check_const_scope(in_scope, t)?; } Ok(()) },
         Type::Function { params, return_type } => {
             for p in params { check_const_scope(in_scope, p)?; }
             check_const_scope(in_scope, return_type)
@@ -737,6 +742,7 @@ pub(crate) fn check_type_resolves<'a>(cx: &Context<'a>, ty: &Type<'a>) -> Result
         | Type::Array(inner, _)
         | Type::Slice(inner)
         | Type::Simd(inner, _) => check_type_resolves(cx, inner),
+        Type::Tuple(fields) => { for t in fields { check_type_resolves(cx, t)?; } Ok(()) },
         Type::Function { params, return_type } => {
             for p in params { check_type_resolves(cx, p)?; }
             check_type_resolves(cx, return_type)

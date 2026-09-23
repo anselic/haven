@@ -234,6 +234,15 @@ fn classify_into<'a>(ty: &Type<'a>, offset: usize, types: &TypeTable<'a>, unions
                 classify_into(elem, offset + i * stride, types, unions, eb);
             }
         }
+        Type::Tuple(fields) => {
+            let mut pos = 0;
+            for field in fields {
+                let align = layout::align_of(field, types);
+                pos = (pos + align - 1) & !(align - 1);
+                classify_into(field, offset + pos, types, unions, eb);
+                pos += layout::size_of(field, types);
+            }
+        }
         // Leaf: a scalar / pointer / SIMD vector / field-less enum.
         _ => {
             let size = layout::size_of(ty, types);
@@ -263,7 +272,7 @@ fn classify_into<'a>(ty: &Type<'a>, offset: usize, types: &TypeTable<'a>, unions
 /// not to every type value that mentions it.
 fn is_aggregate<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> bool {
     match ty {
-        Type::Array(..) => true,
+        Type::Array(..) | Type::Tuple(..) => true,
         Type::Named { def, .. } => !matches!(
             types.get(def),
             Some(TypeInfo { enum_: Some(EnumRepr { has_payload: false, .. }), .. }) | None,
@@ -291,7 +300,7 @@ fn leaf_class(ty: &Type) -> Class {
         // `classify_into` and never reaches here.
         Type::Named { .. } => Class::Integer,
         Type::Void => Class::None,
-        Type::Array(..) => {
+        Type::Array(..) | Type::Tuple(..) => {
             unreachable!("aggregates are handled by classify_into, not leaf_class")
         }
         Type::Param(n) => panic!("type parameter `{n}` survived to ABI classification"),

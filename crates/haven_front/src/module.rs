@@ -499,6 +499,7 @@ fn subst_alias<'a>(
         Type::Pointer(inner) => Type::Pointer(Box::new(go(inner))),
         Type::Slice(inner) => Type::Slice(Box::new(go(inner))),
         Type::Array(inner, n) => Type::Array(Box::new(go(inner)), cv(n)),
+        Type::Tuple(fields) => Type::Tuple(fields.iter().map(go).collect()),
         Type::Simd(inner, n) => Type::Simd(Box::new(go(inner)), cv(n)),
         Type::Function { params, return_type } => Type::Function {
             params: params.iter().map(go).collect(),
@@ -534,6 +535,7 @@ fn alias_deps_ready<'a>(
         }
         Type::Pointer(inner) | Type::Slice(inner)
         | Type::Array(inner, _) | Type::Simd(inner, _) => ready(inner),
+        Type::Tuple(fields) => fields.iter().all(ready),
         Type::Function { params, return_type } =>
             params.iter().all(&ready) && ready(return_type),
         _ => true,
@@ -625,6 +627,7 @@ fn impl_generics<'a, 'd>(
                 for p in params { walk(p, known, decl, out); }
                 walk(return_type, known, decl, out);
             }
+            Type::Tuple(fields) => for t in fields { walk(t, known, decl, out); },
             Type::Projection { base, .. } => walk(base, known, decl, out),
             _ => {}
         }
@@ -697,6 +700,7 @@ fn target_key(ty: &Type<'_>) -> String {
         Type::Pointer(inner) => format!("ptr_{}", target_key(inner)),
         Type::Slice(inner) => format!("slice_{}", target_key(inner)),
         Type::Array(inner, _) => format!("array_{}", target_key(inner)),
+        Type::Tuple(fields) => format!("tuple{}_{}", fields.len(), fields.iter().map(target_key).collect::<Vec<_>>().join("_")),
         Type::Simd(inner, _) => format!("simd_{}", target_key(inner)),
         Type::Function { .. } => "proc".to_string(),
         // a scalar prints as its own keyword (`i32`, `bool`, `str`), which is
@@ -735,6 +739,7 @@ fn self_subst_type<'a>(ty: &mut Type<'a>, target: &Type<'a>, assoc: &[(&'a str, 
             for p in params { self_subst_type(p, target, assoc); }
             self_subst_type(return_type, target, assoc);
         }
+        Type::Tuple(fields) => for t in fields { self_subst_type(t, target, assoc); },
         Type::Projection { base, assoc: name, .. }
             if matches!(base.as_ref(), Type::Param("Self")) => {
             if let Some((_, bound)) = assoc.iter().find(|(n, _)| n == name) {
@@ -784,7 +789,7 @@ fn self_subst_expr<'a>(e: &mut Expr<'a>, target: &Type<'a>, head: Option<&Path<'
             self_subst_args(type_args, target, assoc);
             for a in args { self_subst_expr(a, target, head, assoc); }
         }
-        ExprNode::Slice(elems) => for el in elems { self_subst_expr(el, target, head, assoc); },
+        ExprNode::Slice(elems) | ExprNode::Tuple(elems) => for el in elems { self_subst_expr(el, target, head, assoc); },
         ExprNode::Repeat { value, .. } => self_subst_expr(value, target, head, assoc),
         ExprNode::Access { base, .. } => self_subst_expr(base, target, head, assoc),
         ExprNode::Index { slice, index } => {
@@ -811,6 +816,7 @@ fn self_subst_pat<'a>(p: &mut Pattern<'a>, head: Option<&Path<'a>>) {
             self_subst_head(&mut path.path, head);
             for (_, f) in fields { self_subst_pat(f, head); }
         }
+        PatternNode::Tuple(fields) => for f in fields { self_subst_pat(f, head); },
         _ => {}
     }
 }
@@ -896,7 +902,7 @@ fn refresh_ids_expr(e: &mut Expr<'_>) {
             refresh_ids_expr(func);
             for a in args { refresh_ids_expr(a); }
         }
-        ExprNode::Slice(elems) => for el in elems { refresh_ids_expr(el); },
+        ExprNode::Slice(elems) | ExprNode::Tuple(elems) => for el in elems { refresh_ids_expr(el); },
         ExprNode::Repeat { value, .. } => refresh_ids_expr(value),
         ExprNode::Access { base, .. } => refresh_ids_expr(base),
         ExprNode::Index { slice, index } => {
@@ -917,6 +923,7 @@ fn refresh_ids_pat(p: &mut Pattern<'_>) {
     match &mut p.value {
         PatternNode::Variant { fields, .. } => for f in fields { refresh_ids_pat(f); },
         PatternNode::StructVariant { fields, .. } => for (_, f) in fields { refresh_ids_pat(f); },
+        PatternNode::Tuple(fields) => for f in fields { refresh_ids_pat(f); },
         _ => {}
     }
 }
@@ -1457,6 +1464,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.variant_path(path);
                 for (_, f) in fields { self.pattern(&mut f.value, out); }
             }
+            PatternNode::Tuple(fields) => for f in fields { self.pattern(&mut f.value, out); },
             PatternNode::Wildcard | PatternNode::Int(_) => {}
         }
     }
@@ -1518,6 +1526,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 for p in params { self.ty(p, gparams); }
                 self.ty(return_type, gparams);
             }
+            Type::Tuple(fields) => for t in fields { self.ty(t, gparams); },
             Type::Projection { base, .. } => self.ty(base, gparams),
             _ => {}
         }
@@ -1668,6 +1677,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 for p in params { self.self_assoc(p, trait_, assoc); }
                 self.self_assoc(return_type, trait_, assoc);
             }
+            Type::Tuple(fields) => for t in fields { self.self_assoc(t, trait_, assoc); },
             Type::Projection { base, .. } => self.self_assoc(base, trait_, assoc),
             _ => {}
         }
@@ -2005,7 +2015,7 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                 self.expr(left, gparams);
                 self.expr(right, gparams);
             }
-            ExprNode::Slice(elems) => for el in elems { self.expr(el, gparams); },
+            ExprNode::Slice(elems) | ExprNode::Tuple(elems) => for el in elems { self.expr(el, gparams); },
             ExprNode::Repeat { value, .. } => self.expr(value, gparams),
             // a name used as a value: rewrite it to the mangled top-level name,
             // unless a param/local shadows it (then it's a local read, leave it),

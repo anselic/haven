@@ -110,7 +110,7 @@ pub enum TyHead {
     Uint8, Uint16, Uint32, Uint64,
     Float32, Float64,
     Str,
-    Pointer, Slice, Array, Simd, Function,
+    Pointer, Slice, Array, Tuple, Simd, Function,
 }
 
 impl TyHead {
@@ -136,6 +136,7 @@ impl TyHead {
             Type::Pointer(_) => TyHead::Pointer,
             Type::Slice(_) => TyHead::Slice,
             Type::Array(..) => TyHead::Array,
+            Type::Tuple(..) => TyHead::Tuple,
             Type::Simd(..) => TyHead::Simd,
             Type::Function { .. } => TyHead::Function,
             // `!` has no values, so it never dispatches a method and never
@@ -176,7 +177,7 @@ impl TyHead {
     /// structural target is unaffected — it is found through its receiver.
     pub fn is_nameable(self) -> bool {
         !matches!(self,
-            TyHead::Blanket | TyHead::Pointer | TyHead::Slice | TyHead::Array
+            TyHead::Blanket | TyHead::Pointer | TyHead::Slice | TyHead::Array | TyHead::Tuple
             | TyHead::Simd | TyHead::Function)
     }
 
@@ -194,7 +195,7 @@ impl TyHead {
             TyHead::Float32 => "f32", TyHead::Float64 => "f64",
             TyHead::Str => "str",
             TyHead::Pointer => "ptr", TyHead::Slice => "slice",
-            TyHead::Array => "array", TyHead::Simd => "simd",
+            TyHead::Array => "array", TyHead::Tuple => "tuple", TyHead::Simd => "simd",
             TyHead::Function => "proc",
         }
     }

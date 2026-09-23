@@ -345,6 +345,24 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             }
         }
 
+        ExprNode::Tuple(fields) => {
+            let ty = cx.node_types[&expr.id].clone();
+            let Type::Tuple(field_types) = &ty else { unreachable!() };
+            let field_types = field_types.clone();
+            let dst = cx.store_target.take().unwrap_or_else(|| alloca_aggregate(cx, &ty));
+            for (i, (field, field_ty)) in fields.iter().zip(field_types).enumerate() {
+                let val = lower_expr(cx, field);
+                let ptr = cx.fresh_reg();
+                cx.emit(Inst::TupleFieldPtr { dst: ptr, tuple_ty: ty.clone(), base: dst, field_index: i });
+                if is_aggregate_ty(&field_ty, &cx.enums) {
+                    let Value::Reg(src) = val else { unreachable!() };
+                    copy_aggregate(cx, &field_ty, src, ptr);
+                } else {
+                    cx.emit(Inst::Store { ptr, val, ty: field_ty, align: None });
+                }
+            }
+            Value::Reg(dst)
+        }
         ExprNode::Struct { name, fields, .. } => {
             // a struct-style data-enum constructor `Msg::Cc { id, val }` reuses the
             // struct-literal syntax but builds the aggregate in place. Detected by
@@ -402,7 +420,7 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                     // field_val is the source array's address, so copy the whole
                     // aggregate in (load+store) rather than storing the pointer as
                     // if it were the array value.
-                    None if matches!(field_ty, Type::Array(..)) => {
+                    None if matches!(field_ty, Type::Array(..) | Type::Tuple(..)) => {
                         let src = match field_val {
                             Value::Reg(r) => r,
                             _ => unreachable!(),
@@ -424,6 +442,20 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
         ExprNode::Access { base, field } => {
             let base_val = lower_expr(cx, base);
             let base_ty = cx.node_types[&base.id].clone();
+            let tuple_ty = match &base_ty {
+                Type::Tuple(_) => Some(&base_ty),
+                Type::Pointer(inner) if matches!(inner.as_ref(), Type::Tuple(_)) => Some(inner.as_ref()),
+                _ => None,
+            };
+            if let Some(tuple_ty @ Type::Tuple(fields)) = tuple_ty {
+                let index: usize = field.parse().expect("tuple index checked in typecheck");
+                let field_ty = fields[index].clone();
+                let Value::Reg(base) = base_val else { unreachable!() };
+                let ptr = cx.fresh_reg();
+                cx.emit(Inst::TupleFieldPtr { dst: ptr, tuple_ty: tuple_ty.clone(), base, field_index: index });
+                return if is_aggregate_ty(&field_ty, &cx.enums) { Value::Reg(ptr) }
+                    else { let dst = cx.fresh_reg(); cx.emit(Inst::Load { dst, ptr, ty: field_ty, align: None }); Value::Reg(dst) };
+            }
             // matches the typechecker's one-level auto-deref for `ptr.field`
             let struct_name = match &base_ty {
                 Type::Pointer(inner) => inner.def(),
@@ -989,6 +1021,19 @@ pub(crate) fn lower_lvalue<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Regist
         ExprNode::Access { base, field } => {
             let base_val = lower_expr(cx, base);
             let base_ty = cx.node_types[&base.id].clone();
+            let tuple_ty = match &base_ty {
+                Type::Tuple(_) => Some(&base_ty),
+                Type::Pointer(inner) if matches!(inner.as_ref(), Type::Tuple(_)) => Some(inner.as_ref()),
+                _ => None,
+            };
+            if let Some(tuple_ty @ Type::Tuple(fields)) = tuple_ty {
+                let index: usize = field.parse().expect("tuple index checked in typecheck");
+                assert!(index < fields.len());
+                let Value::Reg(base) = base_val else { unreachable!() };
+                let ptr = cx.fresh_reg();
+                cx.emit(Inst::TupleFieldPtr { dst: ptr, tuple_ty: tuple_ty.clone(), base, field_index: index });
+                return ptr;
+            }
             // matches the typechecker's one-level auto-deref for `ptr.field`
             let struct_name = match &base_ty {
                 Type::Pointer(inner) => inner.def(),
@@ -1159,7 +1204,7 @@ fn construct_data_variant<'a>(
                 }
                 None => match field_ty {
                     // an array field is inlined aggregate storage: copy it whole.
-                    Type::Array(..) => {
+                    Type::Array(..) | Type::Tuple(..) => {
                         let src = match field_val { Value::Reg(r) => r, _ => unreachable!() };
                         let loaded = cx.fresh_reg();
                         cx.emit(Inst::Load { dst: loaded, ptr: src, ty: field_ty.clone(), align: None });

@@ -6,6 +6,33 @@ use haven_common::defs::DefId;
 use super::ctx::{LowerCtx, LoopTargets, int_const, eval_const_scalar, pattern_variant_const, aggregate_def, is_aggregate_ty, coerce, enum_const};
 use super::expr::{lower_expr, lower_lvalue, copy_struct, copy_aggregate, alloca_aggregate};
 
+fn emit_tuple_pattern_tests<'a>(
+    cx: &mut LowerCtx<'a>, base: Register, ty: &Type<'a>, pat: &Pattern<'a>, fail: BlockId,
+) {
+    match &pat.value {
+        PatternNode::Wildcard => {}
+        PatternNode::Tuple(patterns) => {
+            let Type::Tuple(types) = ty else { unreachable!() };
+            for (i, (sub, field_ty)) in patterns.iter().zip(types).enumerate() {
+                let ptr = cx.fresh_reg();
+                cx.emit(Inst::TupleFieldPtr { dst: ptr, tuple_ty: ty.clone(), base, field_index: i });
+                emit_tuple_pattern_tests(cx, ptr, field_ty, sub, fail);
+            }
+        }
+        PatternNode::Int(n) => {
+            let val = cx.fresh_reg();
+            cx.emit(Inst::Load { dst: val, ptr: base, ty: ty.clone(), align: None });
+            let equal = cx.fresh_reg();
+            cx.emit(Inst::Binary { dst: equal, op: BinaryOp::Eq, ty: ty.clone(),
+                lhs: Value::Reg(val), rhs: Value::Const(int_const(ty, *n)) });
+            let pass = cx.fresh_block();
+            cx.terminate(Terminator::Branch { cond: Value::Reg(equal), then_block: pass, else_block: fail });
+            cx.current_block = pass;
+        }
+        _ => unreachable!("tuple pattern checked in typecheck"),
+    }
+}
+
 fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
     // a preceding statement may have diverged (`abort(...)`), terminating this
     // block with `unreachable`; anything after it is dead. Don't emit into a
@@ -36,7 +63,7 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             // slot so it fills it in place instead of alloca'ing at the literal
             // site - which, inside a loop, would grow the stack every iteration.
             if is_aggregate_ty(ty, &cx.enums)
-                && matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_))
+                && matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_) | ExprNode::Tuple(_))
             {
                 let (slot, _) = cx.env[&binding]; // pre-allocated in the entry block
                 cx.store_target = Some(slot);
@@ -51,6 +78,13 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             }
             let value_ty = cx.node_types[&value.id].clone();
             match ty {
+                Type::Tuple(_) => {
+                    let Value::Reg(src) = val else { unreachable!() };
+                    let dst = cx.env.get(&binding).map(|(r, _)| *r)
+                        .unwrap_or_else(|| alloca_aggregate(cx, ty));
+                    copy_aggregate(cx, ty, src, dst);
+                    cx.env.insert(binding, (dst, ty.clone()));
+                }
                 Type::Array(_, _) => {
                     // a non-literal array value (e.g. a var) is already backed by a
                     // slot; adopt its register directly.
@@ -102,6 +136,11 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             // are addresses: assigning one is a field-by-field copy into the
             // destination's existing storage, exactly as `Declare` does. A plain
             // `Store` here wrote the source *pointer* into the first field.
+            if matches!(ty, Type::Tuple(_)) {
+                let Value::Reg(src) = val else { unreachable!() };
+                copy_aggregate(cx, &ty, src, ptr);
+                return;
+            }
             if let Some(def) = aggregate_def(&ty, &cx.enums) {
                 let src = match val {
                     Value::Reg(r) => r,
@@ -187,6 +226,24 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
         }
 
         StmtNode::Match { scrutinee, arms } => {
+            if let Type::Tuple(_) = &cx.node_types[&scrutinee.id] {
+                let ty = cx.node_types[&scrutinee.id].clone();
+                let Value::Reg(ptr) = lower_expr(cx, scrutinee) else { unreachable!() };
+                let merge = cx.fresh_block();
+                for (pat, body) in arms {
+                    let body_block = cx.fresh_block();
+                    let fail = cx.fresh_block();
+                    emit_tuple_pattern_tests(cx, ptr, &ty, pat, fail);
+                    cx.terminate(Terminator::Jump(body_block));
+                    cx.current_block = body_block;
+                    lower_stmt(cx, body);
+                    if !cx.is_terminated() { cx.terminate(Terminator::Jump(merge)); }
+                    cx.current_block = fail;
+                }
+                cx.terminate(Terminator::Unreachable);
+                cx.current_block = merge;
+                return;
+            }
             cx.emit(Inst::Comment(format!("match {}", scrutinee.value)));
             let scrut_ty = cx.node_types[&scrutinee.id].clone();
             let scrut_val = lower_expr(cx, scrutinee);
@@ -234,6 +291,7 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
                         cases.push((c, block));
                     }
                     PatternNode::Bind(_) => unreachable!("bare binding rejected in typecheck"),
+                    PatternNode::Tuple(_) => unreachable!("tuple handled above"),
                 }
                 arm_blocks.push((block, body, pat));
             }
@@ -358,7 +416,7 @@ fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<DefId, EnumDef<'a>>, out:
                 // var copy) still adopt or copy in lower_stmt and are not
                 // pre-allocated here.
                 _ if is_aggregate_ty(&ty, enums) => {
-                    if matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_)) {
+                    if matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_) | ExprNode::Tuple(_)) {
                         out.push((stmt.id, name, ty));
                     }
                 }
@@ -417,6 +475,12 @@ fn lower_const_init<'a>(
                 inits.push((fty.clone(), lower_const_init(cx, fexpr)));
             }
             ConstInit::Struct(inits)
+        }
+        ExprNode::Tuple(fields) => {
+            let Type::Tuple(types) = &cx.node_types[&expr.id] else { unreachable!() };
+            let types = types.clone();
+            ConstInit::Struct(types.into_iter().zip(fields.iter())
+                .map(|(ty, field)| (ty, lower_const_init(cx, field))).collect())
         }
         // array literal: the element type comes from the inferred array type.
         ExprNode::Slice(elements) => {
