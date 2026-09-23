@@ -38,3 +38,11 @@ extend f32: Clone { proc clone(*self) f32 { return *self; } }
 extend f64: Clone { proc clone(*self) f64 { return *self; } }
 extend bool: Clone { proc clone(*self) bool { return *self; } }
 extend str: Clone { proc clone(*self) str { return *self; } }
+
+// --- containers
+
+extend [T]: Clone {
+    proc clone(*self) [T] {
+        return *self;
+    }
+}

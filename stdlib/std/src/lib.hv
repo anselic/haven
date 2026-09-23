@@ -66,6 +66,7 @@ extern strlen(s: str) u64;
 
 @alloc(false) extern rt_abort(msg: str) !;
 @alloc(false) extern rt_slice_len<T>(slice: *[T]) u64;
+@alloc(false) extern rt_slice_slice<T>(slice: *[T], start: u64, end: u64, elem_sz: u64);
 
 /// Print `msg` and terminate the process. Its result type is the bottom type `!`,
 /// so it coerces to any expected type - `return abort("...")` type-checks in a
@@ -78,3 +79,13 @@ pub proc abort(msg: str) ! { rt_abort(msg); }
 @alloc(false)
 @noalias
 pub proc slice_len<T>(slice: *[T]) u64 { return rt_slice_len::<T>(slice); }
+
+/// The runtime slice `slice` is sliced to the range `[start, end)`, and the new length is returned.
+/// panics: `start > end` or `end > slice length`
+// TODO: think of a better name
+@alloc(false)
+pub proc slice_slice<T>(slice: *[T], start: u64, end: u64) [T] {
+    let new_slice = slice.clone();
+    rt_slice_slice::<T>(&new_slice, start, end, sizeof::<T>());
+    return new_slice;
+}

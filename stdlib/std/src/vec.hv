@@ -29,18 +29,6 @@ pub struct Vec<T> {
         return v;
     }
 
-    /// Create a Vec from a slice, copying the elements into a new buffer.
-    pub proc from_slice(src: [T]) Vec<T> {
-        let n: u64 = slice_len::<T>(&src);
-        let v: Vec<T> = Vec::<T>::with_capacity(n);
-        let i: u64 = 0u64;
-        while (i < n) {
-            v.push(src[i]);
-            i = i + 1u64;
-        }
-        return v;
-    }
-
     /// Adopt an existing heap buffer as a Vec, taking ownership of it. `data`
     /// must have been produced by the same allocator std/alloc uses (`rt_alloc`/
     /// libc `malloc`, which is what backs runtime buffers like `fs::read`'s),
@@ -304,8 +292,8 @@ extend Vec<T>: IntoIterator {
     }
 }
 
-// Clone each element through a borrow, leaving the source Vec intact.
 extend Vec<T>: Clone where T: Clone {
+    /// Clone each element through a borrow, leaving the source Vec intact.
     proc clone(*self) Vec<T> {
         let out: Vec<T> = Vec::<T>::with_capacity(self.len());
         let i: u64 = 0u64;
@@ -317,15 +305,30 @@ extend Vec<T>: Clone where T: Clone {
     }
 }
 
-/// Clone the element at `i` without removing it. Out-of-bounds is undefined.
 extend Vec<T> where T: Clone {
+    /// Create a Vec from a slice, cloning the elements into a new buffer.
+    pub proc from_slice(src: *[T]) Vec<T> {
+        let n: u64 = slice_len::<T>(src);
+        let view: [T] = *src;
+        let out: Vec<T> = Vec::<T>::with_capacity(n);
+        let i: u64 = 0u64;
+
+        while (i < n) {
+            out.push((&view[i]).clone());
+            i = i + 1u64;
+        }
+
+        return out;
+    }
+
+    /// Clone the element at `i` without removing it. Out-of-bounds is undefined.
     pub proc get_cloned(*self, i: u64) T {
         return self.get_ptr(i).unwrap().clone();
     }
 }
 
-/// Destroy every element, then release the buffer.
 extend Vec<T>: Delete {
+    /// Destroy every element, then release the buffer.
     proc delete(*self) {
         drop_in_place::<T>(self.data, self.len);
         if (self.cap != 0u64) {
