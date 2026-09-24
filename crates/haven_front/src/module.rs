@@ -1037,6 +1037,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                     def: DefId::UNRESOLVED,
                     is_pub: mnode.is_pub,
                     attributes: mnode.attributes.clone(),
+                    effect_clause: mnode.effect_clause.clone(),
                     // the impl's own parameters are prepended in `load_and_merge`.
                     generics: mnode.generics.clone(),
                     // merged there too, once those parameters are in place - a
@@ -1245,10 +1246,12 @@ fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], imports: &[Import<'a>],
     }
     for tl in items {
         match &tl.value {
-            TopLevelNode::Function { attributes, .. } =>
-                check(attributes, AttrTarget::Function, &mut errs),
-            TopLevelNode::Extern { attributes, .. } =>
-                check(attributes, AttrTarget::Extern, &mut errs),
+            TopLevelNode::Function { attributes, .. } => {
+                check(attributes, AttrTarget::Function, &mut errs);
+            }
+            TopLevelNode::Extern { attributes, .. } => {
+                check(attributes, AttrTarget::Extern, &mut errs);
+            }
             TopLevelNode::Struct { attributes, .. } =>
                 check(attributes, AttrTarget::Struct, &mut errs),
             TopLevelNode::Enum { attributes, .. } =>
@@ -3334,6 +3337,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                             // *function* is private, the *member* is not.
                             is_pub: false,
                             attributes: Vec::new(),
+                            effect_clause: None,
                             // a trait method declares no parameters of its own;
                             // the impl's are prepended by pass 1.25.
                             generics: Vec::new(),
@@ -3706,12 +3710,24 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                     && params.iter().zip(prev_params).all(|((_, a), (_, b))| a == b)
                     && ret == prev_ret;
 
+                // Deduplicating same-ABI externs must not silently choose one
+                // module's effect promise. The checker sees only the retained
+                // declaration, so conflicting bounds would make its result
+                // depend on module traversal order.
+                let effects_eq = match (&tl.value, &prev.value) {
+                    (TopLevelNode::Extern { effect_clause: ca, .. },
+                     TopLevelNode::Extern { effect_clause: cb, .. }) =>
+                        ca.as_ref().map(|c| &c.value) == cb.as_ref().map(|c| &c.value),
+                    _ => true,
+                };
+
                 if is_extern && prev_extern {
-                    if sig_eq {
+                    if sig_eq && effects_eq {
                         continue; // same extern already emitted: legit dedup
                     }
+                    let reason = if sig_eq { "effect contract" } else { "signature" };
                     merge_errs.push(Error::new(tl.span, format!(
-                        "extern '{}' is redeclared with a different signature", name)));
+                        "extern '{}' is redeclared with a different {}", name, reason)));
                 } else {
                     merge_errs.push(Error::new(tl.span, format!(
                         "'{}' is already defined", name)));

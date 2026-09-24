@@ -1,0 +1,6 @@
+//@ error: has effect clause `with [Alloc]` but has unknown effects
+// Allowing Alloc does not prove an unannotated extern has no other effects.
+extern abs(x: i32) i32;
+
+@export
+proc main() i32 with [Alloc] { return abs(-1); }

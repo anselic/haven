@@ -2,11 +2,10 @@
 // pcg32_random_r sequence for seed 42 on the default stream, so this pins the
 // generator's exact output rather than merely checking it produces numbers.
 // Also covers determinism (same seed, same sequence), stream independence, and
-// use from an `@alloc(false)` callback, which is what the module exists for.
+// use from a `without [Alloc]` callback, which is what the module exists for.
 import std/rand { Rng }
 
-@alloc(false)
-proc noise_block(rng: *Rng, out: *f32, n: u64) void {
+proc noise_block(rng: *Rng, out: *f32, n: u64) void without [Alloc] {
     let i: u64 = 0u64;
     while (i < n) {
         out[i] = rng.bipolar_f32();
@@ -29,7 +28,7 @@ proc main() i32 {
     // distinct streams diverge
     let c: Rng = Rng::with_stream(7u64, 99u64);
     println(a.next_u32() == c.next_u32());
-    // @alloc(false) block fill
+    // without [Alloc] block fill
     let buf: [f32; 4] = [0.0f32, 0.0f32, 0.0f32, 0.0f32];
     noise_block(&r, &buf[0u64], 4u64);
     println(buf[0] > -1.0f32 && buf[0] < 1.0f32);

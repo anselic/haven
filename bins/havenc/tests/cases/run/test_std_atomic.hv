@@ -3,8 +3,7 @@
 // the value actually found on failure, which is what makes a retry loop work.
 import std/atomic { AtomicU32, AtomicU64, fence_acquire, fence_release }
 
-@alloc(false)
-proc audio_read(g: *AtomicU32) u32 { return g.load_acquire(); }
+proc audio_read(g: *AtomicU32) u32 without [Alloc] { return g.load_acquire(); }
 
 @export
 proc main() i32 {

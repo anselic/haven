@@ -4,9 +4,8 @@
 import std/ring { Ring }
 import std/fmt { display_println }
 
-// a per-sample delay line, entirely @alloc(false)
-@alloc(false)
-proc delay_tick(r: *Ring<f32>, x: f32, d: u64) f32 {
+// a per-sample delay line, entirely without [Alloc]
+proc delay_tick(r: *Ring<f32>, x: f32, d: u64) f32 without [Alloc] {
     r.push_overwrite(x);
     let n: u64 = r.len();
     if (d >= n) { return 0.0f32; }

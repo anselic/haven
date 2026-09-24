@@ -1,7 +1,7 @@
 //! End-to-end test harness for the compiler.
 //!
 //! Each fixture is a single `.hv` file; the whole compiler pipeline (parse ->
-//! typecheck -> safecheck -> mono -> mil -> llvm -> clang link) is exercised by
+//! typecheck -> effect check -> mono -> mil -> llvm -> clang link) is exercised by
 //! actually compiling and running it. Tests are discovered from disk and run in
 //! parallel via `libtest-mimic`, so each one shows up as its own named case
 //! under `cargo test`.

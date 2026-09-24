@@ -4,13 +4,13 @@ use clap::Parser;
 // The compiler stages live in the workspace crates, in pipeline order:
 //   haven_common - AST + diagnostics, shared by everything
 //   haven_front  - lex/parse, module load + merge (imports, mangling, prelude)
-//   haven_mid    - typecheck, safety-check, monomorphize, lower to MIL
+//   haven_mid    - typecheck, effect check, monomorphize, lower to MIL
 //   haven_back   - ABI/layout, LLVM IR emission
 use haven_common::{ast, diag};
 use haven_common::defs::Origin;
 use haven_common::target::TargetSpec;
 use haven_front::module;
-use haven_mid::{typecheck, mono, own, safecheck, opt, mil};
+use haven_mid::{typecheck, mono, own, effects, opt, mil};
 use haven_back::llvm;
 
 mod args;
@@ -187,7 +187,7 @@ fn main() {
             // ownership: reject use-after-move and insert the `delete` calls
             // that destroy every owner exactly once. Runs on the concrete
             // program, where every type's `Copy`-ness is decidable, and before
-            // the alloc check, so a `@alloc(false)` function is judged on the
+            // effect check, so a `without [Alloc]` function is judged on the
             // destructors it actually ends up calling.
             // the lang item comes from `defs`, which outlives mono - so unlike
             // the trait *declarations* mono drops, it needs no capturing here.
@@ -199,7 +199,7 @@ fn main() {
                     std::process::exit(1);
                 });
 
-            safecheck::alloc_check_program(&mono_ast, &defs, &cx.node_types).unwrap_or_else(|errs| {
+            effects::check_program(&mono_ast, &defs, &cx.node_types).unwrap_or_else(|errs| {
                 for err in &errs {
                     diag::report_error("Check error", err, &files);
                 }

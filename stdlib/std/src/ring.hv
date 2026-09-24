@@ -30,32 +30,27 @@ pub struct Ring<T> {
     }
 
     /// The number of live elements.
-    @alloc(false)
     @noalias
-    pub proc len(*self) u64 { return self.len; }
+    pub proc len(*self) u64 without [Alloc] { return self.len; }
     /// The allocated slot count: zero or a power of two.
-    @alloc(false)
     @noalias
-    pub proc cap(*self) u64 { return self.cap; }
+    pub proc cap(*self) u64 without [Alloc] { return self.cap; }
     /// Whether the ring is empty.
-    @alloc(false)
     @noalias
-    pub proc is_empty(*self) bool { return self.len == 0u64; }
+    pub proc is_empty(*self) bool without [Alloc] { return self.len == 0u64; }
     /// Whether the next `push` will fail.
-    @alloc(false)
     @noalias
-    pub proc is_full(*self) bool { return self.len >= self.cap; }
+    pub proc is_full(*self) bool without [Alloc] { return self.len >= self.cap; }
 
     /// Return the slot `i` elements after the front, wrapping at the buffer end.
     /// Does not check bounds.
-    @alloc(false)
     @noalias
-    proc slot(*self, i: u64) *T {
+    proc slot(*self, i: u64) *T without [Alloc] {
         return &self.data[(self.head + i) & self.mask];
     }
 
     /// Append `value`. Return `true` on success, or destroy it and return `false`
-    /// if full. There is no `@alloc(false)` annotation because destroying `T`
+    /// if full. There is no `without [Alloc]` clause because destroying `T`
     /// may call the allocator.
     pub proc push(*self, value: T) bool {
         if (self.len >= self.cap) {
@@ -69,10 +64,9 @@ pub struct Ring<T> {
     }
 
     /// Append `value`, returning `None` on success or `Some(value)` if full.
-    /// Does not destroy the value, so it is `@alloc(false)` for every `T`.
-    @alloc(false)
+    /// Does not destroy the value, so it is `without [Alloc]` for every `T`.
     @noalias
-    pub proc try_push(*self, value: T) Option<T> {
+    pub proc try_push(*self, value: T) Option<T> without [Alloc] {
         if (self.len >= self.cap) {
             return Option::Some(value);
         }
@@ -101,9 +95,8 @@ pub struct Ring<T> {
     /// if empty. Read it before the next push, which may reuse the slot.
     /// The removed value is not destroyed or tracked by the ring anymore; for an
     /// owning `T`, the caller must handle its cleanup before the slot is reused.
-    @alloc(false)
     @noalias
-    pub proc pop(*self) Option<*T> {
+    pub proc pop(*self) Option<*T> without [Alloc] {
         if (self.len == 0u64) {
             return Option::None;
         }
@@ -114,9 +107,8 @@ pub struct Ring<T> {
     }
 
     /// A pointer to the front element without removing it, or `none` when empty.
-    @alloc(false)
     @noalias
-    pub proc peek(*self) Option<*T> {
+    pub proc peek(*self) Option<*T> without [Alloc] {
         if (self.len == 0u64) {
             return Option::None;
         }
@@ -126,9 +118,8 @@ pub struct Ring<T> {
     /// Return a pointer to element `i`, counting from the front, or `None`
     /// if out of bounds. The back is `len - 1`. For a sample history maintained
     /// by `push_overwrite`, `get_ptr(len - 1 - d)` reads `d` samples back.
-    @alloc(false)
     @noalias
-    pub proc get_ptr(*self, i: u64) Option<*T> {
+    pub proc get_ptr(*self, i: u64) Option<*T> without [Alloc] {
         if (i >= self.len) {
             return Option::None;
         }
@@ -137,9 +128,8 @@ pub struct Ring<T> {
 
     /// Copy element `i`, counting from the front, or return `None` if out of bounds.
     /// Requires a `Copy` element type because it reads through a pointer.
-    @alloc(false)
     @noalias
-    pub proc get(*self, i: u64) Option<T> {
+    pub proc get(*self, i: u64) Option<T> without [Alloc] {
         if (i >= self.len) {
             return Option::None;
         }
@@ -147,7 +137,7 @@ pub struct Ring<T> {
     }
 
     /// Destroy all live elements and empty the ring, keeping its buffer.
-    /// Has no `@alloc(false)` annotation because element cleanup may allocate.
+    /// Has no `without [Alloc]` clause because element cleanup may allocate.
     pub proc clear(*self) {
         let i: u64 = 0u64;
         while (i < self.len) {
@@ -162,9 +152,8 @@ pub struct Ring<T> {
 
     /// Iterate the live elements by pointer, front to back:
     /// `for (p in r.iter()) { ... *p ... }`.
-    @alloc(false)
     @noalias
-    pub proc iter(*self) RingIter<T> {
+    pub proc iter(*self) RingIter<T> without [Alloc] {
         return RingIter::<T> { ring: self, pos: 0u64 };
     }
 }
@@ -178,9 +167,8 @@ pub struct RingIter<T> {
 
 extend RingIter<T>: Iterator {
     type Item = *T;
-    @alloc(false)
     @noalias
-    proc next(*self) Option<*T> {
+    proc next(*self) Option<*T> without [Alloc] {
         if (self.pos >= self.ring.len()) {
             return Option::None;
         }

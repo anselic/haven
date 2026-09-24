@@ -1,0 +1,8 @@
+//@ error: redeclared with a different effect contract
+// The merge must not pick one of two conflicting trusted extern bounds.
+import helpers/effect_contract
+
+extern effect_probe() i32 with [Alloc];
+
+@export
+proc main() i32 { return effect_probe(); }

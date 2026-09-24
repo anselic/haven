@@ -1528,6 +1528,39 @@ fn parse_where_bounds<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<GenericParam<'src
         .boxed()
 }
 
+/// `with` is an allowlist, `without` a denylist. Both are soft clause words.
+/// Only `Alloc` is accepted until other effects have sound inference.
+fn parse_effect_clause<'tks, 'src: 'tks>() -> P<'tks, 'src, Option<Metadata<EffectClause>>> {
+    let direction = choice((
+        select_ref! { Token::Var("with") => true },
+        select_ref! { Token::Var("without") => false },
+    ));
+    let effects = select_ref! { Token::Var("Alloc") => Effect::Alloc }
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBracket), just(Token::RBracket));
+    direction.then(effects)
+        .map_with(|(allow_only, effects), e| Metadata::new(
+            if allow_only { EffectClause::With(effects) } else { EffectClause::Without(effects) },
+            e.span()))
+        .or_not()
+        .boxed()
+}
+
+/// A signature's optional return type. Effect words must not be consumed as
+/// named return types when the return type is absent.
+fn parse_return_type<'tks, 'src: 'tks>() -> P<'tks, 'src, Type<'src>> {
+    choice((
+        select_ref! { Token::Var("with") => () },
+        select_ref! { Token::Var("without") => () },
+    )).not()
+        .ignore_then(parse_type())
+        .or_not()
+        .map(|t| t.unwrap_or(Type::Void))
+        .boxed()
+}
+
 /// An optional `<T, const N: u32, ...>` binder following a name, empty when
 /// absent. Shared by everything that can be generic - procs, externs, structs,
 /// enums, methods - so the spellings cannot drift apart.
@@ -1603,7 +1636,8 @@ fn parse_params<'tks, 'src: 'tks>()
 }
 
 /// A method inside a struct/enum body or an `extend` block:
-/// `[attrs] [pub] proc name[<generics>](receiver?, params...) [RetType] { body }`.
+/// `[attrs] [pub] proc name[<generics>](receiver?, params...) [RetType]
+/// [where ...] [with/without [effects]] { body }`.
 /// The receiver is `self` (by value), `*self` (by pointer), or absent (an
 /// associated function). `proc` heads every method, so it cleanly delimits methods
 /// from the comma-separated fields/variants that precede them in a type body.
@@ -1617,19 +1651,21 @@ fn parse_method<'tks, 'src: 'tks>() -> P<'tks, 'src, Method<'src>> {
         .then(var.map(|s| *s))
         .then(parse_generics())
         .then(parse_params())
-        .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
+        .then(parse_return_type())
         .then(parse_where_bounds())
+        .then(parse_effect_clause())
         .then(
             parse_stmt()
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map_with(|(((((((attributes, is_pub), name), generics), (receiver, params)), return_type), where_bounds), body), e|
+        .map_with(|((((((((attributes, is_pub), name), generics), (receiver, params)), return_type), where_bounds), effect_clause), body), e| {
             Metadata::new(
-                MethodNode { is_pub, attributes, receiver, name, generics, where_bounds, params, return_type, body },
+                MethodNode { is_pub, attributes, effect_clause, receiver, name, generics, where_bounds, params, return_type, body },
                 e.span(),
-            ))
+            )
+        })
         .boxed()
 }
 
@@ -1699,8 +1735,9 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
         .then(var)
         .then(generics.clone())
         .then(parse_param_list())
-        .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
+        .then(parse_return_type())
         .then(parse_where_bounds())
+        .then(parse_effect_clause())
         .then(
             parse_stmt()
                 // .separated_by(just(Token::Semicolon))
@@ -1710,34 +1747,41 @@ fn parse_toplevel<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<TopLevel<'src>>> {
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace))
         )
-        .map(|(((((((attributes, is_pub), name), generics), params), return_type), where_bounds), body)| (TopLevelNode::Function {
-            name,
-            def: DefId::UNRESOLVED,
-            is_pub,
-            attributes,
-            generics,
-            where_bounds,
-            params,
-            return_type,
-            body,
-        }, Vec::new()));
+        .map(|((((((((attributes, is_pub), name), generics), params), return_type), where_bounds), effect_clause), body)| {
+            (TopLevelNode::Function {
+                name,
+                def: DefId::UNRESOLVED,
+                is_pub,
+                attributes,
+                effect_clause,
+                generics,
+                where_bounds,
+                params,
+                return_type,
+                body,
+            }, Vec::new())
+        });
 
     let extern_ = item_header.clone()
         .then_ignore(just(Token::Extern))
         .then(var)
         .then(generics.clone())
         .then(parse_param_list())
-        .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
+        .then(parse_return_type())
+        .then(parse_effect_clause())
         .then_ignore(just(Token::Semicolon))
-        .map(|(((((attributes, is_pub), name), generics), params), return_type)| (TopLevelNode::Extern {
-            name,
-            def: DefId::UNRESOLVED,
-            is_pub,
-            attributes,
-            generics,
-            params,
-            return_type,
-        }, Vec::new()));
+        .map(|((((((attributes, is_pub), name), generics), params), return_type), effect_clause)| {
+            (TopLevelNode::Extern {
+                name,
+                def: DefId::UNRESOLVED,
+                is_pub,
+                attributes,
+                effect_clause,
+                generics,
+                params,
+                return_type,
+            }, Vec::new())
+        });
 
     // struct body: comma-separated fields first, then zero or more methods. `proc`
     // starts every method and can't start a field, so it's an unambiguous delimiter

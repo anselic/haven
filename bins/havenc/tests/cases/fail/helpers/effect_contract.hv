@@ -1,0 +1,1 @@
+pub extern effect_probe() i32 with [];

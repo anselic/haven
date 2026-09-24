@@ -1,0 +1,6 @@
+//@ error: has effect clause `with []` but has unknown effects
+// without [Alloc] excludes allocation only. It says nothing about IO or locks.
+extern abs(x: i32) i32 without [Alloc];
+
+@export
+proc main() i32 with [] { return abs(-1); }

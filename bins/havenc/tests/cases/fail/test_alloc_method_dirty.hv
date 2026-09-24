@@ -1,5 +1,5 @@
 // The dual of test_alloc_method: resolving a method call to its target must also
-// propagate DIRTINESS, so the alloc check stays sound. `touch` is `@alloc(false)`
+// propagate DIRTINESS, so the alloc check stays sound. `touch` is `without [Alloc]`
 // but calls the concrete method `grow`, which allocates - the checker resolves
 // `self.grow()` to `grow`, sees it is dirty, and rejects `touch`. (If method
 // calls were simply waved through, this would compile.)
@@ -10,13 +10,12 @@ import std/alloc { alloc }
 struct Thing {
     p: *i32,
 
-    // concrete, allocating, and NOT @alloc(false)
+    // concrete, allocating, and has no `without [Alloc]` clause
     proc grow(*self) {
         self.p = alloc::<i32>(4u64).unwrap();
     }
 
-    @alloc(false)
-    proc touch(*self) {
+    proc touch(*self) without [Alloc] {
         self.grow();
     }
 }

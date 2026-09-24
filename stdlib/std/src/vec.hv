@@ -71,12 +71,11 @@ pub struct Vec<T> {
     }
 
     /// Append without growing. Returns `None` on success or `Some(value)` when
-    /// the Vec is full. This is safe to call from an `@alloc(false)` function:
+    /// the Vec is full. This is safe to call from a `without [Alloc]` function:
     /// ```hv
     /// let v: Vec<Voice> = Vec::<Voice>::with_capacity(16u64); // setup
     /// ...
-    /// @alloc(false)
-    /// proc note_on(v: *Vec<Voice>, n: Voice) bool {
+    /// proc note_on(v: *Vec<Voice>, n: Voice) bool without [Alloc] {
     ///     return v.push_within_capacity(n).is_none();
     /// }
     /// ```
@@ -86,9 +85,8 @@ pub struct Vec<T> {
     /// let slot: Option<String> = v.push_within_capacity(s);
     /// if (slot.is_none()) { ... }   // `slot` is destroyed at end of scope
     /// ```
-    @alloc(false)
     @noalias
-    pub proc push_within_capacity(*self, value: T) Option<T> {
+    pub proc push_within_capacity(*self, value: T) Option<T> without [Alloc] {
         if (self.len >= self.cap) {
             return Option::Some(value);
         }
@@ -100,19 +98,17 @@ pub struct Vec<T> {
 
     /// Whether `push_within_capacity` would refuse: `len == cap`. Says nothing
     /// about `push`, which grows.
-    @alloc(false)
     @noalias
-    pub proc is_full(*self) bool { return self.len >= self.cap; }
+    pub proc is_full(*self) bool without [Alloc] { return self.len >= self.cap; }
 
     /// How many more elements fit before the buffer would have to grow.
-    @alloc(false)
     @noalias
-    pub proc remaining(*self) u64 { return self.cap - self.len; }
+    pub proc remaining(*self) u64 without [Alloc] { return self.cap - self.len; }
 
     /// Shorten to `len` elements, destroying those dropped. Given a length at or
     /// above the current one, this does nothing.
     ///
-    /// Not marked `@alloc(false)`: destroying an element calls its `delete`, and
+    /// No `without [Alloc]` clause: destroying an element calls its `delete`, and
     /// freeing is an allocator call like any other. It still comes out clean for
     /// a `T` that owns nothing, since there is then no destructor to run.
     pub proc truncate(*self, len: u64) {
@@ -157,9 +153,8 @@ pub struct Vec<T> {
     /// (`push`, `reserve`) or destroys it, and it does not own its elements, so
     /// dropping it destroys nothing. Aborts if `len` does not fit a slice's
     /// 32-bit length.
-    @alloc(false)
     @noalias
-    pub proc as_slice(*self) [T] {
+    pub proc as_slice(*self) [T] without [Alloc] {
         if (self.len > 2147483647u64) {
             abort("Vec::as_slice: length exceeds slice limit");
         }

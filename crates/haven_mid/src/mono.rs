@@ -359,7 +359,7 @@ fn member_of<'a>(members: &MemberTable<'a>, instances: &Instances<'a>, ty: &Type
 /// receiver whose method can't be found. Callers that can't resolve a method
 /// this way should treat the call conservatively.
 ///
-/// Used by the `@alloc(false)` check, which runs on the post-mono AST where a
+/// Used by effect checking, which runs on the post-mono AST where a
 /// concrete method call is still `Call { func: Access { .. } }` (only generic
 /// ones were lowered to named calls). Resolving it to `m.name` - the top-level
 /// function `lower_methods` desugared the method into - turns the call into a
@@ -1084,7 +1084,7 @@ impl<'p, 'a> Mono<'p, 'a> {
         b: &Bindings<'a>,
         name_override: Option<(DefId, &'a str)>,
     ) -> TopLevel<'a> {
-        let TopLevelNode::Function { name, def, is_pub, attributes, params, return_type, body, .. } = &tl.value
+        let TopLevelNode::Function { name, def, is_pub, attributes, effect_clause, params, return_type, body, .. } = &tl.value
         else { unreachable!("rebuild_function called on a non-function") };
 
         // any struct instance requested while substituting this function's types
@@ -1101,6 +1101,7 @@ impl<'p, 'a> Mono<'p, 'a> {
                 def: name_override.map_or(*def, |(d, _)| d),
                 is_pub: *is_pub,
                 attributes: attributes.clone(),
+                effect_clause: effect_clause.clone(),
                 // a monomorphic instance has no parameters left, so nothing
                 // remains for a clause to bound either.
                 generics: Vec::new(),

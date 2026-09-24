@@ -11,24 +11,22 @@
 
 // libc takes untyped pointers and byte counts. The wrappers below convert
 // from typed pointers and element counts. These externs do not allocate.
-@alloc(false) extern memcpy(dst: *void, src: *void, n: u64) *void;
-@alloc(false) extern memmove(dst: *void, src: *void, n: u64) *void;
-@alloc(false) extern memset(dst: *void, c: i32, n: u64) *void;
-@alloc(false) extern memcmp(a: *void, b: *void, n: u64) i32;
+extern memcpy(dst: *void, src: *void, n: u64) *void without [Alloc];
+extern memmove(dst: *void, src: *void, n: u64) *void without [Alloc];
+extern memset(dst: *void, c: i32, n: u64) *void without [Alloc];
+extern memcmp(a: *void, b: *void, n: u64) i32 without [Alloc];
 
 /// Copy `count` elements from `src` to `dst`. The buffers must not overlap.
 /// Use `copy_overlapping` if they might; overlap here is undefined behavior.
-@alloc(false)
 @noalias
-pub proc copy<T>(dst: *T, src: *T, count: u64) void {
+pub proc copy<T>(dst: *T, src: *T, count: u64) void without [Alloc] {
     memcpy(ptr_cast::<*void>(dst), ptr_cast::<*void>(src), count * sizeof::<T>());
 }
 
 /// Copy `count` elements from `src` to `dst`, allowing overlap.
 /// The result is as if the source bytes were saved before writing. Use this
 /// when shifting elements within a buffer, such as during insertion or removal.
-@alloc(false)
-pub proc copy_overlapping<T>(dst: *T, src: *T, count: u64) void {
+pub proc copy_overlapping<T>(dst: *T, src: *T, count: u64) void without [Alloc] {
     memmove(ptr_cast::<*void>(dst), ptr_cast::<*void>(src), count * sizeof::<T>());
 }
 
@@ -36,9 +34,8 @@ pub proc copy_overlapping<T>(dst: *T, src: *T, count: u64) void {
 ///
 /// Write one element at a time because `memset` repeats a byte, not a `T`.
 /// `ptr_write` does not destroy the previous contents of a slot.
-@alloc(false)
 @noalias
-pub proc set<T>(dst: *T, value: T, count: u64) void {
+pub proc set<T>(dst: *T, value: T, count: u64) void without [Alloc] {
     let i: u64 = 0u64;
     while (i < count) {
         ptr_write::<T>(&dst[i], value);
@@ -51,9 +48,8 @@ pub proc set<T>(dst: *T, value: T, count: u64) void {
 /// Only read the result as `T` if all-zero bytes form a valid `T`. This clears
 /// a sample buffer to silence, but is not a general way to create default
 /// values. Any resources owned by overwritten values are not freed.
-@alloc(false)
 @noalias
-pub proc zero<T>(dst: *T, count: u64) void {
+pub proc zero<T>(dst: *T, count: u64) void without [Alloc] {
     memset(ptr_cast::<*void>(dst), 0, count * sizeof::<T>());
 }
 
@@ -62,21 +58,18 @@ pub proc zero<T>(dst: *T, count: u64) void {
 ///
 /// This is not numeric ordering or value equality. For example, +0.0 and -0.0
 /// have different bytes, and struct padding is included in the comparison.
-@alloc(false)
-pub proc compare<T>(a: *T, b: *T, count: u64) i32 {
+pub proc compare<T>(a: *T, b: *T, count: u64) i32 without [Alloc] {
     return memcmp(ptr_cast::<*void>(a), ptr_cast::<*void>(b), count * sizeof::<T>());
 }
 
 /// Whether the buffers have identical bytes across `count` elements.
 /// Uses the same byte comparison as `compare`, including any padding.
-@alloc(false)
-pub proc equal<T>(a: *T, b: *T, count: u64) bool {
+pub proc equal<T>(a: *T, b: *T, count: u64) bool without [Alloc] {
     return compare::<T>(a, b, count) == 0;
 }
 
 /// Exchange the values at `a` and `b`. The pointers may be the same.
-@alloc(false)
-pub proc swap<T>(a: *T, b: *T) void {
+pub proc swap<T>(a: *T, b: *T) void without [Alloc] {
     if (a == b) { return; }
     let tmp: T = ptr_read::<T>(a);
     ptr_write::<T>(a, ptr_read::<T>(b));
@@ -84,9 +77,8 @@ pub proc swap<T>(a: *T, b: *T) void {
 }
 
 /// Write `value` into `slot` and return its previous value.
-@alloc(false)
 @noalias
-pub proc replace<T>(slot: *T, value: T) T {
+pub proc replace<T>(slot: *T, value: T) T without [Alloc] {
     let old: T = ptr_read::<T>(slot);
     ptr_write::<T>(slot, value);
     return old;
@@ -94,10 +86,8 @@ pub proc replace<T>(slot: *T, value: T) T {
 
 /// Return the numeric address of `ptr`. The value is process-specific and may
 /// differ between runs; use pointer equality when only identity matters.
-@alloc(false)
-pub proc address<T>(ptr: *T) u64 { return ptr_addr::<T>(ptr); }
+pub proc address<T>(ptr: *T) u64 without [Alloc] { return ptr_addr::<T>(ptr); }
 
 /// Return the size of `T` in bytes, including padding. This is also the
 /// distance between consecutive array elements. Wraps the `sizeof` intrinsic.
-@alloc(false)
-pub proc size_of<T>() u64 { return sizeof::<T>(); }
+pub proc size_of<T>() u64 without [Alloc] { return sizeof::<T>(); }

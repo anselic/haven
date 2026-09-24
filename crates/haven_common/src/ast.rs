@@ -737,7 +737,7 @@ pub enum ExprNode<'a> {
     /// carrying its turbofish but no call: `entry_init::<Gain>`. The turbofish
     /// fully determines the instance, so monomorphization mints it and rewrites
     /// this node to a plain `Var(mangled_symbol)` - no `FnRef` survives past mono,
-    /// which is why the later passes (own/safecheck/mil) need no arm for it. A
+    /// which is why the later passes (own/effects/mil) need no arm for it. A
     /// *non*-generic function taken by value stays a bare `Var`/`Path`, as before;
     /// this node exists only to carry the type arguments a bare name cannot.
     FnRef {
@@ -1139,6 +1139,45 @@ impl<'a> Display for AttributeNode<'a> {
 
 pub type Attribute<'a> = Metadata<AttributeNode<'a>>;
 
+/// A callable's source-level effect. Only allocation is checked today; more
+/// effects can be added as their analyses become sound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect { Alloc }
+
+impl Display for Effect {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self { Effect::Alloc => write!(f, "Alloc") }
+    }
+}
+
+/// A source-level effect bound. No clause means infer effects from the body.
+/// `With` is an allowlist; `Without` is a denylist. Both describe bounds, not
+/// effects that must occur.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EffectClause {
+    With(Vec<Effect>),
+    Without(Vec<Effect>),
+}
+
+impl EffectClause {
+    pub fn forbids(&self, effect: Effect) -> bool {
+        match self {
+            Self::With(allowed) => !allowed.contains(&effect),
+            Self::Without(forbidden) => forbidden.contains(&effect),
+        }
+    }
+}
+
+impl Display for EffectClause {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let (word, effects) = match self {
+            Self::With(effects) => ("with", effects),
+            Self::Without(effects) => ("without", effects),
+        };
+        write!(f, "{} [{}]", word, effects.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
+    }
+}
+
 /// The kind of item an attribute is written on.
 ///
 /// [`AttrTarget::Module`] is the odd one out: it is not an item at all, and its
@@ -1174,7 +1213,7 @@ pub const LANG_ATTR: &str = "lang";
 pub const PRELUDE_ATTR: &str = "prelude";
 
 /// Whether an attribute is written bare (`@export`) or with a value
-/// (`@alloc(false)`).
+/// (`@inline(always)`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AttrValue { Never, Always, Optional, Cfg }
 
@@ -1211,10 +1250,6 @@ pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
         name: "export", value: AttrValue::Never, values: None,
         targets: &[AttrTarget::Function, AttrTarget::Struct,
                    AttrTarget::Enum, AttrTarget::Global],
-    },
-    AttrSpec {
-        name: "alloc", value: AttrValue::Always, values: Some(&["true", "false"]),
-        targets: &[AttrTarget::Function, AttrTarget::Extern],
     },
     AttrSpec {
         name: "repr", value: AttrValue::Optional, values: None,
@@ -1311,6 +1346,7 @@ pub enum Receiver { Associated, Value, Pointer }
 pub struct MethodNode<'a> {
     pub is_pub: bool,
     pub attributes: Vec<Attribute<'a>>,
+    pub effect_clause: Option<Metadata<EffectClause>>,
     pub receiver: Receiver,
     pub name: &'a str,
     pub generics: Vec<GenericParam<'a>>,
@@ -1479,6 +1515,8 @@ pub enum TopLevelNode<'a> {
         /// it. Default (no `pub`) is module-private. See `haven_front::module`.
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
+        /// Explicit effect bound. `None` means infer from the body.
+        effect_clause: Option<Metadata<EffectClause>>,
         generics: Vec<GenericParam<'a>>,
         /// A `where T: Bound` clause, kept separate from `generics` only until
         /// `haven_front::module` merges it in. Writing a bound in the binder
@@ -1497,6 +1535,8 @@ pub enum TopLevelNode<'a> {
         def: DefId,
         is_pub: bool,
         attributes: Vec<Attribute<'a>>,
+        /// Extern bounds are trusted declarations because there is no body.
+        effect_clause: Option<Metadata<EffectClause>>,
         generics: Vec<GenericParam<'a>>,
         params: Vec<(&'a str, Type<'a>)>,
         return_type: Type<'a>,
@@ -1630,7 +1670,7 @@ pub enum TopLevelNode<'a> {
 impl<'a> Display for TopLevelNode<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            TopLevelNode::Function { name, is_pub, attributes, generics, params, return_type, body, .. } => {
+            TopLevelNode::Function { name, is_pub, attributes, effect_clause, generics, params, return_type, body, .. } => {
                 let attrs_str = if attributes.is_empty() {
                     String::new()
                 } else {
@@ -1639,11 +1679,12 @@ impl<'a> Display for TopLevelNode<'a> {
                 let pub_str = if *is_pub { "pub " } else { "" };
                 let generics_str = fmt_generics(generics);
                 let params_str = params.iter().map(|(name, ty)| format!("{}: {}", name, ty)).collect::<Vec<_>>().join(", ");
+                let effects_str = effect_clause.as_ref().map(|c| format!(" {}", c.value)).unwrap_or_default();
                 let body_str = body.iter().map(|stmt| format!("    {}\n", stmt.value)).collect::<String>();
 
-                write!(f, "{}{}proc {}{}({}) {} {{\n{}}}", attrs_str, pub_str, name, generics_str, params_str, return_type, body_str)
+                write!(f, "{}{}proc {}{}({}) {}{} {{\n{}}}", attrs_str, pub_str, name, generics_str, params_str, return_type, effects_str, body_str)
             },
-            TopLevelNode::Extern { name, is_pub, attributes, generics, params, return_type, .. } => {
+            TopLevelNode::Extern { name, is_pub, attributes, effect_clause, generics, params, return_type, .. } => {
                 let attrs_str = if attributes.is_empty() {
                     String::new()
                 } else {
@@ -1652,8 +1693,9 @@ impl<'a> Display for TopLevelNode<'a> {
                 let pub_str = if *is_pub { "pub " } else { "" };
                 let generics_str = fmt_generics(generics);
                 let params_str = params.iter().map(|(name, ty)| format!("{}: {}", name, ty)).collect::<Vec<_>>().join(", ");
+                let effects_str = effect_clause.as_ref().map(|c| format!(" {}", c.value)).unwrap_or_default();
 
-                write!(f, "{}{}extern {}{}({}) {};", attrs_str, pub_str, name, generics_str, params_str, return_type)
+                write!(f, "{}{}extern {}{}({}) {}{};", attrs_str, pub_str, name, generics_str, params_str, return_type, effects_str)
             },
             TopLevelNode::Struct { name, is_pub, attributes, generics, fields, .. } => {
                 let attrs_str = if attributes.is_empty() {

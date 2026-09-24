@@ -1,10 +1,9 @@
 // std/mem: element-counted copies, fills and comparisons over raw buffers,
 // including the overlapping case `copy` is not allowed to handle, and a
-// `@alloc(false)` block copy of the shape a process callback does.
+// `without [Alloc]` block copy of the shape a process callback does.
 import std/mem
 
-@alloc(false)
-proc process(out: *f32, inp: *f32, n: u64) void {
+proc process(out: *f32, inp: *f32, n: u64) void without [Alloc] {
     mem::copy::<f32>(out, inp, n);
 }
 

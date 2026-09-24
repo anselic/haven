@@ -1,0 +1,11 @@
+//@ exit: 7
+// An extern `with` clause is a trusted upper bound, not a claim that Alloc occurs.
+extern abs(x: i32) i32 with [Alloc];
+
+proc four() i32 with [] { return 4; }
+proc magnitude() i32 { return abs(-3); }
+
+@export
+proc main() i32 with [Alloc] {
+    return four() + magnitude();
+}

@@ -1,0 +1,19 @@
+//@ exit: 7
+// An ordinary function is inferred clean, so the contract permits calling it.
+proc twice(x: i32) i32 { return x + x; }
+proc without() i32 { return 1; }
+proc ping() without [Alloc] {}
+extern abs(x: i32) i32 without [Alloc];
+
+struct Counter {
+    value: i32,
+
+    proc read(*self) i32 without [Alloc] { return self.value; }
+}
+
+@export
+proc main() i32 without [Alloc] {
+    ping();
+    let counter: Counter = Counter { value: 3 };
+    return twice(counter.read()) + abs(-without());
+}

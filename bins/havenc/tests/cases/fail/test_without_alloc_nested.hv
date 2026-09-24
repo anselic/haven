@@ -1,0 +1,15 @@
+//@ error: has effect clause `without [Alloc]` but may allocate
+// `without [Alloc]` uses the post-monomorphization allocation inference.
+// Calls inside an array literal must be part of the caller's effect.
+proc dirty() i32 {
+    println(1);
+    return 3;
+}
+
+proc wrapper() i32 { return dirty(); }
+
+@export
+proc main() i32 without [Alloc] {
+    let values: [i32; 2] = [wrapper(), 4];
+    return values[0u64];
+}

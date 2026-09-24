@@ -1,8 +1,7 @@
-// A bare `@alloc` matches neither `is_true` nor `is_false`, so it used to mean
-// "unmarked" - the opposite of what someone writing it intends.
+// An attribute that requires a value must not silently use a default.
 //@ error: needs a value
 
-@alloc
+@inline
 proc main() i32 {
     return 0;
 }

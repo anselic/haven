@@ -5,7 +5,7 @@
 // Before the repeat literal there was no way to bring an N-element field into
 // existence from inside a generic constructor, so std's `Array`/`Ring`/`Spsc`
 // allocate a buffer once instead. Here the storage is a real `[T; N]` field
-// (`{ [8 x float], i64 }` in the IR) and `process` - marked `@alloc(false)` -
+// (`{ [8 x float], i64 }` in the IR) and `process` - marked `without [Alloc]` -
 // constructs, fills and drains one without the allocator being reachable at all,
 // which is what the mark proves.
 //
@@ -17,26 +17,21 @@ struct FixedVec<T, const N: u64> {
     s: [T; N],
     len: u64,
 
-    @alloc(false)
-    pub proc new(fill: T) FixedVec<T, N> {
+    pub proc new(fill: T) FixedVec<T, N> without [Alloc] {
         return FixedVec::<T, N> { s: [fill; N], len: 0u64 };
     }
-    @alloc(false)
-    pub proc len(*self) u64 { return self.len; }
-    @alloc(false)
-    pub proc push(*self, v: T) bool {
+    pub proc len(*self) u64 without [Alloc] { return self.len; }
+    pub proc push(*self, v: T) bool without [Alloc] {
         if (self.len >= N) { return false; }
         self.s[self.len] = v;
         self.len = self.len + 1u64;
         return true;
     }
-    @alloc(false)
-    pub proc get(*self, i: u64) T { return self.s[i]; }
+    pub proc get(*self, i: u64) T without [Alloc] { return self.s[i]; }
 }
 
 // the whole lifecycle inside a callback that may not allocate
-@alloc(false)
-proc process(x: f32) f32 {
+proc process(x: f32) f32 without [Alloc] {
     let v: FixedVec<f32, 8> = FixedVec::<f32, 8>::new(0.0f32);
     let i: u64 = 0u64;
     while (v.push(x * numerical_cast::<f32>(i))) { i = i + 1u64; }

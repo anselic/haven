@@ -1,9 +1,7 @@
-// `@alloc` is read only for callables. On a struct it was accepted and never
-// looked at, which reads exactly like not writing it - the failure mode that
-// matters, since the whole point of `@alloc(false)` is to be checked.
+// A code-generation hint for functions has no meaning on a struct.
 //@ error: cannot be written on a struct
 
-@alloc(false)
+@inline(always)
 struct Point { x: i32, y: i32 }
 
 @export

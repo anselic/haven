@@ -53,36 +53,32 @@ pub struct Spsc<T> {
     }
 
     /// The allocated slot count: zero or a power of two.
-    @alloc(false)
-    pub proc cap(*self) u64 { return self.cap; }
+    pub proc cap(*self) u64 without [Alloc] { return self.cap; }
 
     /// Estimate the number of queued elements from either participating thread.
     /// The cursor loads are separate, so this is not a snapshot. The producer
     /// may see fewer free slots, and the consumer may see fewer available values,
     /// than there are by the time the call returns. Do not use it from a third
     /// thread while the queue is active; the two reads may give an invalid count.
-    @alloc(false)
-    pub proc len(*self) u64 {
+    pub proc len(*self) u64 without [Alloc] {
         return self.tail.load_acquire() - self.head.load_acquire();
     }
 
     /// Whether `len()` reports zero. On the consumer, `false` means an element
     /// is available. On the producer, the result may already be out of date.
-    @alloc(false)
-    pub proc is_empty(*self) bool { return self.len() == 0u64; }
+    pub proc is_empty(*self) bool without [Alloc] { return self.len() == 0u64; }
 
     /// Producer only: append `value`. Return `true` on success, or destroy it
     /// and return `false` if full. Cleanup may call the allocator for an owning
-    /// `T`, so this has no `@alloc(false)` annotation. Use `try_push` to keep
+    /// `T`, so this has no `without [Alloc]` clause. Use `try_push` to keep
     /// a rejected value.
     pub proc push(*self, value: T) bool {
         return self.try_push(value).is_none();
     }
 
     /// Producer only: append `value`, returning `None` on success or
-    /// `Some(value)` if full. No value is destroyed, so this is `@alloc(false)`.
-    @alloc(false)
-    pub proc try_push(*self, value: T) Option<T> {
+    /// `Some(value)` if full. No value is destroyed, so this is `without [Alloc]`.
+    pub proc try_push(*self, value: T) Option<T> without [Alloc] {
         // Only the producer writes `tail`, so a relaxed load is enough.
         let tail: u64 = self.tail.load_relaxed();
         // Acquire the head so we reuse a slot only after the consumer has
@@ -101,8 +97,7 @@ pub struct Spsc<T> {
     /// Consumer only: remove and return the front value, or `None` if empty.
     /// Requires a `Copy` type. Read the value before releasing its slot; the
     /// producer may overwrite the slot as soon as the head advances.
-    @alloc(false)
-    pub proc pop(*self) Option<T> {
+    pub proc pop(*self) Option<T> without [Alloc] {
         let head: u64 = self.head.load_relaxed();
         // Acquire the tail so the producer's value is visible before we read it.
         let tail: u64 = self.tail.load_acquire();
@@ -118,8 +113,7 @@ pub struct Spsc<T> {
     /// Consumer only: return a pointer to the front value, or `None` if empty.
     /// The pointer is valid until the next `pop` or destruction of the queue.
     /// The producer cannot reuse this slot until the consumer advances the head.
-    @alloc(false)
-    pub proc peek(*self) Option<*T> {
+    pub proc peek(*self) Option<*T> without [Alloc] {
         let head: u64 = self.head.load_relaxed();
         let tail: u64 = self.tail.load_acquire();
         if (head == tail) {

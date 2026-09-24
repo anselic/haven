@@ -17,8 +17,7 @@ extend Res: Delete {
     proc delete(*self) { dealloc::<i32>(self.data); }
 }
 
-@alloc(false)
-proc sweep(p: *Res, n: u64) {
+proc sweep(p: *Res, n: u64) without [Alloc] {
     drop_in_place::<Res>(p, n);
 }
 

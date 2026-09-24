@@ -1,4 +1,4 @@
-// A method call inside an `@alloc(false)` function is allowed when the method it
+// A method call inside a `without [Alloc]` function is allowed when the method it
 // dispatches to is itself clean. The alloc checker runs on the post-mono AST,
 // where a concrete method call is still `recv.m(..)` (only generic methods were
 // lowered to named calls); it resolves the receiver's type through the member
@@ -13,21 +13,18 @@ struct Counter {
 
     proc make() Counter { return Counter { n: 0 }; }
 
-    @alloc(false)
-    proc tick(*self) {
+    proc tick(*self) without [Alloc] {
         self.n = self.n + 1;
     }
 
-    @alloc(false)
-    proc bump(*self) i32 {
+    proc bump(*self) i32 without [Alloc] {
         self.tick();          // clean method -> method call
         return self.n;
     }
 }
 
 // clean free function calling a clean method twice
-@alloc(false)
-proc step(c: *Counter) i32 {
+proc step(c: *Counter) i32 without [Alloc] {
     return c.bump() + c.bump();
 }
 

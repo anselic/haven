@@ -4,8 +4,7 @@
 // memory orderings it depends on are pinned in std/c/atomic.c.
 import std/spsc { Spsc }
 
-@alloc(false)
-proc produce(q: *Spsc<f32>, x: f32) bool { return q.push(x); }
+proc produce(q: *Spsc<f32>, x: f32) bool without [Alloc] { return q.push(x); }
 
 @export
 proc main() i32 {

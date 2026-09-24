@@ -1,0 +1,6 @@
+//@ error: has effect clause `with []` but may allocate
+// The trusted upper bound permits Alloc, which the caller excludes.
+extern abs(x: i32) i32 with [Alloc];
+
+@export
+proc main() i32 with [] { return abs(-1); }

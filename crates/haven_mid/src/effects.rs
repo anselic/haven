@@ -4,9 +4,10 @@ use crate::intrinsics::Intrinsic;
 use crate::mono::concrete_method_name;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-// `@alloc(false)` checking. "clean" = never allocates, even through callees.
+// Allocation effect inference and source effect-clause checking.
+// "clean" = never allocates, even through callees.
 //
-//   * extern    -> clean only if marked `@alloc(false)`; we trust the mark.
+//   * extern    -> clean only with an explicit no-allocation claim; we trust it.
 //   * intrinsic -> always clean.
 //   * function  -> clean only if every callee is clean.
 //
@@ -16,6 +17,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Keyed by each callable's final, post-mono name.
 type CleanMap<'a> = HashMap<&'a str, bool>;
+
+fn forbids_alloc(effect_clause: &Option<Metadata<EffectClause>>) -> bool {
+    effect_clause.as_ref().is_some_and(|c| c.value.forbids(Effect::Alloc))
+}
 
 /// A call through a function pointer has no known target, so we cannot prove
 /// it clean. This stands in for one. Any function that makes such a call turns
@@ -64,6 +69,19 @@ fn classify_callee<'a>(func: &Expr<'a>, locals: &[&'a str], r: &Resolve<'_, 'a>)
     }
 }
 
+fn bind_pattern<'a>(pattern: &Pattern<'a>, locals: &mut Vec<&'a str>) {
+    match &pattern.value {
+        PatternNode::Bind(name) => locals.push(name),
+        PatternNode::Tuple(fields) | PatternNode::Variant { fields, .. } => {
+            for field in fields { bind_pattern(field, locals); }
+        }
+        PatternNode::StructVariant { fields, .. } => {
+            for (_, field) in fields { bind_pattern(field, locals); }
+        }
+        PatternNode::Wildcard | PatternNode::Int(_) | PatternNode::Path(_) => {}
+    }
+}
+
 // `locals`: param and `let` names in scope, so a shadowed name routes to
 // INDIRECT_CALLEE instead of a clean-map lookup.
 fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], r: &Resolve<'_, 'a>, e: &Expr<'a>) -> Vec<(&'a str, Span)> {
@@ -72,10 +90,9 @@ fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], r: &Resolve<'_
             let mut dirty: Vec<(&'a str, Span)> = args.iter()
                 .flat_map(|a| dirty_calls_expr(clean, locals, r, a))
                 .collect();
-            // a method call's receiver can hide calls too.
-            if let ExprNode::Access { base, .. } = &func.value {
-                dirty.extend(dirty_calls_expr(clean, locals, r, base));
-            }
+            // The callee expression is evaluated too. This includes a method
+            // receiver, as well as calls nested in a computed function value.
+            dirty.extend(dirty_calls_expr(clean, locals, r, func));
 
             match classify_callee(func, locals, r) {
                 Callee::None => {}
@@ -99,6 +116,12 @@ fn dirty_calls_expr<'a>(clean: &CleanMap<'a>, locals: &[&'a str], r: &Resolve<'_
             dirty.extend(dirty_calls_expr(clean, locals, r, index));
             dirty
         }
+        ExprNode::Slice(items) | ExprNode::Tuple(items) => items.iter()
+            .flat_map(|item| dirty_calls_expr(clean, locals, r, item)).collect(),
+        ExprNode::Repeat { value, .. } => dirty_calls_expr(clean, locals, r, value),
+        ExprNode::Struct { fields, .. } => fields.iter()
+            .flat_map(|(_, value)| dirty_calls_expr(clean, locals, r, value)).collect(),
+        ExprNode::Access { base, .. } => dirty_calls_expr(clean, locals, r, base),
         // no other expression kind contains a call
         _ => vec![],
     }
@@ -120,27 +143,39 @@ fn dirty_calls_stmt<'a>(clean: &CleanMap<'a>, locals: &mut Vec<&'a str>, r: &Res
             locals.push(name);
             dirty
         }
-        StmtNode::Assign { value, .. } => dirty_calls_expr(clean, locals, r, value),
+        StmtNode::Assign { left, value } => {
+            let mut dirty = dirty_calls_expr(clean, locals, r, left);
+            dirty.extend(dirty_calls_expr(clean, locals, r, value));
+            dirty
+        }
 
         StmtNode::If { condition, then_branch, else_branch, .. } => {
             let mut dirty = dirty_calls_expr(clean, locals, r, condition);
+            let mark = locals.len();
             dirty.extend(dirty_calls_stmt(clean, locals, r, then_branch));
+            locals.truncate(mark);
             if let Some(b) = else_branch {
                 dirty.extend(dirty_calls_stmt(clean, locals, r, b));
+                locals.truncate(mark);
             }
             dirty
         }
 
         StmtNode::While { condition, body } => {
             let mut dirty = dirty_calls_expr(clean, locals, r, condition);
+            let mark = locals.len();
             dirty.extend(dirty_calls_stmt(clean, locals, r, body));
+            locals.truncate(mark);
             dirty
         }
 
         StmtNode::Match { scrutinee, arms } => {
             let mut dirty = dirty_calls_expr(clean, locals, r, scrutinee);
-            for (_pat, body) in arms {
+            for (pat, body) in arms {
+                let mark = locals.len();
+                bind_pattern(pat, locals);
                 dirty.extend(dirty_calls_stmt(clean, locals, r, body));
+                locals.truncate(mark);
             }
             dirty
         }
@@ -158,10 +193,7 @@ fn collect_calls_expr<'a>(calls: &mut HashSet<&'a str>, locals: &[&'a str], r: &
                 Callee::Named(name) => { calls.insert(name); }
                 Callee::Indirect => { calls.insert(INDIRECT_CALLEE); }
             }
-            // a method call's receiver can hide calls too.
-            if let ExprNode::Access { base, .. } = &func.value {
-                collect_calls_expr(calls, locals, r, base);
-            }
+            collect_calls_expr(calls, locals, r, func);
             for arg in args {
                 collect_calls_expr(calls, locals, r, arg);
             }
@@ -175,6 +207,14 @@ fn collect_calls_expr<'a>(calls: &mut HashSet<&'a str>, locals: &[&'a str], r: &
             collect_calls_expr(calls, locals, r, slice);
             collect_calls_expr(calls, locals, r, index);
         }
+        ExprNode::Slice(items) | ExprNode::Tuple(items) => {
+            for item in items { collect_calls_expr(calls, locals, r, item); }
+        }
+        ExprNode::Repeat { value, .. } => collect_calls_expr(calls, locals, r, value),
+        ExprNode::Struct { fields, .. } => {
+            for (_, value) in fields { collect_calls_expr(calls, locals, r, value); }
+        }
+        ExprNode::Access { base, .. } => collect_calls_expr(calls, locals, r, base),
         _ => {}
     }
 }
@@ -191,20 +231,31 @@ fn collect_calls_stmt<'a>(calls: &mut HashSet<&'a str>, locals: &mut Vec<&'a str
             collect_calls_expr(calls, locals, r, value); // before binding
             locals.push(name);
         }
-        StmtNode::Assign { value, .. } => collect_calls_expr(calls, locals, r, value),
+        StmtNode::Assign { left, value } => {
+            collect_calls_expr(calls, locals, r, left);
+            collect_calls_expr(calls, locals, r, value);
+        }
         StmtNode::If { condition, then_branch, else_branch, .. } => {
             collect_calls_expr(calls, locals, r, condition);
+            let mark = locals.len();
             collect_calls_stmt(calls, locals, r, then_branch);
-            if let Some(b) = else_branch { collect_calls_stmt(calls, locals, r, b); }
+            locals.truncate(mark);
+            if let Some(b) = else_branch {
+                collect_calls_stmt(calls, locals, r, b);
+                locals.truncate(mark);
+            }
         }
         StmtNode::While { condition, body } => {
             collect_calls_expr(calls, locals, r, condition);
+            let mark = locals.len();
             collect_calls_stmt(calls, locals, r, body);
+            locals.truncate(mark);
         }
         StmtNode::Match { scrutinee, arms } => {
             collect_calls_expr(calls, locals, r, scrutinee);
-            for (_pat, body) in arms {
+            for (pat, body) in arms {
                 let mark = locals.len();
+                bind_pattern(pat, locals);
                 collect_calls_stmt(calls, locals, r, body);
                 locals.truncate(mark);
             }
@@ -228,8 +279,8 @@ fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>)
     let mut calls: CallGraph<'a> = HashMap::new();
     for node in program {
         match &node.value {
-            TopLevelNode::Extern { name, attributes, .. } => {
-                let is_clean = attributes.iter().any(|a| a.value.is_false("alloc"));
+            TopLevelNode::Extern { name, effect_clause, .. } => {
+                let is_clean = forbids_alloc(effect_clause);
                 clean.insert(name, is_clean);
             }
             TopLevelNode::Function { name, params, body, .. } => {
@@ -242,15 +293,21 @@ fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>)
             TopLevelNode::Struct { .. } | TopLevelNode::Global { .. }
             | TopLevelNode::Enum { .. } => {}
             TopLevelNode::Trait { .. } => unreachable!("traits dropped in monomorphization"),
-            TopLevelNode::Alias { .. } => unreachable!("aliases expanded before safecheck"),
-            TopLevelNode::Extend { .. } => unreachable!("extend desugared before safecheck"),
+            TopLevelNode::Alias { .. } => unreachable!("aliases expanded before effect checking"),
+            TopLevelNode::Extend { .. } => unreachable!("extend desugared before effect checking"),
         }
     }
 
-    // spread dirtiness until stable. an unknown callee counts as dirty.
+    // Spread dirtiness until stable. An unknown callee counts as dirty.
+    propagate_clean(&mut clean, &calls);
+
+    (clean, calls)
+}
+
+fn propagate_clean<'a>(clean: &mut CleanMap<'a>, calls: &CallGraph<'a>) {
     loop {
         let mut changed = false;
-        for (&fname, callees) in &calls {
+        for (&fname, callees) in calls {
             if clean.get(fname).copied() == Some(false) { continue; }
             let is_dirty = callees.iter()
                 .any(|c| !clean.get(c).copied().unwrap_or(false));
@@ -261,8 +318,25 @@ fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>)
         }
         if !changed { break; }
     }
+}
 
-    (clean, calls)
+/// Whether the complete effect set is known. Only a `with` declaration bounds
+/// an extern's *other* effects; `without [Alloc]` merely
+/// rule out allocation. An indirect or unresolved callee is always unknown.
+fn compute_known<'a>(program: &[TopLevel<'a>], calls: &CallGraph<'a>) -> CleanMap<'a> {
+    let mut known = CleanMap::new();
+    for node in program {
+        match &node.value {
+            TopLevelNode::Extern { name, effect_clause, .. } => {
+                known.insert(name, effect_clause.as_ref()
+                    .is_some_and(|c| matches!(&c.value, EffectClause::With(_))));
+            }
+            TopLevelNode::Function { name, .. } => { known.insert(name, true); }
+            _ => {}
+        }
+    }
+    propagate_clean(&mut known, calls);
+    known
 }
 
 /// The shortest chain from `start` to the leaf that makes it dirty, e.g.
@@ -312,44 +386,57 @@ fn blame_chain<'a>(calls: &CallGraph<'a>, clean: &CleanMap<'a>, start: &'a str) 
     vec![start]
 }
 
-pub fn alloc_check_program<'a>(
+pub fn check_program<'a>(
     program: &[TopLevel<'a>],
     defs: &Defs<'a>,
     node_types: &HashMap<usize, Type<'a>>,
 ) -> Result<(), Vec<Error>> {
     let r = Resolve { node_types, members: defs.members(), instances: defs.instances() };
     let (clean, calls) = compute_clean(program, &r);
+    let known = compute_known(program, &calls);
 
     // mono mangles generic call names. prefer the friendly spelling it
     // recorded (`alloc::<Vec2>`) over `std.alloc$alloc$Vec2`.
     let show = |n: &'a str| defs.show_symbol(n);
 
-    // a dirty `@alloc(false)` function always has at least one dirty immediate
-    // callee to blame: dirtiness only ever arrives through one.
+    // A violated bound has at least one nonconforming immediate callee: both
+    // allocation and unknown effects spread only through call edges.
     let mut errors: Vec<Error> = Vec::new();
     for node in program {
-        let TopLevelNode::Function { name, attributes, params, body, .. } = &node.value else { continue };
-        let marked = attributes.iter().any(|attr| attr.value.is_false("alloc"));
-        if !marked || clean.get(name).copied().unwrap_or(false) {
+        let TopLevelNode::Function { name, effect_clause, params, body, .. } = &node.value else { continue };
+        let no_alloc = forbids_alloc(effect_clause);
+        let require_known = effect_clause.as_ref()
+            .is_some_and(|c| matches!(&c.value, EffectClause::With(_)));
+        if (!no_alloc || clean.get(name).copied().unwrap_or(false))
+            && (!require_known || known.get(name).copied().unwrap_or(false)) {
             continue;
         }
 
+        let conforms: CleanMap<'a> = clean.iter().map(|(&callee, &alloc_clean)| {
+            let effects_known = known.get(callee).copied().unwrap_or(false);
+            (callee, (!no_alloc || alloc_clean) && (!require_known || effects_known))
+        }).collect();
         let mut locals: Vec<&'a str> = params.iter().map(|(p, _)| *p).collect();
         let mut blamed: Vec<(&'a str, Span)> = Vec::new();
-        for s in body { blamed.extend(dirty_calls_stmt(&clean, &mut locals, &r, s)); }
+        for s in body { blamed.extend(dirty_calls_stmt(&conforms, &mut locals, &r, s)); }
         for (callee, span) in blamed {
+            let clause = effect_clause.as_ref().expect("a checked effect bound exists");
+            let contract = format!("has effect clause `{}`", clause.value);
+            let unknown = require_known && !known.get(callee).copied().unwrap_or(false);
+            let reason = if unknown { "has unknown effects" } else { "may allocate" };
             let err = Error::new(span, format!(
-                "'{}' is marked as @alloc(false) but may allocate", show(name)))
-                .with_label(span, format!("calls '{}', which may allocate", show(callee)));
+                "'{}' {} but {}", show(name), contract, reason))
+                .with_label(span, format!("calls '{}', which {}", show(callee), reason));
             // the immediate callee is just the entry point; name where the
             // allocation really is.
-            let chain = blame_chain(&calls, &clean, callee);
+            let chain = blame_chain(&calls, &conforms, callee);
             errors.push(if chain.len() > 1 {
                 let rendered = chain.iter().map(|n| match *n {
                     INDIRECT_CALLEE => INDIRECT_CALLEE.to_string(),
                     other => format!("'{}'", show(other)),
                 }).collect::<Vec<_>>().join(" -> ");
-                err.with_note(format!("allocation reaches it through: {}", rendered))
+                let detail = if unknown { "unknown effects reach" } else { "allocation reaches" };
+                err.with_note(format!("{} it through: {}", detail, rendered))
             } else {
                 err
             });

@@ -1,0 +1,13 @@
+//@ error: has effect clause `without [Alloc]` but may allocate
+// The source clause must survive specialization of a generic function.
+proc dirty<T>(x: T) T {
+    println(1);
+    return x;
+}
+
+proc wrapper<T>(x: T) T without [Alloc] {
+    return dirty::<T>(x);
+}
+
+@export
+proc main() i32 { return wrapper::<i32>(4); }
