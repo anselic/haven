@@ -152,6 +152,24 @@ pub struct Vec<T> {
         return self.data;
     }
 
+    /// View the initialized elements as a slice, without copying. The slice
+    /// borrows the Vec's buffer: it is invalidated by anything that reallocates
+    /// (`push`, `reserve`) or destroys it, and it does not own its elements, so
+    /// dropping it destroys nothing. Aborts if `len` does not fit a slice's
+    /// 32-bit length.
+    @alloc(false)
+    @noalias
+    pub proc as_slice(*self) [T] {
+        if (self.len > 2147483647u64) {
+            abort("Vec::as_slice: length exceeds slice limit");
+        }
+        let raw: RawSlice<T> = RawSlice::<T> {
+            data: self.data,
+            len: numerical_cast::<i32>(self.len),
+        };
+        return *ptr_cast::<*[T]>(&raw);
+    }
+
     /// Write `value` into the slot at `i`, without destroying whatever was there.
     /// Out-of-bounds is undefined; guard with len. Because it does not drop the
     /// previous occupant, this is for a `Copy` `T` or a slot known to be
@@ -210,6 +228,14 @@ pub struct Vec<T> {
     pub proc iter(*self) VecIter<T> {
         return VecIter::<T> { vec: self, pos: 0u64 };
     }
+}
+
+// The runtime layout of a slice `[T]`: the `{ ptr, i32 }` fat pointer that
+// `layout.rs` and `struct Slice` in c/rt.c both describe. `as_slice` builds one
+// of these and reinterprets it, so the three must stay in step.
+struct RawSlice<T> {
+    data: *T,
+    len: i32,
 }
 
 /// Walk a Vec from front to back by pointer, without taking its elements.

@@ -1,0 +1,34 @@
+// `Vec::as_slice` views the buffer as a `[T]` without copying: reads see the
+// elements, writes through the slice land in the Vec, and the usual slice
+// helpers (`slice_len`, `slice_slice`, `Vec::from_slice`) accept it.
+
+import std/vec { Vec }
+
+@export
+proc main() i32 {
+    let v: Vec<i32> = Vec::<i32>::new();
+    v.push(10);
+    v.push(20);
+    v.push(30);
+    v.push(40);
+
+    let s: [i32] = v.as_slice();
+    println(slice_len::<i32>(&s));  // 4
+    println(s[0] + s[3]);           // 50
+
+    // the slice aliases the Vec's buffer
+    s[1] = 99;
+    println(v.get(1u64).unwrap());  // 99
+
+    let mid: [i32] = slice_slice::<i32>(&s, 1u64, 3u64);
+    println(slice_len::<i32>(&mid)); // 2
+    println(mid[1]);                 // 30
+
+    let copy: Vec<i32> = Vec::<i32>::from_slice(&s);
+    println(copy.len());             // 4
+
+    let e: Vec<i32> = Vec::<i32>::new();
+    let es: [i32] = e.as_slice();
+    println(slice_len::<i32>(&es));  // 0
+    return 0;
+}

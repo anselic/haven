@@ -9,9 +9,10 @@
 //! Two kinds of fixtures, by directory:
 //!
 //! * `tests/cases/run/`  - must compile, link, and run. If a sibling `<name>.out`
-//!   file exists, the program's stdout must match it exactly. The process must
-//!   exit 0 unless the file opts out with `//@ exit: any` (used for `proc main`
-//!   with no return type, whose exit code is whatever's left in the register).
+//!   file exists, the program's stdout must match it exactly (CRLF and LF
+//!   compare equal). The process must exit 0 unless the file opts out with
+//!   `//@ exit: any` (used for `proc main` with no return type, whose exit code
+//!   is whatever's left in the register).
 //!   `//@ exit: N` asserts a specific code.
 //!
 //! * `tests/cases/fail/` - must FAIL to compile (non-zero exit). Every
@@ -266,10 +267,12 @@ fn run_case(path: &Path, mode: Mode) -> Result<(), Failed> {
                 }
             }
 
-            // stdout must match the `.out` golden byte-for-byte, if present.
+            // stdout must match the `.out` golden byte-for-byte, if present,
+            // except that CRLF and LF compare equal: programs print `\r\n` on
+            // Windows, and git may check the goldens out with either ending.
             let golden_path = path.with_extension("out");
             if let Ok(want) = std::fs::read(&golden_path)
-                && run.stdout != want
+                && normalize_newlines(&run.stdout) != normalize_newlines(&want)
             {
                 return Err(format!(
                     "stdout did not match {}\n  --- expected ---\n{}\n  --- actual ---\n{}",
@@ -344,6 +347,20 @@ fn strip_ansi(s: &str) -> String {
         } else {
             out.push(c);
         }
+    }
+    out
+}
+
+/// Rewrite every `\r\n` as `\n`, so goldens compare equal whichever line ending
+/// the program or the checkout used. A lone `\r` is kept.
+fn normalize_newlines(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut iter = bytes.iter().peekable();
+    while let Some(&b) = iter.next() {
+        if b == b'\r' && iter.peek() == Some(&&b'\n') {
+            continue;
+        }
+        out.push(b);
     }
     out
 }
