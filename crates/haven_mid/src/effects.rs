@@ -4,10 +4,10 @@ use crate::intrinsics::Intrinsic;
 use crate::mono::concrete_method_name;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-// Allocation effect inference and source effect-clause checking.
-// "clean" = never allocates, even through callees.
+// Effect inference and source effect-clause checking. Each effect gets its own
+// map, where "clean" = never has that effect, even through callees.
 //
-//   * extern    -> clean only with an explicit no-allocation claim; we trust it.
+//   * extern    -> clean only if its clause rules the effect out; we trust it.
 //   * intrinsic -> always clean.
 //   * function  -> clean only if every callee is clean.
 //
@@ -17,10 +17,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Keyed by each callable's final, post-mono name.
 type CleanMap<'a> = HashMap<&'a str, bool>;
-
-fn forbids_alloc(effect_clause: &Option<Metadata<EffectClause>>) -> bool {
-    effect_clause.as_ref().is_some_and(|c| c.value.forbids(Effect::Alloc))
-}
 
 /// A call through a function pointer has no known target, so we cannot prove
 /// it clean. This stands in for one. Any function that makes such a call turns
@@ -269,39 +265,44 @@ fn collect_calls_stmt<'a>(calls: &mut HashSet<&'a str>, locals: &mut Vec<&'a str
 /// unresolved callee - which is what makes it a leaf in a blame chain.
 type CallGraph<'a> = HashMap<&'a str, HashSet<&'a str>>;
 
-/// Also returns the call graph, so a violation can be traced down to the
-/// leaf that really allocates.
-fn compute_clean<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>)
--> (CleanMap<'a>, CallGraph<'a>) {
-    let mut clean: CleanMap<'a> = HashMap::new();
-
-    // extern: clean only if marked. function: assume clean, record its callees.
+/// Who calls whom. Kept around after inference, so a violation can be traced
+/// down to the leaf that really has the effect.
+fn call_graph<'a>(program: &[TopLevel<'a>], r: &Resolve<'_, 'a>) -> CallGraph<'a> {
     let mut calls: CallGraph<'a> = HashMap::new();
     for node in program {
         match &node.value {
-            TopLevelNode::Extern { name, effect_clause, .. } => {
-                let is_clean = forbids_alloc(effect_clause);
-                clean.insert(name, is_clean);
-            }
             TopLevelNode::Function { name, params, body, .. } => {
                 let mut callees = HashSet::new();
                 let mut locals: Vec<&'a str> = params.iter().map(|(p, _)| *p).collect();
                 for s in body { collect_calls_stmt(&mut callees, &mut locals, r, s); }
                 calls.insert(name, callees);
-                clean.insert(name, true);
             }
-            TopLevelNode::Struct { .. } | TopLevelNode::Global { .. }
-            | TopLevelNode::Enum { .. } => {}
+            TopLevelNode::Extern { .. } | TopLevelNode::Struct { .. }
+            | TopLevelNode::Global { .. } | TopLevelNode::Enum { .. } => {}
             TopLevelNode::Trait { .. } => unreachable!("traits dropped in monomorphization"),
             TopLevelNode::Alias { .. } => unreachable!("aliases expanded before effect checking"),
             TopLevelNode::Extend { .. } => unreachable!("extend desugared before effect checking"),
         }
     }
+    calls
+}
 
-    // Spread dirtiness until stable. An unknown callee counts as dirty.
-    propagate_clean(&mut clean, &calls);
-
-    (clean, calls)
+/// Which callables can never have `effect`.
+fn compute_clean<'a>(program: &[TopLevel<'a>], calls: &CallGraph<'a>, effect: Effect) -> CleanMap<'a> {
+    // extern: clean only if marked. function: assume clean, then spread
+    // dirtiness until stable. An unknown callee counts as dirty.
+    let mut clean: CleanMap<'a> = HashMap::new();
+    for node in program {
+        match &node.value {
+            TopLevelNode::Extern { name, effect_clause, .. } => {
+                clean.insert(name, effect_clause.as_ref().is_some_and(|c| c.value.forbids(effect)));
+            }
+            TopLevelNode::Function { name, .. } => { clean.insert(name, true); }
+            _ => {}
+        }
+    }
+    propagate_clean(&mut clean, calls);
+    clean
 }
 
 fn propagate_clean<'a>(clean: &mut CleanMap<'a>, calls: &CallGraph<'a>) {
@@ -321,8 +322,8 @@ fn propagate_clean<'a>(clean: &mut CleanMap<'a>, calls: &CallGraph<'a>) {
 }
 
 /// Whether the complete effect set is known. Only a `with` declaration bounds
-/// an extern's *other* effects; `without [Alloc]` merely
-/// rule out allocation. An indirect or unresolved callee is always unknown.
+/// an extern's *other* effects; `without [...]` merely rules out the listed
+/// ones. An indirect or unresolved callee is always unknown.
 fn compute_known<'a>(program: &[TopLevel<'a>], calls: &CallGraph<'a>) -> CleanMap<'a> {
     let mut known = CleanMap::new();
     for node in program {
@@ -392,54 +393,100 @@ pub fn check_program<'a>(
     node_types: &HashMap<usize, Type<'a>>,
 ) -> Result<(), Vec<Error>> {
     let r = Resolve { node_types, members: defs.members(), instances: defs.instances() };
-    let (clean, calls) = compute_clean(program, &r);
+    let calls = call_graph(program, &r);
+    let clean: Vec<(Effect, CleanMap<'a>)> = Effect::ALL.iter()
+        .map(|&e| (e, compute_clean(program, &calls, e)))
+        .collect();
     let known = compute_known(program, &calls);
+    let is = |map: &CleanMap<'a>, n: &str| map.get(n).copied().unwrap_or(false);
 
     // mono mangles generic call names. prefer the friendly spelling it
     // recorded (`alloc::<Vec2>`) over `std.alloc$alloc$Vec2`.
     let show = |n: &'a str| defs.show_symbol(n);
 
     // A violated bound has at least one nonconforming immediate callee: both
-    // allocation and unknown effects spread only through call edges.
+    // effects and unknown effects spread only through call edges.
     let mut errors: Vec<Error> = Vec::new();
     for node in program {
         let TopLevelNode::Function { name, effect_clause, params, body, .. } = &node.value else { continue };
-        let no_alloc = forbids_alloc(effect_clause);
-        let require_known = effect_clause.as_ref()
-            .is_some_and(|c| matches!(&c.value, EffectClause::With(_)));
-        if (!no_alloc || clean.get(name).copied().unwrap_or(false))
-            && (!require_known || known.get(name).copied().unwrap_or(false)) {
-            continue;
-        }
+        let Some(clause) = effect_clause else { continue };
+        let forbidden: Vec<&(Effect, CleanMap<'a>)> = clean.iter()
+            .filter(|(e, _)| clause.value.forbids(*e))
+            .collect();
+        let require_known = matches!(&clause.value, EffectClause::With(_));
+        let conforming = |n: &str| forbidden.iter().all(|(_, m)| is(m, n))
+            && (!require_known || is(&known, n));
+        if conforming(name) { continue; }
 
-        let conforms: CleanMap<'a> = clean.iter().map(|(&callee, &alloc_clean)| {
-            let effects_known = known.get(callee).copied().unwrap_or(false);
-            (callee, (!no_alloc || alloc_clean) && (!require_known || effects_known))
-        }).collect();
+        let conforms: CleanMap<'a> = known.keys().map(|&callee| (callee, conforming(callee))).collect();
         let mut locals: Vec<&'a str> = params.iter().map(|(p, _)| *p).collect();
         let mut blamed: Vec<(&'a str, Span)> = Vec::new();
         for s in body { blamed.extend(dirty_calls_stmt(&conforms, &mut locals, &r, s)); }
         for (callee, span) in blamed {
-            let clause = effect_clause.as_ref().expect("a checked effect bound exists");
             let contract = format!("has effect clause `{}`", clause.value);
-            let unknown = require_known && !known.get(callee).copied().unwrap_or(false);
-            let reason = if unknown { "has unknown effects" } else { "may allocate" };
-            let err = Error::new(span, format!(
-                "'{}' {} but {}", show(name), contract, reason))
-                .with_label(span, format!("calls '{}', which {}", show(callee), reason));
-            // the immediate callee is just the entry point; name where the
-            // allocation really is.
-            let chain = blame_chain(&calls, &conforms, callee);
-            errors.push(if chain.len() > 1 {
-                let rendered = chain.iter().map(|n| match *n {
-                    INDIRECT_CALLEE => INDIRECT_CALLEE.to_string(),
-                    other => format!("'{}'", show(other)),
-                }).collect::<Vec<_>>().join(" -> ");
-                let detail = if unknown { "unknown effects reach" } else { "allocation reaches" };
-                err.with_note(format!("{} it through: {}", detail, rendered))
+            let unknown = require_known && !is(&known, callee);
+            // unknown wins: it is the one the user has to fix at the leaf.
+            // otherwise blame the first forbidden effect the callee may have.
+            let (map, reason, detail) = if unknown {
+                (&known, "", "")
             } else {
-                err
-            });
+                let (effect, map) = forbidden.iter().copied()
+                    .find(|(_, m)| !is(m, callee))
+                    .expect("a nonconforming known callee has a forbidden effect");
+                match effect {
+                    Effect::Alloc => (map, "may allocate", "allocation"),
+                    Effect::IO => (map, "may perform IO", "IO"),
+                }
+            };
+            // the immediate callee is just the entry point; name where the
+            // effect or the unknown really is. walk the one map to blame, so
+            // the chain ends at the leaf with that effect and not at some
+            // other forbidden one.
+            let chain = blame_chain(&calls, map, callee);
+            let rendered = chain.iter().map(|n| match *n {
+                INDIRECT_CALLEE => INDIRECT_CALLEE.to_string(),
+                other => format!("'{}'", show(other)),
+            }).collect::<Vec<_>>().join(" -> ");
+
+            if !unknown {
+                let err = Error::new(span, format!(
+                    "'{}' {} but {}", show(name), contract, reason))
+                    .with_label(span, format!("calls '{}', which {}", show(callee), reason));
+                errors.push(if chain.len() > 1 {
+                    err.with_note(format!("{} reaches it through: {}", detail, rendered))
+                } else {
+                    err
+                });
+                continue;
+            }
+
+            // `with [...]` is exhaustive, so "unknown" is not "maybe Alloc":
+            // it is "maybe anything". say which leaf is to blame and how to
+            // fix it, since that is never the function the user wrote.
+            let leaf = *chain.last().expect("a blame chain is never empty");
+            let label = match (callee, leaf) {
+                (INDIRECT_CALLEE, _) =>
+                    "calls through a function pointer, whose effects are unknown".to_string(),
+                (_, INDIRECT_CALLEE) =>
+                    format!("calls '{}', which makes a call through a function pointer", show(callee)),
+                _ if chain.len() == 1 =>
+                    format!("calls '{}', which has no `with [...]` clause", show(callee)),
+                _ => format!("calls '{}', which reaches '{}' (no `with [...]` clause)",
+                    show(callee), show(leaf)),
+            };
+            let fix = if leaf == INDIRECT_CALLEE {
+                "function pointer types carry no effect bound yet".to_string()
+            } else {
+                format!("declare the effects of '{}' with a `with [...]` clause", show(leaf))
+            };
+            let mut note = format!(
+                "`with [...]` lists every effect allowed, so every callee's effects must be known; {}",
+                fix);
+            if chain.len() > 1 { note.push_str(&format!("\npath: {}", rendered)); }
+            errors.push(Error::new(span, format!(
+                "'{}' {} but calls code with unknown effects", show(name), contract))
+                .with_label(span, label)
+                .with_note(note));
         }
     }
 

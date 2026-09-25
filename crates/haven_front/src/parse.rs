@@ -1529,13 +1529,15 @@ fn parse_where_bounds<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<GenericParam<'src
 }
 
 /// `with` is an allowlist, `without` a denylist. Both are soft clause words.
-/// Only `Alloc` is accepted until other effects have sound inference.
 fn parse_effect_clause<'tks, 'src: 'tks>() -> P<'tks, 'src, Option<Metadata<EffectClause>>> {
     let direction = choice((
         select_ref! { Token::Var("with") => true },
         select_ref! { Token::Var("without") => false },
     ));
-    let effects = select_ref! { Token::Var("Alloc") => Effect::Alloc }
+    let effects = select_ref! {
+        Token::Var("Alloc") => Effect::Alloc,
+        Token::Var("IO") => Effect::IO,
+    }
         .separated_by(just(Token::Comma))
         .allow_trailing()
         .collect::<Vec<_>>()

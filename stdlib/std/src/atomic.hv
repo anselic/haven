@@ -8,39 +8,39 @@
 // These functions are implemented in std/c/atomic.c using C11 atomics.
 // Each ordering has its own function, so the C compiler knows it at compile time.
 // The allocation checker trusts the `without [Alloc]` clauses on these externs.
-extern rt_atomic_load_relaxed_u32(p: *u32) u32 without [Alloc];
-extern rt_atomic_load_acquire_u32(p: *u32) u32 without [Alloc];
-extern rt_atomic_load_seqcst_u32(p: *u32) u32 without [Alloc];
-extern rt_atomic_store_relaxed_u32(p: *u32, v: u32) void without [Alloc];
-extern rt_atomic_store_release_u32(p: *u32, v: u32) void without [Alloc];
-extern rt_atomic_store_seqcst_u32(p: *u32, v: u32) void without [Alloc];
-extern rt_atomic_fetch_add_relaxed_u32(p: *u32, v: u32) u32 without [Alloc];
-extern rt_atomic_fetch_add_acqrel_u32(p: *u32, v: u32) u32 without [Alloc];
-extern rt_atomic_fetch_sub_acqrel_u32(p: *u32, v: u32) u32 without [Alloc];
-extern rt_atomic_fetch_and_acqrel_u32(p: *u32, v: u32) u32 without [Alloc];
-extern rt_atomic_fetch_or_acqrel_u32(p: *u32, v: u32) u32 without [Alloc];
-extern rt_atomic_exchange_acqrel_u32(p: *u32, v: u32) u32 without [Alloc];
-extern rt_atomic_cas_u32(p: *u32, expected: *u32, desired: u32) i32 without [Alloc];
-extern rt_atomic_is_lock_free_u32() i32 without [Alloc];
+extern rt_atomic_load_relaxed_u32(p: *u32) u32 with [];
+extern rt_atomic_load_acquire_u32(p: *u32) u32 with [];
+extern rt_atomic_load_seqcst_u32(p: *u32) u32 with [];
+extern rt_atomic_store_relaxed_u32(p: *u32, v: u32) void with [];
+extern rt_atomic_store_release_u32(p: *u32, v: u32) void with [];
+extern rt_atomic_store_seqcst_u32(p: *u32, v: u32) void with [];
+extern rt_atomic_fetch_add_relaxed_u32(p: *u32, v: u32) u32 with [];
+extern rt_atomic_fetch_add_acqrel_u32(p: *u32, v: u32) u32 with [];
+extern rt_atomic_fetch_sub_acqrel_u32(p: *u32, v: u32) u32 with [];
+extern rt_atomic_fetch_and_acqrel_u32(p: *u32, v: u32) u32 with [];
+extern rt_atomic_fetch_or_acqrel_u32(p: *u32, v: u32) u32 with [];
+extern rt_atomic_exchange_acqrel_u32(p: *u32, v: u32) u32 with [];
+extern rt_atomic_cas_u32(p: *u32, expected: *u32, desired: u32) i32 with [];
+extern rt_atomic_is_lock_free_u32() i32 with [];
 
-extern rt_atomic_load_relaxed_u64(p: *u64) u64 without [Alloc];
-extern rt_atomic_load_acquire_u64(p: *u64) u64 without [Alloc];
-extern rt_atomic_load_seqcst_u64(p: *u64) u64 without [Alloc];
-extern rt_atomic_store_relaxed_u64(p: *u64, v: u64) void without [Alloc];
-extern rt_atomic_store_release_u64(p: *u64, v: u64) void without [Alloc];
-extern rt_atomic_store_seqcst_u64(p: *u64, v: u64) void without [Alloc];
-extern rt_atomic_fetch_add_relaxed_u64(p: *u64, v: u64) u64 without [Alloc];
-extern rt_atomic_fetch_add_acqrel_u64(p: *u64, v: u64) u64 without [Alloc];
-extern rt_atomic_fetch_sub_acqrel_u64(p: *u64, v: u64) u64 without [Alloc];
-extern rt_atomic_fetch_and_acqrel_u64(p: *u64, v: u64) u64 without [Alloc];
-extern rt_atomic_fetch_or_acqrel_u64(p: *u64, v: u64) u64 without [Alloc];
-extern rt_atomic_exchange_acqrel_u64(p: *u64, v: u64) u64 without [Alloc];
-extern rt_atomic_cas_u64(p: *u64, expected: *u64, desired: u64) i32 without [Alloc];
-extern rt_atomic_is_lock_free_u64() i32 without [Alloc];
+extern rt_atomic_load_relaxed_u64(p: *u64) u64 with [];
+extern rt_atomic_load_acquire_u64(p: *u64) u64 with [];
+extern rt_atomic_load_seqcst_u64(p: *u64) u64 with [];
+extern rt_atomic_store_relaxed_u64(p: *u64, v: u64) void with [];
+extern rt_atomic_store_release_u64(p: *u64, v: u64) void with [];
+extern rt_atomic_store_seqcst_u64(p: *u64, v: u64) void with [];
+extern rt_atomic_fetch_add_relaxed_u64(p: *u64, v: u64) u64 with [];
+extern rt_atomic_fetch_add_acqrel_u64(p: *u64, v: u64) u64 with [];
+extern rt_atomic_fetch_sub_acqrel_u64(p: *u64, v: u64) u64 with [];
+extern rt_atomic_fetch_and_acqrel_u64(p: *u64, v: u64) u64 with [];
+extern rt_atomic_fetch_or_acqrel_u64(p: *u64, v: u64) u64 with [];
+extern rt_atomic_exchange_acqrel_u64(p: *u64, v: u64) u64 with [];
+extern rt_atomic_cas_u64(p: *u64, expected: *u64, desired: u64) i32 with [];
+extern rt_atomic_is_lock_free_u64() i32 with [];
 
-extern rt_atomic_fence_acquire() void without [Alloc];
-extern rt_atomic_fence_release() void without [Alloc];
-extern rt_atomic_fence_seqcst() void without [Alloc];
+extern rt_atomic_fence_acquire() void with [];
+extern rt_atomic_fence_release() void with [];
+extern rt_atomic_fence_seqcst() void with [];
 
 /// A `u32` shared through atomic operations.
 ///

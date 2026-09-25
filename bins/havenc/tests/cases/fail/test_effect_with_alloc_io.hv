@@ -1,0 +1,6 @@
+//@ error: has effect clause `with [Alloc]` but may perform IO
+// `with` is exhaustive: allowing Alloc does not allow the IO that printing does.
+proc main() i32 with [Alloc] {
+    println("hi");
+    return 0;
+}

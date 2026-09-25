@@ -1,4 +1,4 @@
-//@ error: has effect clause `with []` but has unknown effects
+//@ error: has effect clause `with []` but calls code with unknown effects
 // without [Alloc] excludes allocation only. It says nothing about IO or locks.
 extern abs(x: i32) i32 without [Alloc];
 

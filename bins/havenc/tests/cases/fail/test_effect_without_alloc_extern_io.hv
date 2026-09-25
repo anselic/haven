@@ -1,0 +1,6 @@
+//@ error: has effect clause `without [IO]` but may perform IO
+// `without [Alloc]` on an extern rules out allocation only, so it may still do IO.
+extern abs(x: i32) i32 without [Alloc];
+
+@export
+proc main() i32 without [IO] { return abs(-1); }

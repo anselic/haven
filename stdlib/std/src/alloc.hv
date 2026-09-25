@@ -12,9 +12,9 @@
 
 import option { Option }
 
-extern rt_alloc(size: u64) *void;
-extern rt_realloc(ptr: *void, size: u64) *void;
-extern rt_free(ptr: *void) void;
+extern rt_alloc(size: u64) *void with [Alloc];
+extern rt_realloc(ptr: *void, size: u64) *void with [Alloc];
+extern rt_free(ptr: *void) void with [Alloc];
 
 /// Allocate uninitialized room for `count` values of type `T`. Returns `Some(*T)`
 /// pointer on success, or `None` if the allocation failed.

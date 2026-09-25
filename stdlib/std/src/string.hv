@@ -23,10 +23,10 @@
 
 import vec { Vec }
 
-extern strlen(s: str) u64;
-extern strcmp(a: str, b: str) i32;
-extern rt_str_as_bytes(s: str) *u8;
-extern rt_bytes_as_str(p: *u8) str;
+extern strlen(s: str) u64 with [];
+extern strcmp(a: str, b: str) i32 with [];
+extern rt_str_as_bytes(s: str) *u8 with [];
+extern rt_bytes_as_str(p: *u8) str with [];
 
 // `str` is borrowed text, and comparing two of them needs no `String` on either
 // side - which is why there is no `String::eq_str`: `s.as_str().eq("...")` is

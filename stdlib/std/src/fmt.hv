@@ -19,8 +19,8 @@
 import string { String }
 import vec { Vec }
 
-extern rt_f32_to_str(f: f32, precision: i32) str;
-extern rt_f64_to_str(d: f64, precision: i32) str;
+extern rt_f32_to_str(f: f32, precision: i32) str with [];
+extern rt_f64_to_str(d: f64, precision: i32) str with [];
 
 pub trait Display {
     proc display(*self) String;
@@ -124,7 +124,8 @@ extend *T: Display where T: Display {
 
 // --- printing functions
 
-extern rt_puts(s: str) void;
+// glibc mallocs the stdout buffer on the first write.
+extern rt_puts(s: str) void with [Alloc, IO];
 
 /// Write `s` to stdout with no trailing newline.
 pub proc print<T: Display>(x: T) void {

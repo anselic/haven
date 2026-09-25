@@ -1,4 +1,4 @@
-//@ error: has effect clause `with [Alloc]` but has unknown effects
+//@ error: has effect clause `with [Alloc]` but calls code with unknown effects
 // Allowing Alloc does not prove an unannotated extern has no other effects.
 extern abs(x: i32) i32;
 

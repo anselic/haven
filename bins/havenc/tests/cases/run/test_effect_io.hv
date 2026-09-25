@@ -1,0 +1,10 @@
+//@ exit: 3
+// Printing needs IO, and the stdout buffer may be allocated on first write.
+proc greet() with [Alloc, IO] { println("hi"); }
+proc quiet() i32 without [IO] { return 3; }
+
+@export
+proc main() i32 {
+    greet();
+    return quiet();
+}

@@ -4,7 +4,7 @@
 
 import std/alloc { alloc, dealloc }
 
-extern strlen(s: str) u64;
+extern strlen(s: str) u64 with [];
 
 // a `str` initializer in a const global — previously rejected as non-constant.
 const GREETING: str = "hello, world";

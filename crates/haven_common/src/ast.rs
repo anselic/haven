@@ -1139,14 +1139,30 @@ impl<'a> Display for AttributeNode<'a> {
 
 pub type Attribute<'a> = Metadata<AttributeNode<'a>>;
 
-/// A callable's source-level effect. Only allocation is checked today; more
-/// effects can be added as their analyses become sound.
+/// A callable's source-level effect.
+///
+/// Every effect is only ever introduced by an extern, since the compiler
+/// inserts no hidden runtime calls. That is what keeps inference from bodies
+/// sound: an effect can only reach a function through a call edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Effect { Alloc }
+pub enum Effect {
+    /// Calls the heap allocator.
+    Alloc,
+    /// Touches the world outside the program's memory: stdio, files,
+    /// processes, environment variables, or exiting the process.
+    IO,
+}
+
+impl Effect {
+    pub const ALL: [Effect; 2] = [Effect::Alloc, Effect::IO];
+}
 
 impl Display for Effect {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self { Effect::Alloc => write!(f, "Alloc") }
+        match self {
+            Effect::Alloc => write!(f, "Alloc"),
+            Effect::IO => write!(f, "IO"),
+        }
     }
 }
 

@@ -27,12 +27,12 @@ import result { Result }
 import string { String }
 import vec { Vec }
 
-extern rt_proc_run(program: str, args: *str, nargs: u64, out_code: *i32) i32;
+extern rt_proc_run(program: str, args: *str, nargs: u64, out_code: *i32) i32 with [Alloc, IO];
 extern rt_proc_capture(program: str, args: *str, nargs: u64,
                        out_code: *i32,
                        out_stdout: **u8, out_stdout_len: *u64,
-                       out_stderr: **u8, out_stderr_len: *u64) i32;
-extern rt_proc_strerror(code: i32) str;
+                       out_stderr: **u8, out_stderr_len: *u64) i32 with [Alloc, IO];
+extern rt_proc_strerror(code: i32) str with [];
 
 /// A failure to *launch* a child process (not a child that ran and exited
 /// nonzero), wrapping the C `errno` captured at the spawn.

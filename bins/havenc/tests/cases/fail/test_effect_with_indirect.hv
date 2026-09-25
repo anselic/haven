@@ -1,4 +1,4 @@
-//@ error: has effect clause `with [Alloc]` but has unknown effects
+//@ error: has effect clause `with [Alloc]` but calls code with unknown effects
 // A function pointer has no effect bound in its type yet.
 proc id(x: i32) i32 { return x; }
 

@@ -22,15 +22,16 @@ import result { Result, Unit }
 import string { String }
 import vec { Vec }
 
-extern rt_fs_read(path: str, out_len: *u64, out_err: *i32) *u8;
-extern rt_fs_write(path: str, data: *u8, len: u64, out_written: *u64) i32;
-extern rt_fs_copy(src: str, dst: str, out_bytes: *u64) i32;
-extern rt_fs_mkdir(path: str) i32;
-extern rt_fs_remove(path: str) i32;
-extern rt_fs_rename(src: str, dst: str) i32;
-extern rt_fs_exists(path: str) i32;
-extern rt_fs_is_dir(path: str) i32;
-extern rt_fs_strerror(code: i32) str;
+// fopen mallocs a FILE, so every opening call allocates.
+extern rt_fs_read(path: str, out_len: *u64, out_err: *i32) *u8 with [Alloc, IO];
+extern rt_fs_write(path: str, data: *u8, len: u64, out_written: *u64) i32 with [Alloc, IO];
+extern rt_fs_copy(src: str, dst: str, out_bytes: *u64) i32 with [Alloc, IO];
+extern rt_fs_mkdir(path: str) i32 with [IO];
+extern rt_fs_remove(path: str) i32 with [IO];
+extern rt_fs_rename(src: str, dst: str) i32 with [IO];
+extern rt_fs_exists(path: str) i32 with [IO];
+extern rt_fs_is_dir(path: str) i32 with [IO];
+extern rt_fs_strerror(code: i32) str with [];
 
 /// A filesystem error, wrapping the C `errno` captured where the call failed.
 pub struct FsError {

@@ -11,10 +11,10 @@
 
 // libc takes untyped pointers and byte counts. The wrappers below convert
 // from typed pointers and element counts. These externs do not allocate.
-extern memcpy(dst: *void, src: *void, n: u64) *void without [Alloc];
-extern memmove(dst: *void, src: *void, n: u64) *void without [Alloc];
-extern memset(dst: *void, c: i32, n: u64) *void without [Alloc];
-extern memcmp(a: *void, b: *void, n: u64) i32 without [Alloc];
+extern memcpy(dst: *void, src: *void, n: u64) *void with [];
+extern memmove(dst: *void, src: *void, n: u64) *void with [];
+extern memset(dst: *void, c: i32, n: u64) *void with [];
+extern memcmp(a: *void, b: *void, n: u64) i32 with [];
 
 /// Copy `count` elements from `src` to `dst`. The buffers must not overlap.
 /// Use `copy_overlapping` if they might; overlap here is undefined behavior.

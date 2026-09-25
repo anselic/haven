@@ -1,0 +1,5 @@
+//@ error: has effect clause `without [IO]` but may perform IO
+proc main() i32 without [IO] {
+    println("hi");
+    return 0;
+}
