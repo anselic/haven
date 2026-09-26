@@ -6,18 +6,18 @@
 //! Angles are in radians throughout.
 
 /// `x` squared (`x * x`).
-pub proc square(x: f64) f64 { return x * x; }
+pub proc square(x: f64) f64 with [] { return x * x; }
 /// The constant pi as an `f64`.
-pub proc pi() f64 { return 3.14159265358979323846f64; }
+pub proc pi() f64 with [] { return 3.14159265358979323846f64; }
 /// The constant tau (2*pi) as an `f64`.
-pub proc tau() f64 { return 6.28318530717958647692f64; }
+pub proc tau() f64 with [] { return 6.28318530717958647692f64; }
 /// The constant pi as an `f32`.
-pub proc pi_f32() f32 { return 3.14159265358979323846f32; }
+pub proc pi_f32() f32 with [] { return 3.14159265358979323846f32; }
 /// The constant tau (2*pi) as an `f32`.
-pub proc tau_f32() f32 { return 6.28318530717958647692f32; }
+pub proc tau_f32() f32 with [] { return 6.28318530717958647692f32; }
 
 /// Clamp `x` into the inclusive range [lo, hi].
-pub proc clampf(x: f64, lo: f64, hi: f64) f64 {
+pub proc clampf(x: f64, lo: f64, hi: f64) f64 with [] {
     if (x < lo) { return lo; }
     if (x > hi) { return hi; }
     return x;
@@ -28,84 +28,84 @@ pub proc clampf(x: f64, lo: f64, hi: f64) f64 {
 
 // f64 (C `double`) variants:
 /// Sine of `x` (radians).
-pub extern sin(x: f64) f64 without [Alloc];
+pub extern sin(x: f64) f64 with [];
 /// Cosine of `x` (radians).
-pub extern cos(x: f64) f64 without [Alloc];
+pub extern cos(x: f64) f64 with [];
 /// Tangent of `x` (radians).
-pub extern tan(x: f64) f64 without [Alloc];
+pub extern tan(x: f64) f64 with [];
 /// Arcsine of `x`, in radians. `x` must be in [-1, 1].
-pub extern asin(x: f64) f64 without [Alloc];
+pub extern asin(x: f64) f64 with [];
 /// Arccosine of `x`, in radians. `x` must be in [-1, 1].
-pub extern acos(x: f64) f64 without [Alloc];
+pub extern acos(x: f64) f64 with [];
 /// Arctangent of `x`, in radians.
-pub extern atan(x: f64) f64 without [Alloc];
+pub extern atan(x: f64) f64 with [];
 /// Arctangent of `y/x` in radians, using the signs of both to pick the quadrant.
-pub extern atan2(y: f64, x: f64) f64 without [Alloc];
+pub extern atan2(y: f64, x: f64) f64 with [];
 /// Hyperbolic sine of `x`.
-pub extern sinh(x: f64) f64 without [Alloc];
+pub extern sinh(x: f64) f64 with [];
 /// Hyperbolic cosine of `x`.
-pub extern cosh(x: f64) f64 without [Alloc];
+pub extern cosh(x: f64) f64 with [];
 /// Hyperbolic tangent of `x`.
-pub extern tanh(x: f64) f64 without [Alloc];
+pub extern tanh(x: f64) f64 with [];
 /// e raised to the power `x`.
-pub extern exp(x: f64) f64 without [Alloc];
+pub extern exp(x: f64) f64 with [];
 /// Natural (base-e) logarithm of `x`. `x` must be positive.
-pub extern log(x: f64) f64 without [Alloc];
+pub extern log(x: f64) f64 with [];
 /// Base-2 logarithm of `x`. `x` must be positive.
-pub extern log2(x: f64) f64 without [Alloc];
+pub extern log2(x: f64) f64 with [];
 /// Base-10 logarithm of `x`. `x` must be positive.
-pub extern log10(x: f64) f64 without [Alloc];
+pub extern log10(x: f64) f64 with [];
 /// `base` raised to the power `exp`.
-pub extern pow(base: f64, exp: f64) f64 without [Alloc];
+pub extern pow(base: f64, exp: f64) f64 with [];
 /// Square root of `x`. `x` must be non-negative.
-pub extern sqrt(x: f64) f64 without [Alloc];
+pub extern sqrt(x: f64) f64 with [];
 /// Cube root of `x`.
-pub extern cbrt(x: f64) f64 without [Alloc];
+pub extern cbrt(x: f64) f64 with [];
 /// Absolute value of `x`.
 // TODO: fix something about MSVC CRT `fabs`/`fabsf` so we can use an `extern`
 // here instead of a proc. But at -O2 it lowers to hardware sign-bit clear which
 // is close to what `llvm.fabs` do anyway
-pub proc fabs(x: f64) f64 without [Alloc] { if (x <= 0.0f64) { return 0.0f64 - x; } return x; }
+pub proc fabs(x: f64) f64 with [] { if (x <= 0.0f64) { return 0.0f64 - x; } return x; }
 /// Largest integer value not greater than `x`, as an `f64`.
-pub extern floor(x: f64) f64 without [Alloc];
+pub extern floor(x: f64) f64 with [];
 /// Smallest integer value not less than `x`, as an `f64`.
-pub extern ceil(x: f64) f64 without [Alloc];
+pub extern ceil(x: f64) f64 with [];
 /// `x` rounded to the nearest integer, halves away from zero, as an `f64`.
-pub extern round(x: f64) f64 without [Alloc];
+pub extern round(x: f64) f64 with [];
 /// `x` truncated toward zero, as an `f64`.
-pub extern trunc(x: f64) f64 without [Alloc];
+pub extern trunc(x: f64) f64 with [];
 /// Floating-point remainder of `x / y`, with the sign of `x`.
-pub extern fmod(x: f64, y: f64) f64 without [Alloc];
+pub extern fmod(x: f64, y: f64) f64 with [];
 
 // f32 (C `float`) variants, for single-precision DSP:
 /// Sine of `x` (radians), single precision.
-pub extern sinf(x: f32) f32 without [Alloc];
+pub extern sinf(x: f32) f32 with [];
 /// Cosine of `x` (radians), single precision.
-pub extern cosf(x: f32) f32 without [Alloc];
+pub extern cosf(x: f32) f32 with [];
 /// Tangent of `x` (radians), single precision.
-pub extern tanf(x: f32) f32 without [Alloc];
+pub extern tanf(x: f32) f32 with [];
 /// Arctangent of `y/x` (radians), quadrant-aware, single precision.
-pub extern atan2f(y: f32, x: f32) f32 without [Alloc];
+pub extern atan2f(y: f32, x: f32) f32 with [];
 /// Hyperbolic tangent of `x`, single precision.
-pub extern tanhf(x: f32) f32 without [Alloc];
+pub extern tanhf(x: f32) f32 with [];
 /// e raised to the power `x`, single precision.
-pub extern expf(x: f32) f32 without [Alloc];
+pub extern expf(x: f32) f32 with [];
 /// Natural (base-e) logarithm of `x`, single precision. `x` must be positive.
-pub extern logf(x: f32) f32 without [Alloc];
+pub extern logf(x: f32) f32 with [];
 /// Base-2 logarithm of `x`, single precision. `x` must be positive.
-pub extern log2f(x: f32) f32 without [Alloc];
+pub extern log2f(x: f32) f32 with [];
 /// Base-10 logarithm of `x`, single precision. `x` must be positive.
-pub extern log10f(x: f32) f32 without [Alloc];
+pub extern log10f(x: f32) f32 with [];
 /// `base` raised to the power `exp`, single precision.
-pub extern powf(base: f32, exp: f32) f32 without [Alloc];
+pub extern powf(base: f32, exp: f32) f32 with [];
 /// Square root of `x`, single precision. `x` must be non-negative.
-pub extern sqrtf(x: f32) f32 without [Alloc];
+pub extern sqrtf(x: f32) f32 with [];
 /// Absolute value of `x`, single precision.
 // TODO: see `fabs` above
-pub proc fabsf(x: f32) f32 without [Alloc] { if (x <= 0.0f32) { return 0.0f32 - x; } return x; }
+pub proc fabsf(x: f32) f32 with [] { if (x <= 0.0f32) { return 0.0f32 - x; } return x; }
 /// Largest integer value not greater than `x`, single precision.
-pub extern floorf(x: f32) f32 without [Alloc];
+pub extern floorf(x: f32) f32 with [];
 /// Smallest integer value not less than `x`, single precision.
-pub extern ceilf(x: f32) f32 without [Alloc];
+pub extern ceilf(x: f32) f32 with [];
 /// Floating-point remainder of `x / y` with the sign of `x`, single precision.
-pub extern fmodf(x: f32, y: f32) f32 without [Alloc];
+pub extern fmodf(x: f32, y: f32) f32 with [];
