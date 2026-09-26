@@ -1,0 +1,22 @@
+//@ error: has effect clause `without [Alloc]`
+//@ error: rt_fs_strerror
+//@ error: rt_env_strerror
+//@ error: rt_proc_strerror
+
+import std/fs { FsError }
+import std/env { EnvError }
+import std/process { ProcError }
+
+// Borrowed error text can still require libc allocation. Each exported wrapper
+// must be checked even when no error is constructed or OS operation is run.
+@export
+proc fs_message(e: *FsError) str without [Alloc] { return e.message(); }
+
+@export
+proc env_message(e: *EnvError) str without [Alloc] { return e.message(); }
+
+@export
+proc proc_message(e: *ProcError) str without [Alloc] { return e.message(); }
+
+@export
+proc main() i32 { return 0; }

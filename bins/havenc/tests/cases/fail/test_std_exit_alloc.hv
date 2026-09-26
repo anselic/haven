@@ -1,0 +1,7 @@
+//@ error: has effect clause `without [Alloc]`
+//@ error: rt_env_exit
+
+import std/env { exit }
+
+@export
+proc main() without [Alloc] { exit(0); }

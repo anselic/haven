@@ -31,7 +31,8 @@ extern rt_fs_remove(path: str) i32 with [IO];
 extern rt_fs_rename(src: str, dst: str) i32 with [IO];
 extern rt_fs_exists(path: str) i32 with [IO];
 extern rt_fs_is_dir(path: str) i32 with [IO];
-extern rt_fs_strerror(code: i32) str with [];
+// strerror may allocate storage for unknown error numbers (including on glibc).
+extern rt_fs_strerror(code: i32) str with [Alloc];
 
 /// A filesystem error, wrapping the C `errno` captured where the call failed.
 pub struct FsError {

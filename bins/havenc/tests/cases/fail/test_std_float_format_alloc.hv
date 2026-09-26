@@ -1,0 +1,14 @@
+//@ error: has effect clause `without [Alloc]`
+//@ error: rt_f32_to_str
+//@ error: rt_f64_to_str
+
+// Diagnostics must identify the formatter's allocation effect before the
+// subsequent allocation of the owned String returned by Display.
+@export
+proc format_f32(x: f32) without [Alloc] { let text = x.display(); }
+
+@export
+proc format_f64(x: f64) without [Alloc] { let text = x.display(); }
+
+@export
+proc main() i32 { return 0; }

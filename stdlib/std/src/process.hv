@@ -32,7 +32,8 @@ extern rt_proc_capture(program: str, args: *str, nargs: u64,
                        out_code: *i32,
                        out_stdout: **u8, out_stdout_len: *u64,
                        out_stderr: **u8, out_stderr_len: *u64) i32 with [Alloc, IO];
-extern rt_proc_strerror(code: i32) str with [];
+// strerror may allocate storage for unknown error numbers (including on glibc).
+extern rt_proc_strerror(code: i32) str with [Alloc];
 
 /// A failure to *launch* a child process (not a child that ran and exited
 /// nonzero), wrapping the C `errno` captured at the spawn.

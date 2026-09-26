@@ -19,8 +19,9 @@
 import string { String }
 import vec { Vec }
 
-extern rt_f32_to_str(f: f32, precision: i32) str with [];
-extern rt_f64_to_str(d: f64, precision: i32) str with [];
+// snprintf may allocate for large precision, even with a static output buffer.
+extern rt_f32_to_str(f: f32, precision: i32) str with [Alloc];
+extern rt_f64_to_str(d: f64, precision: i32) str with [Alloc];
 
 pub trait Display {
     proc display(*self) String;

@@ -3717,7 +3717,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                 let effects_eq = match (&tl.value, &prev.value) {
                     (TopLevelNode::Extern { effect_clause: ca, .. },
                      TopLevelNode::Extern { effect_clause: cb, .. }) =>
-                        ca.as_ref().map(|c| &c.value) == cb.as_ref().map(|c| &c.value),
+                        match (ca.as_ref(), cb.as_ref()) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => effect_clauses_eq(&a.value, &b.value),
+                            _ => false,
+                        },
                     _ => true,
                 };
 
@@ -3749,4 +3753,17 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
     // lib's `.hvmeta`) under exactly the name that shaped the symbols, with no
     // second, drift-prone re-derivation of the entry-stem default.
     Ok((out, files, defs, impls, package))
+}
+
+/// Effect clauses describe sets, not ordered lists. Compare their contents
+/// independent of source order, and treat duplicate entries as redundant.
+fn effect_clauses_eq(a: &EffectClause, b: &EffectClause) -> bool {
+    match (a, b) {
+        (EffectClause::With(a), EffectClause::With(b))
+        | (EffectClause::Without(a), EffectClause::Without(b)) => {
+            Effect::ALL.iter().all(|effect|
+                a.contains(effect) == b.contains(effect))
+        }
+        _ => false,
+    }
 }
