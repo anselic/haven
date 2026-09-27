@@ -297,3 +297,129 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || needle.len() > haystack.len() { return false; }
     haystack.windows(needle.len()).any(|w| w == needle)
 }
+
+
+/// Failure must be a diagnostic, and must occur before any artifact is written.
+fn assert_library_validation_fails(source: &str, category: &str, message: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[("src/lib.hv", source)]);
+    let out = dir.path().join("libp");
+    let res = build_lib(dir.path(), "src/lib.hv", "libp", &out);
+    let stderr = String::from_utf8_lossy(&res.stderr);
+    assert_eq!(res.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains(category), "{stderr}");
+    assert!(stderr.contains(message), "{stderr}");
+    for ext in ["hvmeta", "ll", "o", "exe"] {
+        assert!(!out.with_extension(ext).exists(), "unexpected .{ext}");
+    }
+}
+
+#[test]
+fn unused_concrete_function_reports_conditional_move_in_library() {
+    assert_library_validation_fails(r#"
+struct Res { id: i32 }
+extend Res: Delete { proc delete(*self) {} }
+proc consume(value: Res) {}
+proc unused(value: Res, flag: bool) {
+    if (flag) { consume(value); }
+    consume(value);
+}
+"#, "Ownership error", "moved away on some paths");
+}
+
+#[test]
+fn concrete_library_function_checks_its_generic_specializations() {
+    assert_library_validation_fails(r#"
+struct Res { id: i32 }
+extend Res: Delete { proc delete(*self) {} }
+proc consume<T>(value: T) {}
+proc twice<T>(value: T) {
+    consume(value);
+    consume(value);
+}
+proc unused(value: Res) { twice(value); }
+"#, "Ownership error", "after its value was moved out");
+}
+
+#[test]
+fn library_effects_include_inserted_destructor_cleanup() {
+    assert_library_validation_fails(r#"
+extern abs(x: i32) i32 with IO;
+struct Res { id: i32 }
+extend Res: Delete { proc delete(*self) { abs(self.id); } }
+proc unused() i32 with [] {
+    let value = Res { id: -7 };
+    return value.id;
+}
+"#, "Check error", "has effect clause `with []` but may perform IO");
+}
+
+#[test]
+fn unused_generic_ownership_failure_is_deferred_to_consumer() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"
+pub struct Res { id: i32 }
+extend Res: Delete { proc delete(*self) {} }
+proc consume<T>(value: T) {}
+pub proc twice<T>(value: T) {
+    consume(value);
+    consume(value);
+}
+"#;
+    scaffold(dir.path(), &[
+        ("src/lib.hv", source),
+        ("main.hv", "import libp { Res, twice }\nproc main() i32 { twice(Res { id: 7 }); return 0; }"),
+    ]);
+    let out = dir.path().join("libp");
+    let res = build_lib(dir.path(), "src/lib.hv", "libp", &out);
+    assert!(res.status.success(), "{}", String::from_utf8_lossy(&res.stderr));
+    let meta_path = out.with_extension("hvmeta");
+    let meta = haven_meta::read(&meta_path).unwrap();
+    assert_eq!(meta.modules[0].source, source);
+    let res = common::havenc_cmd()
+        .current_dir(dir.path())
+        .arg("main.hv")
+        .arg("--dep").arg(format!("libp={}", meta_path.display()))
+        .arg("-o").arg(dir.path().join("consumer"))
+        .output().unwrap();
+    let stderr = String::from_utf8_lossy(&res.stderr);
+    assert_eq!(res.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("Ownership error"), "{stderr}");
+    assert!(stderr.contains("after its value was moved out"), "{stderr}");
+}
+
+#[test]
+fn valid_owning_library_preserves_source_and_runs_in_consumer() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"
+pub struct Res { id: i32 }
+extend Res: Delete { proc delete(*self) {} }
+pub proc identity<T>(value: T) T { return value; }
+pub proc answer() i32 {
+    let value = identity(Res { id: 42 });
+    return value.id;
+}
+"#;
+    scaffold(dir.path(), &[
+        ("src/lib.hv", source),
+        ("main.hv", "import libp { answer }\nproc main() i32 { return answer() - 42; }"),
+    ]);
+    let out = dir.path().join("libp");
+    let res = build_lib(dir.path(), "src/lib.hv", "libp", &out);
+    assert!(res.status.success(), "{}", String::from_utf8_lossy(&res.stderr));
+    let meta_path = out.with_extension("hvmeta");
+    let meta = haven_meta::read(&meta_path).unwrap();
+    assert_eq!(meta.modules[0].source, source);
+    assert!(!out.with_extension("ll").exists());
+    let consumer = dir.path().join("consumer");
+    let res = common::havenc_cmd()
+        .current_dir(dir.path())
+        .arg("main.hv")
+        .arg("--dep").arg(format!("libp={}", meta_path.display()))
+        .arg("-o").arg(&consumer)
+        .output().unwrap();
+    assert!(res.status.success(), "{}", String::from_utf8_lossy(&res.stderr));
+    let executable = if cfg!(windows) { consumer.with_extension("exe") } else { consumer };
+    let res = std::process::Command::new(executable).output().unwrap();
+    assert_eq!(res.status.code(), Some(0), "{}", String::from_utf8_lossy(&res.stderr));
+}

@@ -54,9 +54,7 @@ pub struct Args {
     #[arg(long, conflicts_with = "shared")]
     pub static_lib: bool,
 
-    /// Compile as a native Haven library: emit a `.hvmeta` source-blob artifact
-    /// (for consumption by other Haven packages) instead of driving to LLVM. Stops
-    /// after the validating typecheck; runs no mono/codegen and needs no `main`.
+    /// Compile as a native Haven library (`.hvmeta`).
     #[arg(long, conflicts_with = "shared", conflicts_with = "static_lib",
           conflicts_with = "emit_asm")]
     pub lib: bool,

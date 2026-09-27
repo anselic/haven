@@ -141,70 +141,20 @@ fn main() {
             typecheck_errs.iter()
                 .for_each(|e| diag::report_error("Typecheck error", e, &files));
             std::process::exit(1);
-        } else if args.lib {
-            // A native Haven library: emit a `.hvmeta` source-blob artifact and
-            // stop. The pre-mono typecheck above already ran as validation - it
-            // checks the generic *templates* a lib exposes, so a lib author's type
-            // error surfaces here rather than in a consumer's build. Everything
-            // past this point (mono, MIL, LLVM, and the post-mono ownership/alloc
-            // checks) operates on concrete instances a lib does not have; those
-            // are deferred to the leaf, where instantiation happens.
+        }
+
+        let checked = prepare_concrete_program(
+            &ast, &cx, &mut defs, &impls, &arena, &files,
+        );
+        if args.lib {
+            // Validation above operates on rebuilt concrete code. The artifact
+            // stores original source so consumers can instantiate generic templates.
             write_lib_metadata(
                 input, &package_name, &defs, &files, &args.c_file,
                 &args.link_lib, &args.link_search, &args.link_arg, &args.output,
             );
         } else {
-            // expand generics into concrete instances, then re-typecheck the
-            // now fully-concrete program so node_types is populated for the
-            // fresh instantiations
-            // TODO: this re-checks the *whole* program (prelude, std, every
-            // concrete fn) from scratch and throws away the first `cx`, when
-            // only the new instances actually need checking
-            // mono extends `defs` with one entry per instance it mints, which is
-            // what lets the second typecheck pass below match a match-arm pattern
-            // (which names the template) against a scrutinee whose type names the
-            // instance.
-            let mut mono_ast = mono::monomorphize(&ast, &mut defs, &arena, &cx.node_types, &cx.inferred_type_args, &impls)
-                .unwrap_or_else(|e| {
-                    diag::report_error("Monomorphization error", &e, &files);
-                    std::process::exit(1);
-                });
-            // mono dropped all trait nodes and substituted every bounded type
-            // param, so the concrete program has no impls left to check.
-            // A method of a *generic* `extend` is a template, and mono rewrote
-            // every call to one into a direct call on the instance it minted, so
-            // what is left in the member table for this pass to resolve is the
-            // concrete impls - plus the per-instance destructors mono added,
-            // which the ownership pass below reads.
-            let mut cx = typecheck::Context::new();
-            let mono_errs = typecheck::typecheck_program(&mut cx, &mono_ast, &[], &defs);
-            if !mono_errs.is_empty() {
-                mono_errs.iter()
-                    .for_each(|e| diag::report_error("Typecheck error", e, &files));
-                std::process::exit(1);
-            }
-
-            // ownership: reject use-after-move and insert the `delete` calls
-            // that destroy every owner exactly once. Runs on the concrete
-            // program, where every type's `Copy`-ness is decidable, and before
-            // effect check, so a `without Alloc` function is judged on the
-            // destructors it actually ends up calling.
-            // the lang item comes from `defs`, which outlives mono - so unlike
-            // the trait *declarations* mono drops, it needs no capturing here.
-            own::ownership_check(&mut mono_ast, &mut cx, defs.lang().delete, &impls)
-                .unwrap_or_else(|errs| {
-                    for err in &errs {
-                        diag::report_error("Ownership error", err, &files);
-                    }
-                    std::process::exit(1);
-                });
-
-            effects::check_program(&mono_ast, &defs, &cx.node_types).unwrap_or_else(|errs| {
-                for err in &errs {
-                    diag::report_error("Check error", err, &files);
-                }
-                std::process::exit(1);
-            });
+            let CheckedProgram { ast: mut mono_ast, cx } = checked;
 
             opt::optimize_ast(&mut mono_ast, &cx);
 
@@ -515,6 +465,78 @@ fn main() {
             }
         }
     }
+}
+
+/// Concrete code and the type information used by ownership, effects, and lowering.
+struct CheckedProgram<'a> {
+    ast: Vec<ast::TopLevel<'a>>,
+    cx: typecheck::Context<'a>,
+}
+
+/// Validate concrete code for every output mode. Generic templates with no
+/// requested instance remain deferred to consumers. Ownership cleanup is added
+/// only to this rebuilt AST; library metadata continues to carry original source.
+fn prepare_concrete_program<'a>(
+    ast: &[ast::TopLevel<'a>],
+    template_cx: &typecheck::Context<'a>,
+    defs: &mut haven_common::defs::Defs<'a>,
+    impls: &[ast::ImplDecl<'a>],
+    arena: &'a bumpalo::Bump,
+    files: &diag::Files<'a>,
+) -> CheckedProgram<'a> {
+    // expand generics into concrete instances, then re-typecheck the
+    // now fully-concrete program so node_types is populated for the
+    // fresh instantiations
+    // TODO: this re-checks the *whole* program (prelude, std, every
+    // concrete fn) from scratch instead of reusing `template_cx`, when
+    // only the new instances actually need checking
+    // mono extends `defs` with one entry per instance it mints, which is
+    // what lets the second typecheck pass below match a match-arm pattern
+    // (which names the template) against a scrutinee whose type names the
+    // instance.
+    let mut mono_ast = mono::monomorphize(ast, defs, arena, &template_cx.node_types, &template_cx.inferred_type_args, impls)
+        .unwrap_or_else(|e| {
+            diag::report_error("Monomorphization error", &e, files);
+            std::process::exit(1);
+        });
+    // mono dropped all trait nodes and substituted every bounded type
+    // param, so the concrete program has no impls left to check.
+    // A method of a *generic* `extend` is a template, and mono rewrote
+    // every call to one into a direct call on the instance it minted, so
+    // what is left in the member table for this pass to resolve is the
+    // concrete impls - plus the per-instance destructors mono added,
+    // which the ownership pass below reads.
+    let mut cx = typecheck::Context::new();
+    let mono_errs = typecheck::typecheck_program(&mut cx, &mono_ast, &[], defs);
+    if !mono_errs.is_empty() {
+        mono_errs.iter()
+            .for_each(|e| diag::report_error("Typecheck error", e, files));
+        std::process::exit(1);
+    }
+
+    // ownership: reject use-after-move and insert the `delete` calls
+    // that destroy every owner exactly once. Runs on the concrete
+    // program, where every type's `Copy`-ness is decidable, and before
+    // effect check, so a `without Alloc` function is judged on the
+    // destructors it actually ends up calling.
+    // the lang item comes from `defs`, which outlives mono - so unlike
+    // the trait *declarations* mono drops, it needs no capturing here.
+    own::ownership_check(&mut mono_ast, &mut cx, defs.lang().delete, impls)
+        .unwrap_or_else(|errs| {
+            for err in &errs {
+                diag::report_error("Ownership error", err, files);
+            }
+            std::process::exit(1);
+        });
+
+    effects::check_program(&mono_ast, defs, &cx.node_types).unwrap_or_else(|errs| {
+        for err in &errs {
+            diag::report_error("Check error", err, files);
+        }
+        std::process::exit(1);
+    });
+
+    CheckedProgram { ast: mono_ast, cx }
 }
 
 /// Report a failure of the *environment* - a tool that will not start, a file
