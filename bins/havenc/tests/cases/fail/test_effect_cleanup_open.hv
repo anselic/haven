@@ -1,0 +1,16 @@
+//@ error: has effect clause `with []` but calls code with unknown effects
+//@ error: an open contract does not list every possible effect
+//@ error: 'abs'
+// Cleanup can introduce an open contract even with no recognized possibilities.
+extern abs(x: i32) i32 without [Alloc, IO];
+struct Res { id: i32 }
+extend Res: Delete {
+    proc delete(*self) { abs(self.id); }
+}
+proc hold() i32 with [] {
+    let value = Res { id: -7 };
+    return value.id;
+}
+
+@export
+proc main() i32 { return hold(); }

@@ -1,0 +1,12 @@
+//@ error: has effect clause `with [Alloc, IO]` but calls code with unknown effects
+//@ error: $b' -> 'abs'
+// An unannotated extern makes every caller in the recursive component open.
+extern abs(x: i32) i32;
+proc a(n: i32) i32 { return b(n); }
+proc b(n: i32) i32 {
+    if (n == 0) { return abs(-7); }
+    return a(n - 1);
+}
+
+@export
+proc main() i32 with [Alloc, IO] { return a(3); }

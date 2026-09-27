@@ -1,0 +1,9 @@
+//@ error: has effect clause `with []` but calls code with unknown effects
+//@ error: an open contract does not list every possible effect
+//@ error: $wrapper' -> 'abs'
+// Ruling out every recognized effect does not make a denylist exhaustive.
+extern abs(x: i32) i32 without [Alloc, IO];
+proc wrapper(x: i32) i32 { return abs(x); }
+
+@export
+proc main() i32 with [] { return wrapper(-1); }

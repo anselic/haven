@@ -1,0 +1,16 @@
+//@ error: has effect clause `with []` but may perform IO
+//@ error: IO reaches it through
+//@ error: 'abs'
+// The only IO call is in cleanup inserted after the source body is checked.
+extern abs(x: i32) i32 with [IO];
+struct Res { id: i32 }
+extend Res: Delete {
+    proc delete(*self) { abs(self.id); }
+}
+proc hold() i32 with [] {
+    let value = Res { id: -7 };
+    return value.id;
+}
+
+@export
+proc main() i32 { return hold(); }

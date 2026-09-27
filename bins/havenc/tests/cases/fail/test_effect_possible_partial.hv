@@ -1,0 +1,8 @@
+//@ error: has effect clause `without [IO]` but may perform IO
+//@ error: IO cannot be ruled out by the effect contract of 'abs'
+//@ error: $wrapper' -> 'abs'
+extern abs(x: i32) i32 without [Alloc];
+proc wrapper(x: i32) i32 { return abs(x); }
+
+@export
+proc main() i32 without [IO] { return wrapper(-1); }

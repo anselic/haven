@@ -1,0 +1,7 @@
+//@ error: has effect clause `with [Alloc, IO]` but calls code with unknown effects
+// No exhaustive effect contract can be inferred for a function pointer.
+proc id(x: i32) i32 { return x; }
+proc apply(f: proc(i32) i32, x: i32) i32 with [Alloc, IO] { return f(x); }
+
+@export
+proc main() i32 { return apply(id, 2); }

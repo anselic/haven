@@ -1,0 +1,8 @@
+//@ exit: 7
+// An empty denylist permits indirect calls, directly and through wrappers.
+proc id(x: i32) i32 { return x; }
+proc apply(f: proc(i32) i32, x: i32) i32 without [] { return f(x); }
+proc wrapper(f: proc(i32) i32, x: i32) i32 without [] { return apply(f, x); }
+
+@export
+proc main() i32 without [] { return wrapper(id, 7); }

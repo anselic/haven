@@ -1,0 +1,11 @@
+//@ error: has effect clause `with [Alloc, IO]` but calls code with unknown effects
+//@ error: function pointer types carry no effect bound yet
+//@ error: <indirect call>
+// Known IO evidence must not erase openness from an indirect call.
+extern abs(x: i32) i32 with [IO];
+proc id(x: i32) i32 { return x; }
+proc mixed(f: proc(i32) i32) i32 { return abs(-3) + f(4); }
+proc wrapper() i32 { return mixed(id); }
+
+@export
+proc main() i32 with [Alloc, IO] { return wrapper(); }
