@@ -14,7 +14,7 @@
 // Every operation is a thin wrapper over a platform-normalized `rt_fs_*` shim in
 // std/c/fs.c (see there for the Windows/POSIX differences it papers over). The
 // shims report failure as a nonzero `errno`; the wrappers turn that into an
-// `Err(FsError)`. `read` adopts the shim's malloc'd buffer straight into a
+// `Err(FsError)`. `read_bytes` adopts the shim's malloc'd buffer straight into a
 // `Vec<u8>` via `from_raw_parts` (no copy), since rt_alloc and libc malloc are
 // the same allocator.
 
@@ -49,6 +49,25 @@ pub struct FsError {
 /// Read the entire contents of the file at `path` into an owned `String` (with
 /// no UTF-8 validation - treat the bytes as raw unless you know they are text).
 pub proc read(path: str) Result<String, FsError> {
+    match (read_bytes(path)) {
+        Result::Ok(bytes) -> { return Result::Ok(String::from_bytes(bytes)); }
+        Result::Err(e) -> { return Result::Err(e); }
+    }
+}
+
+/// Read the entire file into an owned byte buffer. Preserves every byte,
+/// including embedded NULs and invalid UTF-8. The trailing NUL reserved by the
+/// runtime is capacity only, not part of the returned length.
+///
+/// Borrow a slice for a binary decoder taking `*[u8]`:
+/// ```hv
+/// let bytes: Vec<u8> = fs::read_bytes("audio.wav").unwrap();
+/// let view: [u8] = bytes.as_slice();
+/// let decoded = your_decode_proc(&view);
+/// ```
+/// Keep `bytes` alive and do not reallocate or destroy its buffer while using
+/// the view. Haven pointers do not enforce this lifetime restriction.
+pub proc read_bytes(path: str) Result<Vec<u8>, FsError> {
     let len: u64 = 0u64;
     let err: i32 = 0i32;
     let buf: *u8 = rt_fs_read(path, &len, &err);
@@ -58,7 +77,7 @@ pub proc read(path: str) Result<String, FsError> {
     // adopt the malloc'd buffer directly: `len` bytes are live, and the shim over-
     // allocated one byte for the NUL, so the true capacity is at least `len + 1`.
     let bytes: Vec<u8> = Vec::<u8>::from_raw_parts(buf, len, len + 1u64);
-    return Result::Ok(String::from_bytes(bytes));
+    return Result::Ok(bytes);
 }
 
 /// Write the bytes of `contents` to `path`, creating it or truncating an existing

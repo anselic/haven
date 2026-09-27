@@ -1,0 +1,60 @@
+import std/floats
+
+proc check32(bits: u32) bool with [] {
+    let value = f32::from_bits(bits);
+    let le = value.to_le_bytes();
+    let be = value.to_be_bytes();
+    let from_le = f32::from_le_bytes(le);
+    let from_be = f32::from_be_bytes(be);
+    let i = 0u64;
+    while (i < 4u64) {
+        let expected = numerical_cast::<u8>((bits >> (numerical_cast::<u32>(i) * 8u32)) & 0xffu32);
+        if (le[i] != expected || be[3u64 - i] != expected) { return false; }
+        i = i + 1u64;
+    }
+    return *ptr_cast::<*u32>(&value) == bits
+        && *ptr_cast::<*u32>(&from_le) == bits
+        && *ptr_cast::<*u32>(&from_be) == bits;
+}
+
+proc check64(bits: u64) bool with [] {
+    let value = f64::from_bits(bits);
+    let le = value.to_le_bytes();
+    let be = value.to_be_bytes();
+    let from_le = f64::from_le_bytes(le);
+    let from_be = f64::from_be_bytes(be);
+    let i = 0u64;
+    while (i < 8u64) {
+        let expected = numerical_cast::<u8>((bits >> (i * 8u64)) & 0xffu64);
+        if (le[i] != expected || be[7u64 - i] != expected) { return false; }
+        i = i + 1u64;
+    }
+    return *ptr_cast::<*u64>(&value) == bits
+        && *ptr_cast::<*u64>(&from_le) == bits
+        && *ptr_cast::<*u64>(&from_be) == bits;
+}
+
+@export
+proc main() i32 {
+    if (f32::from_bits(0x3f800000u32) != 1.0f32) { return 1; }
+    if (f32::from_le_bytes([0u8, 0u8, 128u8, 63u8]) != 1.0f32) { return 5; }
+    if (f32::from_be_bytes([191u8, 128u8, 0u8, 0u8]) != -1.0f32) { return 6; }
+    if (f64::from_bits(0xbff0000000000000u64) != -1.0f64) { return 2; }
+    if (f64::from_le_bytes([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 240u8, 63u8]) != 1.0f64) { return 7; }
+    if (f64::from_be_bytes([191u8, 240u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]) != -1.0f64) { return 8; }
+    if (!check32(0x3f800000u32) || !check32(0x12345678u32)
+        || !check32(0u32) || !check32(0x80000000u32)
+        || !check32(1u32) || !check32(0x007fffffu32)
+        || !check32(0x00800000u32) || !check32(0x7f7fffffu32)
+        || !check32(0x7f800000u32) || !check32(0xff800000u32)
+        || !check32(0x7fc12345u32) || !check32(0x7f812345u32)
+        || !check32(0xffc12345u32)) { return 3; }
+    if (!check64(0x3ff0000000000000u64) || !check64(0x123456789abcdef0u64)
+        || !check64(0u64) || !check64(0x8000000000000000u64)
+        || !check64(1u64) || !check64(0x000fffffffffffffu64)
+        || !check64(0x0010000000000000u64) || !check64(0x7fefffffffffffffu64)
+        || !check64(0x7ff0000000000000u64) || !check64(0xfff0000000000000u64)
+        || !check64(0x7ff8123456789abcu64) || !check64(0x7ff0123456789abcu64)
+        || !check64(0xfff8123456789abcu64)) { return 4; }
+    return 0;
+}

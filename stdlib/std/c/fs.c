@@ -20,7 +20,6 @@
 #include <string.h>
 #include <sys/stat.h>
 
-
 #ifdef _WIN32
   #include <direct.h>            // _mkdir, _rmdir
   #define RT_MKDIR(p) _mkdir(p)
@@ -35,14 +34,16 @@
   #define RT_RMDIR(p) rmdir(p)
 #endif
 
+#define ERRNO_OR_1 (errno ? errno : 1)
+
 int32_t rt_fs_mkdir(const char* path) {
     errno = 0;
-    return RT_MKDIR(path) == 0 ? 0 : (errno ? errno : 1);
+    return RT_MKDIR(path) == 0 ? 0 : ERRNO_OR_1;
 }
 
 int32_t rt_fs_rename(const char* src, const char* dst) {
     errno = 0;
-    return rename(src, dst) == 0 ? 0 : (errno ? errno : 1);
+    return rename(src, dst) == 0 ? 0 : ERRNO_OR_1;
 }
 
 // Remove a file or (empty) directory. `remove` unlinks files everywhere but on
@@ -56,22 +57,42 @@ int32_t rt_fs_remove(const char* path) {
         errno = 0;
         if (RT_RMDIR(path) == 0) return 0;
     }
-    return errno ? errno : 1;
+    return ERRNO_OR_1;
 }
 
 uint8_t* rt_fs_read(const char* path, uint64_t* out_len, int32_t* out_err) {
     errno = 0;
     FILE* f = fopen(path, "rb");
-    if (!f) { *out_err = errno ? errno : 1; return NULL; }
-    if (fseek(f, 0, SEEK_END) != 0) { *out_err = errno ? errno : 1; fclose(f); return NULL; }
+    if (!f) {
+        *out_err = ERRNO_OR_1;
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        *out_err = ERRNO_OR_1;
+        fclose(f);
+        return NULL;
+    }
     long n = ftell(f);
-    if (n < 0) { *out_err = errno ? errno : 1; fclose(f); return NULL; }
+    if (n < 0) {
+        *out_err = ERRNO_OR_1;
+        fclose(f);
+        return NULL;
+    }
     rewind(f);
     // one extra byte for the NUL std/string relies on for a borrowable `str`.
     uint8_t* buf = (uint8_t*)malloc((size_t)n + 1);
-    if (!buf) { *out_err = ENOMEM; fclose(f); return NULL; }
+    if (!buf) {
+        *out_err = ENOMEM;
+        fclose(f);
+        return NULL;
+    }
     size_t rd = fread(buf, 1, (size_t)n, f);
-    if (ferror(f)) { *out_err = errno ? errno : 1; free(buf); fclose(f); return NULL; }
+    if (ferror(f)) {
+        *out_err = ERRNO_OR_1;
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
     fclose(f);
     buf[rd] = 0;
     *out_len = (uint64_t)rd;
@@ -81,10 +102,14 @@ uint8_t* rt_fs_read(const char* path, uint64_t* out_len, int32_t* out_err) {
 int32_t rt_fs_write(const char* path, const uint8_t* data, uint64_t len, uint64_t* out_written) {
     errno = 0;
     FILE* f = fopen(path, "wb");
-    if (!f) { *out_written = 0; return errno ? errno : 1; }
+    if (!f) {
+        *out_written = 0;
+        return ERRNO_OR_1;
+    }
     size_t wr = fwrite(data, 1, (size_t)len, f);
-    int err = (wr != (size_t)len) ? (errno ? errno : 1) : 0;
-    if (fclose(f) != 0 && !err) err = errno ? errno : 1;
+    int err = (wr != (size_t)len) ? (ERRNO_OR_1) : 0;
+    if (fclose(f) != 0 && !err)
+        err = ERRNO_OR_1;
     *out_written = (uint64_t)wr;
     return err;
 }
@@ -93,19 +118,26 @@ int32_t rt_fs_copy(const char* src, const char* dst, uint64_t* out_bytes) {
     errno = 0;
     *out_bytes = 0;
     FILE* in = fopen(src, "rb");
-    if (!in) return errno ? errno : 1;
+    if (!in) return ERRNO_OR_1;
     FILE* out = fopen(dst, "wb");
-    if (!out) { int e = errno ? errno : 1; fclose(in); return e; }
+    if (!out) {
+        int e = ERRNO_OR_1;
+        fclose(in);
+        return e;
+    }
     char b[65536];
     size_t n;
     int err = 0;
     uint64_t total = 0;
     while ((n = fread(b, 1, sizeof b, in)) > 0) {
-        if (fwrite(b, 1, n, out) != n) { err = errno ? errno : 1; break; }
+        if (fwrite(b, 1, n, out) != n) {
+            err = ERRNO_OR_1;
+            break;
+        }
         total += (uint64_t)n;
     }
-    if (!err && ferror(in)) err = errno ? errno : 1;
-    if (fclose(out) != 0 && !err) err = errno ? errno : 1;
+    if (!err && ferror(in)) err = ERRNO_OR_1;
+    if (fclose(out) != 0 && !err) err = ERRNO_OR_1;
     fclose(in);
     *out_bytes = total;
     return err;

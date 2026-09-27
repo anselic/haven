@@ -34,6 +34,7 @@ import bits
 import env
 import ffi
 import fs
+import floats
 import iter
 import math
 import mem

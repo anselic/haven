@@ -1,0 +1,54 @@
+// Binary reads preserve NULs, high bytes and Windows text-mode control bytes.
+// Passing the borrowed Vec view to a *[u8] consumer needs no C adapter.
+import std/fs
+import std/vec { Vec }
+import std/string { String }
+
+proc decode(input: *[u8]) u64 without Alloc {
+    let view: [u8] = *input;
+    if (slice_len::<u8>(input) != 6u64) { abort("wrong binary length"); }
+    if (view[0] != 0u8 || view[1] != 255u8 || view[2] != 128u8 ||
+        view[3] != 13u8 || view[4] != 10u8 || view[5] != 26u8) {
+        abort("binary bytes changed");
+    }
+    return slice_len::<u8>(input);
+}
+
+@export
+proc main() i32 {
+    let path: str = "hv_fs_read_bytes_probe.tmp";
+    let payload: Vec<u8> = Vec::<u8>::new();
+    payload.push(0u8);
+    payload.push(255u8);
+    payload.push(128u8);
+    payload.push(13u8);
+    payload.push(10u8);
+    payload.push(26u8);
+    let content: String = String::from_bytes(payload);
+    if (fs::write(path, &content).unwrap() != 6u64) { abort("short write"); }
+
+    let bytes: Vec<u8> = fs::read_bytes(path).unwrap();
+    let view: [u8] = bytes.as_slice();
+    println(decode(&view));
+    // The view borrows storage and does not consume the owner.
+    println(bytes.len());
+    if (bytes.as_ptr() != &view[0]) { abort("slice copied the buffer"); }
+
+    // Existing text reads still preserve their byte length and raw contents.
+    let text: String = fs::read(path).unwrap();
+    if (text.len() != 6u64 || text.as_bytes()[1] != 255u8) {
+        abort("text read regression");
+    }
+
+    let empty: String = String::new();
+    fs::write(path, &empty).unwrap();
+    let empty_bytes: Vec<u8> = fs::read_bytes(path).unwrap();
+    let empty_view: [u8] = empty_bytes.as_slice();
+    println(slice_len::<u8>(&empty_view));
+    fs::remove(path).unwrap();
+
+    let error = fs::read_bytes(path).unwrap_err();
+    if (error.errno() == 0i32) { abort("missing file had no errno"); }
+    println("missing -> err");
+    return 0;
+}
