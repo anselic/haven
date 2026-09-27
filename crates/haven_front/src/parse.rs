@@ -1529,6 +1529,7 @@ fn parse_where_bounds<'tks, 'src: 'tks>() -> P<'tks, 'src, Vec<GenericParam<'src
 }
 
 /// `with` is an allowlist, `without` a denylist. Both are soft clause words.
+/// Nonempty clauses use bare names; empty clauses retain `[]`.
 fn parse_effect_clause<'tks, 'src: 'tks>() -> P<'tks, 'src, Option<Metadata<EffectClause>>> {
     let direction = choice((
         select_ref! { Token::Var("with") => true },
@@ -1540,8 +1541,9 @@ fn parse_effect_clause<'tks, 'src: 'tks>() -> P<'tks, 'src, Option<Metadata<Effe
     }
         .separated_by(just(Token::Comma))
         .allow_trailing()
+        .at_least(1)
         .collect::<Vec<_>>()
-        .delimited_by(just(Token::LBracket), just(Token::RBracket));
+        .or(just(Token::LBracket).then(just(Token::RBracket)).to(Vec::new()));
     direction.then(effects)
         .map_with(|(allow_only, effects), e| Metadata::new(
             if allow_only { EffectClause::With(effects) } else { EffectClause::Without(effects) },
@@ -1639,7 +1641,7 @@ fn parse_params<'tks, 'src: 'tks>()
 
 /// A method inside a struct/enum body or an `extend` block:
 /// `[attrs] [pub] proc name[<generics>](receiver?, params...) [RetType]
-/// [where ...] [with/without [effects]] { body }`.
+/// [where ...] [with/without effects] { body }`.
 /// The receiver is `self` (by value), `*self` (by pointer), or absent (an
 /// associated function). `proc` heads every method, so it cleanly delimits methods
 /// from the comma-separated fields/variants that precede them in a type body.
@@ -2150,4 +2152,34 @@ pub fn parse<'a>(file: FileId, len: usize, tokens: &'a [Metadata<Token<'a>>]) ->
     });
 
     (split, errs)
+}
+
+#[cfg(test)]
+mod effect_syntax_tests {
+    use super::*;
+
+    fn accepts(source: &str) -> bool {
+        let (tokens, errors) = lex(FileId(0), source);
+        assert!(errors.is_empty());
+        let tokens = tokens.unwrap();
+        let (output, errors) = parse(FileId(0), source.len(), &tokens);
+        output.is_some() && errors.is_empty()
+    }
+
+    #[test]
+    fn bare_effects_and_explicit_empty_clauses() {
+        for clause in ["with Alloc", "with Alloc, IO", "without IO, Alloc", "with IO,", "with []", "without []"] {
+            assert!(accepts(&format!("proc f() {clause} {{}}")), "{clause}");
+            assert!(accepts(&format!("extern f() i32 {clause};")), "{clause}");
+            assert!(accepts(&format!("struct S {{ proc f(*self) {clause} {{}} }}")), "{clause}");
+        }
+        assert!(accepts("proc f<T, U>(x: T, y: U,) U where T: Display, U: Display with Alloc, IO { return y; }"));
+    }
+
+    #[test]
+    fn malformed_effect_clauses_are_rejected() {
+        for clause in ["with", "without", "with [Alloc]", "without [IO]", "with Unknown", "with Alloc IO", "with ,", "with Alloc,, IO"] {
+            assert!(!accepts(&format!("proc f() {clause} {{}}")), "{clause}");
+        }
+    }
 }

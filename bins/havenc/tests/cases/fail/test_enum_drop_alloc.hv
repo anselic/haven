@@ -7,7 +7,7 @@
 // Same reasoning as `test_array_drop_alloc.hv`: the glue is built as ordinary
 // AST, so the alloc check - which runs afterwards and reads the call graph off
 // the AST - sees a real edge and names the real callee.
-//@ error: has effect clause `without [Alloc]` but may allocate
+//@ error: has effect clause `without Alloc` but may allocate
 
 import std/vec { Vec }
 
@@ -21,7 +21,7 @@ extend Res: Delete {
 
 enum Maybe { None, Some(Res) }
 
-proc hold() i32 without [Alloc] {
+proc hold() i32 without Alloc {
     let m: Maybe = Maybe::Some(Res { id: 1i32 });
     return 0i32;
 }

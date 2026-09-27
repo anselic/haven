@@ -1,7 +1,7 @@
-//@ error: has effect clause `with [Alloc, IO]` but calls code with unknown effects
+//@ error: has effect clause `with Alloc, IO` but calls code with unknown effects
 // Allowing the recognized universe still requires an exhaustive contract.
 extern abs(x: i32) i32;
 proc wrapper(x: i32) i32 { return abs(x); }
 
 @export
-proc main() i32 with [Alloc, IO] { return wrapper(-1); }
+proc main() i32 with Alloc, IO { return wrapper(-1); }

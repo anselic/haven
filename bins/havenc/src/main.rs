@@ -187,7 +187,7 @@ fn main() {
             // ownership: reject use-after-move and insert the `delete` calls
             // that destroy every owner exactly once. Runs on the concrete
             // program, where every type's `Copy`-ness is decidable, and before
-            // effect check, so a `without [Alloc]` function is judged on the
+            // effect check, so a `without Alloc` function is judged on the
             // destructors it actually ends up calling.
             // the lang item comes from `defs`, which outlives mono - so unlike
             // the trait *declarations* mono drops, it needs no capturing here.

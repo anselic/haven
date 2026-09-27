@@ -1,4 +1,4 @@
-//@ error: has effect clause `with [Alloc, IO]` but calls code with unknown effects
+//@ error: has effect clause `with Alloc, IO` but calls code with unknown effects
 //@ error: $b' -> 'abs'
 // An unannotated extern makes every caller in the recursive component open.
 extern abs(x: i32) i32;
@@ -9,4 +9,4 @@ proc b(n: i32) i32 {
 }
 
 @export
-proc main() i32 with [Alloc, IO] { return a(3); }
+proc main() i32 with Alloc, IO { return a(3); }

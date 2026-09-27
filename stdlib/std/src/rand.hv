@@ -7,7 +7,7 @@
 //! let rng: Rng = Rng::new(0x853c49e6748fea9bu64);
 //! let noise: f32 = rng.bipolar_f32();
 //! ```
-//! All methods are `without [Alloc]`. Most take a fixed number of steps, but
+//! All methods are `without Alloc`. Most take a fixed number of steps, but
 //! `below` retries rejected draws and has no fixed iteration limit.
 
 // PCG32 updates a 64-bit state with a multiply and add, then mixes and rotates
@@ -15,10 +15,10 @@
 // be odd. Return the mixed output, not the raw state.
 
 /// The multiplier specified by PCG32. Changing it changes the generator.
-proc mult() u64 without [Alloc] { return 6364136223846793005u64; }
+proc mult() u64 without Alloc { return 6364136223846793005u64; }
 
 /// The default stream selector passed to `Rng::with_stream`.
-proc default_stream() u64 without [Alloc] { return 1442695040888963407u64; }
+proc default_stream() u64 without Alloc { return 1442695040888963407u64; }
 
 /// A PCG32 generator with a 64-bit state and an odd stream increment.
 /// Copying it saves the current position: both copies then produce the same
@@ -28,7 +28,7 @@ pub struct Rng {
     inc: u64,    /// stream increment; always odd
 
     /// Create a generator with `seed` on the default stream. Zero is a valid seed.
-    pub proc new(seed: u64) Rng without [Alloc] {
+    pub proc new(seed: u64) Rng without Alloc {
         return Rng::with_stream(seed, default_stream());
     }
 
@@ -36,7 +36,7 @@ pub struct Rng {
     /// Use separate streams for voices or workers that need their own sequence.
     /// Only the low 63 bits of `stream` are used; shifting left makes room for
     /// the low bit that keeps `inc` odd.
-    pub proc with_stream(seed: u64, stream: u64) Rng without [Alloc] {
+    pub proc with_stream(seed: u64, stream: u64) Rng without Alloc {
         let r: Rng = Rng { state: 0u64, inc: (stream << 1u64) | 1u64 };
         // PCG initialization: advance once, add the seed, then advance again.
         r.step();
@@ -47,13 +47,13 @@ pub struct Rng {
 
     /// Advance the internal state once. Use `next_u32` to get mixed output bits.
     @noalias
-    proc step(*self) without [Alloc] {
+    proc step(*self) without Alloc {
         self.state = self.state * mult() + self.inc;
     }
 
     /// Return the next 32 random bits, mixed from the state before advancing it.
     @noalias
-    pub proc next_u32(*self) u32 without [Alloc] {
+    pub proc next_u32(*self) u32 without Alloc {
         let s: u64 = self.state;
         self.step();
         // Mix the state bits and keep 32 bits of the result.
@@ -66,7 +66,7 @@ pub struct Rng {
     /// Combine two 32-bit draws into one `u64`, first draw in the high half.
     /// Advances the generator twice.
     @noalias
-    pub proc next_u64(*self) u64 without [Alloc] {
+    pub proc next_u64(*self) u64 without Alloc {
         let hi: u64 = numerical_cast::<u64>(self.next_u32());
         let lo: u64 = numerical_cast::<u64>(self.next_u32());
         return (hi << 32u64) | lo;
@@ -76,7 +76,7 @@ pub struct Rng {
     /// Reject part of the draw range so each remainder is equally likely.
     /// This avoids the bias of a plain `% bound`, but may take repeated draws.
     @noalias
-    pub proc below(*self, bound: u32) u32 without [Alloc] {
+    pub proc below(*self, bound: u32) u32 without Alloc {
         if (bound == 0u32) { return 0u32; }
         // This is 2^32 % bound using wrapping arithmetic. Reject values below
         // it so the accepted range has a length divisible by `bound`.
@@ -94,7 +94,7 @@ pub struct Rng {
     /// Every step of size 2^-24 is equally likely. Limiting the draw to 24 bits
     /// keeps the integer conversion exact and the result below 1.
     @noalias
-    pub proc next_f32(*self) f32 without [Alloc] {
+    pub proc next_f32(*self) f32 without Alloc {
         let bits: u32 = self.next_u32() >> 8u32;          // 24 bits
         return numerical_cast::<f32>(bits) * 0.00000005960464477539063f32;  // 2^-24
     }
@@ -102,7 +102,7 @@ pub struct Rng {
     /// Return an `f64` in `[0, 1)` using 53 random bits from two draws.
     /// Every step of size 2^-53 is equally likely.
     @noalias
-    pub proc next_f64(*self) f64 without [Alloc] {
+    pub proc next_f64(*self) f64 without Alloc {
         let bits: u64 = self.next_u64() >> 11u64;         // 53 bits
         return numerical_cast::<f64>(bits) * 0.00000000000000011102230246251565f64;  // 2^-53
     }
@@ -110,19 +110,19 @@ pub struct Rng {
     /// Return an `f32` in `[-1, 1)`, useful for audio noise.
     /// The result can be -1 but never +1.
     @noalias
-    pub proc bipolar_f32(*self) f32 without [Alloc] {
+    pub proc bipolar_f32(*self) f32 without Alloc {
         return self.next_f32() * 2.0f32 - 1.0f32;
     }
 
     /// Return an `f64` in `[-1, 1)`.
     @noalias
-    pub proc bipolar_f64(*self) f64 without [Alloc] {
+    pub proc bipolar_f64(*self) f64 without Alloc {
         return self.next_f64() * 2.0f64 - 1.0f64;
     }
 
     /// Return `true` or `false` with equal probability, using one draw.
     @noalias
-    pub proc next_bool(*self) bool without [Alloc] {
+    pub proc next_bool(*self) bool without Alloc {
         return (self.next_u32() >> 31u32) == 1u32;
     }
 
@@ -130,14 +130,14 @@ pub struct Rng {
     /// For finite `lo < hi`, the intended range is `[lo, hi)`, though floating-point
     /// rounding can produce `hi`.
     @noalias
-    pub proc range_f32(*self, lo: f32, hi: f32) f32 without [Alloc] {
+    pub proc range_f32(*self, lo: f32, hi: f32) f32 without Alloc {
         return lo + self.next_f32() * (hi - lo);
     }
 
     /// Scale an `f64` draw from `lo` to `hi`, with the same bounds and rounding
     /// behavior as `range_f32`.
     @noalias
-    pub proc range_f64(*self, lo: f64, hi: f64) f64 without [Alloc] {
+    pub proc range_f64(*self, lo: f64, hi: f64) f64 without Alloc {
         return lo + self.next_f64() * (hi - lo);
     }
 }

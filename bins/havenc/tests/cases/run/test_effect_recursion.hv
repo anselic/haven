@@ -1,15 +1,15 @@
 //@ exit: 7
 // Pure mutual recursion remains closed; partial extern bounds propagate too.
-extern abs(x: i32) i32 without [Alloc];
+extern abs(x: i32) i32 without Alloc;
 proc even(n: i32) i32 with [] {
     if (n == 0) { return 7; }
     return odd(n - 1);
 }
 proc odd(n: i32) i32 with [] { return even(n - 1); }
-proc partial(n: i32) i32 without [Alloc] {
+proc partial(n: i32) i32 without Alloc {
     if (n == 0) { return abs(-7); }
     return partial(n - 1);
 }
 
 @export
-proc main() i32 without [Alloc] { return even(4) + partial(3) - 7; }
+proc main() i32 without Alloc { return even(4) + partial(3) - 7; }

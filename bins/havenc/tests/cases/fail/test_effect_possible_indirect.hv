@@ -1,8 +1,8 @@
-//@ error: has effect clause `without [IO]` but may perform IO
+//@ error: has effect clause `without IO` but may perform IO
 //@ error: calls through a function pointer, which may perform IO
 //@ error: IO cannot be ruled out: function pointer types carry no effect bound yet
 proc id(x: i32) i32 { return x; }
-proc apply(f: proc(i32) i32, x: i32) i32 without [IO] { return f(x); }
+proc apply(f: proc(i32) i32, x: i32) i32 without IO { return f(x); }
 
 @export
 proc main() i32 { return apply(id, 2); }

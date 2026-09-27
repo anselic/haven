@@ -1,11 +1,11 @@
-//@ error: has effect clause `without [Alloc]` but may allocate
+//@ error: has effect clause `without Alloc` but may allocate
 //@ error: Alloc cannot be ruled out: function pointer types carry no effect bound yet
 //@ error: <indirect call>
 // Known non-allocation evidence must not erase unknown allocation evidence.
-extern abs(x: i32) i32 with [IO];
+extern abs(x: i32) i32 with IO;
 proc id(x: i32) i32 { return x; }
 proc mixed(f: proc(i32) i32) i32 { return abs(-3) + f(4); }
 proc wrapper() i32 { return mixed(id); }
 
 @export
-proc main() i32 without [Alloc] { return wrapper(); }
+proc main() i32 without Alloc { return wrapper(); }

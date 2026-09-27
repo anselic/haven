@@ -1190,7 +1190,11 @@ impl Display for EffectClause {
             Self::With(effects) => ("with", effects),
             Self::Without(effects) => ("without", effects),
         };
-        write!(f, "{} [{}]", word, effects.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
+        if effects.is_empty() {
+            write!(f, "{} []", word)
+        } else {
+            write!(f, "{} {}", word, effects.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
+        }
     }
 }
 

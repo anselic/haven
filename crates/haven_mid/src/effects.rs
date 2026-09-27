@@ -434,10 +434,19 @@ pub fn check_program<'a>(
             // the chain ends at the leaf with that effect and not at some
             // other forbidden one.
             let chain = blame_chain(&calls, &summaries, blame, callee);
-            let rendered = chain.iter().map(|n| match *n {
-                INDIRECT_CALLEE => INDIRECT_CALLEE.to_string(),
-                other => format!("'{}'", show(other)),
-            }).collect::<Vec<_>>().join(" -> ");
+            let rendered = chain.iter()
+                .enumerate()
+                .map(|(i, n)| match *n {
+                    INDIRECT_CALLEE => INDIRECT_CALLEE.to_string(),
+                    other => if i == 0 {
+                        format!("{}", show(other))
+                    } else if i == chain.len() - 1 {
+                        format!("╰ {}", show(other))
+                    } else {
+                        format!("├ {}", show(other))
+                    }
+                }).collect::<Vec<_>>()
+                .join("\n");
 
             if let BlameReason::Possible(effect) = blame {
                 let leaf = *chain.last().expect("a blame chain is never empty");
@@ -451,7 +460,7 @@ pub fn check_program<'a>(
                     .with_label(span, label);
                 let mut notes = Vec::new();
                 if chain.len() > 1 {
-                    notes.push(format!("{} reaches it through: {}", detail, rendered));
+                    notes.push(format!("{} reaches it through:\n{}", detail, rendered));
                 }
                 if summary_of(&summaries, leaf).unknown.contains(effect) {
                     notes.push(if leaf == INDIRECT_CALLEE {
@@ -473,17 +482,17 @@ pub fn check_program<'a>(
                 (_, INDIRECT_CALLEE) =>
                     format!("calls '{}', which makes a call through a function pointer", show(callee)),
                 _ if chain.len() == 1 =>
-                    format!("calls '{}', which has no `with [...]` clause", show(callee)),
-                _ => format!("calls '{}', which reaches '{}' (no `with [...]` clause)",
+                    format!("calls '{}', which has no `with Alloc, IO` clause", show(callee)),
+                _ => format!("calls '{}', which reaches '{}' (no `with Alloc, IO` clause)",
                     show(callee), show(leaf)),
             };
             let fix = if leaf == INDIRECT_CALLEE {
                 "function pointer types carry no effect bound yet".to_string()
             } else {
-                format!("declare the effects of '{}' with a `with [...]` clause", show(leaf))
+                format!("declare the effects of '{}' with a `with Alloc, IO` clause", show(leaf))
             };
             let mut note = format!(
-                "`with [...]` lists every effect allowed, so every callee must have an exhaustive effect contract; an open contract does not list every possible effect; {}",
+                "`with Alloc, IO` lists every effect allowed, so every callee must have an exhaustive effect contract; an open contract does not list every possible effect; {}",
                 fix);
             if chain.len() > 1 { note.push_str(&format!("\npath: {}", rendered)); }
             errors.push(Error::new(span, format!(

@@ -2,7 +2,7 @@
 //@ error: an open contract does not list every possible effect
 //@ error: 'abs'
 // Cleanup can introduce an open contract even with no recognized possibilities.
-extern abs(x: i32) i32 without [Alloc, IO];
+extern abs(x: i32) i32 without Alloc, IO;
 struct Res { id: i32 }
 extend Res: Delete {
     proc delete(*self) { abs(self.id); }

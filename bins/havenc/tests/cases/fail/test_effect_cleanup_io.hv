@@ -2,7 +2,7 @@
 //@ error: IO reaches it through
 //@ error: 'abs'
 // The only IO call is in cleanup inserted after the source body is checked.
-extern abs(x: i32) i32 with [IO];
+extern abs(x: i32) i32 with IO;
 struct Res { id: i32 }
 extend Res: Delete {
     proc delete(*self) { abs(self.id); }
