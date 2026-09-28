@@ -1,0 +1,155 @@
+//! Bit operations and byte conversions for `u64`. All methods are effect-free.
+
+extend u64 {
+    /// Count the 1 bits.
+    pub proc count_ones(self) u32 with [] {
+        let v: u64 = self;
+        v = v - ((v >> 1u64) & 0x5555555555555555u64);
+        v = (v & 0x3333333333333333u64) + ((v >> 2u64) & 0x3333333333333333u64);
+        v = (v + (v >> 4u64)) & 0x0f0f0f0f0f0f0f0fu64;
+        return numerical_cast::<u32>((v * 0x0101010101010101u64) >> 56u64);
+    }
+
+    /// Count leading zero bits. Returns 64 for zero.
+    pub proc leading_zeros(self) u32 with [] {
+        let v: u64 = self;
+        v = v | (v >> 1u64);
+        v = v | (v >> 2u64);
+        v = v | (v >> 4u64);
+        v = v | (v >> 8u64);
+        v = v | (v >> 16u64);
+        v = v | (v >> 32u64);
+        return 64u32 - u64::count_ones(v);
+    }
+
+    /// Count trailing zero bits. Returns 64 for zero.
+    pub proc trailing_zeros(self) u32 with [] {
+        if (self == 0u64) { return 64u32; }
+        return u64::count_ones((self & (0u64 - self)) - 1u64);
+    }
+
+    /// Rotate left, wrapping high bits to the low end. The count is modulo 64.
+    pub proc rotate_left(self, n: u32) u64 with [] {
+        let s: u64 = numerical_cast::<u64>(n) & 63u64;
+        // Return early so the other shift, `64 - s`, never equals 64.
+        if (s == 0u64) { return self; }
+        return (self << s) | (self >> (64u64 - s));
+    }
+
+    /// Rotate right, wrapping low bits to the high end. The count is modulo 64.
+    pub proc rotate_right(self, n: u32) u64 with [] {
+        let s: u64 = numerical_cast::<u64>(n) & 63u64;
+        if (s == 0u64) { return self; }
+        return (self >> s) | (self << (64u64 - s));
+    }
+
+    /// Reverse the byte order.
+    pub proc swap_bytes(self) u64 with [] {
+        // Swap neighboring bytes, then 2-byte groups, then 4-byte groups.
+        let v: u64 = self;
+        v = ((v >>  8u64) & 0x00ff00ff00ff00ffu64) | ((v & 0x00ff00ff00ff00ffu64) <<  8u64);
+        v = ((v >> 16u64) & 0x0000ffff0000ffffu64) | ((v & 0x0000ffff0000ffffu64) << 16u64);
+        return (v >> 32u64) | (v << 32u64);
+    }
+
+    /// Reverse all 64 bits: bit 0 becomes bit 63, and so on.
+    pub proc reverse_bits(self) u64 with [] {
+        let v: u64 = self;
+        v = ((v >> 1u64) & 0x5555555555555555u64) | ((v & 0x5555555555555555u64) << 1u64);
+        v = ((v >> 2u64) & 0x3333333333333333u64) | ((v & 0x3333333333333333u64) << 2u64);
+        v = ((v >> 4u64) & 0x0f0f0f0f0f0f0f0fu64) | ((v & 0x0f0f0f0f0f0f0f0fu64) << 4u64);
+        return u64::swap_bytes(v);
+    }
+
+    /// Reverse the low `width` bits and discard the rest.
+    /// Returns 0 for width 0; widths above 64 are clamped to 64.
+    pub proc bit_reverse(self, width: u32) u64 with [] {
+        if (width == 0u32) { return 0u64; }
+        let w: u32 = width;
+        if (w > 64u32) { w = 64u32; }
+        if (w == 64u32) { return u64::reverse_bits(self); }
+        return u64::reverse_bits(self) >> numerical_cast::<u64>(64u32 - w);
+    }
+
+    /// Whether exactly one bit is set. Returns false for zero.
+    pub proc is_power_of_two(self) bool with [] {
+        return self != 0u64 && (self & (self - 1u64)) == 0u64;
+    }
+
+    /// Return the smallest power of two at least as large as this value.
+    /// Returns 1 for 0 or 1, and 0 on overflow (values above 2^63).
+    pub proc next_power_of_two(self) u64 with [] {
+        if (self <= 1u64) { return 1u64; }
+        let v: u64 = self - 1u64;
+        v = v | (v >> 1u64);
+        v = v | (v >> 2u64);
+        v = v | (v >> 4u64);
+        v = v | (v >> 8u64);
+        v = v | (v >> 16u64);
+        v = v | (v >> 32u64);
+        return v + 1u64;
+    }
+
+    /// Return floor(log2(self)), or 0 for zero.
+    pub proc log2_floor(self) u32 with [] {
+        if (self == 0u64) { return 0u32; }
+        return 63u32 - u64::leading_zeros(self);
+    }
+
+    /// Return ceil(log2(self)), or 0 for zero or one.
+    pub proc log2_ceil(self) u32 with [] {
+        if (self <= 1u64) { return 0u32; }
+        return u64::log2_floor(self - 1u64) + 1u32;
+    }
+
+    /// Count the 0 bits.
+    pub proc count_zeros(self) u32 with [] {
+        return 64u32 - self.count_ones();
+    }
+
+    /// Count leading one bits. Returns 64 when every bit is set.
+    pub proc leading_ones(self) u32 with [] {
+        return u64::leading_zeros(self ^ 0xffffffffffffffffu64);
+    }
+
+    /// Count trailing one bits. Returns 64 when every bit is set.
+    pub proc trailing_ones(self) u32 with [] {
+        return u64::trailing_zeros(self ^ 0xffffffffffffffffu64);
+    }
+
+    /// Decode 8 bytes in little-endian order, independent of host byte order.
+    pub proc from_le_bytes(bytes: [u8; 8]) u64 with [] {
+        return numerical_cast::<u64>(bytes[0u64])
+            | (numerical_cast::<u64>(bytes[1u64]) << 8u64)
+            | (numerical_cast::<u64>(bytes[2u64]) << 16u64)
+            | (numerical_cast::<u64>(bytes[3u64]) << 24u64)
+            | (numerical_cast::<u64>(bytes[4u64]) << 32u64)
+            | (numerical_cast::<u64>(bytes[5u64]) << 40u64)
+            | (numerical_cast::<u64>(bytes[6u64]) << 48u64)
+            | (numerical_cast::<u64>(bytes[7u64]) << 56u64);
+    }
+
+    /// Decode 8 bytes in big-endian order, independent of host byte order.
+    pub proc from_be_bytes(bytes: [u8; 8]) u64 with [] {
+        return u64::from_le_bytes(bytes).swap_bytes();
+    }
+
+    /// Encode every byte in little-endian order, independent of host byte order.
+    pub proc to_le_bytes(self) [u8; 8] with [] {
+        return [
+            numerical_cast::<u8>(self & 0xffu64),
+            numerical_cast::<u8>((self >> 8u64) & 0xffu64),
+            numerical_cast::<u8>((self >> 16u64) & 0xffu64),
+            numerical_cast::<u8>((self >> 24u64) & 0xffu64),
+            numerical_cast::<u8>((self >> 32u64) & 0xffu64),
+            numerical_cast::<u8>((self >> 40u64) & 0xffu64),
+            numerical_cast::<u8>((self >> 48u64) & 0xffu64),
+            numerical_cast::<u8>((self >> 56u64) & 0xffu64),
+        ];
+    }
+
+    /// Encode every byte in big-endian order, independent of host byte order.
+    pub proc to_be_bytes(self) [u8; 8] with [] {
+        return self.swap_bytes().to_le_bytes();
+    }
+}

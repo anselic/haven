@@ -27,14 +27,13 @@ pub import iter { IntoIterator, Iterator } // needed for `for` loops
 import fmt { display_print, display_println }
 
 // everything else std provides, available via `import std/...` in user code.
+import numeric
 
 import alloc
 import atomic
-import bits
 import env
 import ffi
 import fs
-import floats
 import iter
 import math
 import mem

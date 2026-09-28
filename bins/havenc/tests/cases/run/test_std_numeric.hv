@@ -1,0 +1,150 @@
+// Fixed reference values cover zero, full words, alternating bits, and overflow.
+import std/numeric
+
+proc check32(x: u32, zeros: u32, leading: u32, trailing: u32,
+    power: u32, floor: u32, ceil: u32) bool with [] {
+    if (x.count_zeros() != zeros || x.leading_ones() != leading
+        || x.trailing_ones() != trailing || x.next_power_of_two() != power
+        || x.log2_floor() != floor || x.log2_ceil() != ceil) { return false; }
+    let le = x.to_le_bytes();
+    let be = x.to_be_bytes();
+    if (u32::from_le_bytes(le) != x || u32::from_be_bytes(be) != x) { return false; }
+    let i = 0u64;
+    while (i < 4u64) {
+        let expected = numerical_cast::<u8>((x >> (numerical_cast::<u32>(i) * 8u32)) & 0xffu32);
+        if (le[i] != expected || be[3u64 - i] != expected) { return false; }
+        i = i + 1u64;
+    }
+    return true;
+}
+
+proc check64(x: u64, zeros: u32, leading: u32, trailing: u32,
+    power: u64, floor: u32, ceil: u32) bool with [] {
+    if (x.count_zeros() != zeros || x.leading_ones() != leading
+        || x.trailing_ones() != trailing || x.next_power_of_two() != power
+        || x.log2_floor() != floor || x.log2_ceil() != ceil) { return false; }
+    let le = x.to_le_bytes();
+    let be = x.to_be_bytes();
+    if (u64::from_le_bytes(le) != x || u64::from_be_bytes(be) != x) { return false; }
+    let i = 0u64;
+    while (i < 8u64) {
+        let expected = numerical_cast::<u8>((x >> (numerical_cast::<u64>(i) * 8u64)) & 0xffu64);
+        if (le[i] != expected || be[7u64 - i] != expected) { return false; }
+        i = i + 1u64;
+    }
+    return true;
+}
+
+@export
+proc main() i32 {
+    if (!check32(0x0u32, 32u32, 0u32, 0u32,
+        0x1u32, 0u32, 0u32)) { return 1; }
+    if (!check32(0x1u32, 31u32, 0u32, 1u32,
+        0x1u32, 0u32, 0u32)) { return 1; }
+    if (!check32(0x2u32, 31u32, 0u32, 0u32,
+        0x2u32, 1u32, 1u32)) { return 1; }
+    if (!check32(0x3u32, 30u32, 0u32, 2u32,
+        0x4u32, 1u32, 2u32)) { return 1; }
+    if (!check32(0xffu32, 24u32, 0u32, 8u32,
+        0x100u32, 7u32, 8u32)) { return 1; }
+    if (!check32(0x3ffu32, 22u32, 0u32, 10u32,
+        0x400u32, 9u32, 10u32)) { return 1; }
+    if (!check32(0x400u32, 31u32, 0u32, 0u32,
+        0x400u32, 10u32, 10u32)) { return 1; }
+    if (!check32(0x12345678u32, 19u32, 0u32, 0u32,
+        0x20000000u32, 28u32, 29u32)) { return 1; }
+    if (!check32(0x55555555u32, 16u32, 0u32, 1u32,
+        0x80000000u32, 30u32, 31u32)) { return 1; }
+    if (!check32(0xaaaaaaaau32, 16u32, 1u32, 0u32,
+        0x0u32, 31u32, 32u32)) { return 1; }
+    if (!check32(0x7fffffffu32, 1u32, 0u32, 31u32,
+        0x80000000u32, 30u32, 31u32)) { return 1; }
+    if (!check32(0x80000000u32, 31u32, 1u32, 0u32,
+        0x80000000u32, 31u32, 31u32)) { return 1; }
+    if (!check32(0x80000001u32, 30u32, 1u32, 1u32,
+        0x0u32, 31u32, 32u32)) { return 1; }
+    if (!check32(0xfffffffeu32, 1u32, 31u32, 0u32,
+        0x0u32, 31u32, 32u32)) { return 1; }
+    if (!check32(0xffffffffu32, 0u32, 32u32, 32u32,
+        0x0u32, 31u32, 32u32)) { return 1; }
+    let x32 = 0x12345678u32;
+    if (x32.rotate_left(0u32) != 0x12345678u32
+        || x32.rotate_right(0u32) != 0x12345678u32) { return 3; }
+    if (x32.rotate_left(1u32) != 0x2468acf0u32
+        || x32.rotate_right(1u32) != 0x91a2b3cu32) { return 3; }
+    if (x32.rotate_left(31u32) != 0x91a2b3cu32
+        || x32.rotate_right(31u32) != 0x2468acf0u32) { return 3; }
+    if (x32.rotate_left(32u32) != 0x12345678u32
+        || x32.rotate_right(32u32) != 0x12345678u32) { return 3; }
+    if (x32.rotate_left(33u32) != 0x2468acf0u32
+        || x32.rotate_right(33u32) != 0x91a2b3cu32) { return 3; }
+    if (x32.rotate_left(64u32) != 0x12345678u32
+        || x32.rotate_right(64u32) != 0x12345678u32) { return 3; }
+    if (x32.rotate_left(4294967295u32) != 0x91a2b3cu32
+        || x32.rotate_right(4294967295u32) != 0x2468acf0u32) { return 3; }
+    if (x32.bit_reverse(0u32) != 0x0u32) { return 5; }
+    if (x32.bit_reverse(1u32) != 0x0u32) { return 5; }
+    if (x32.bit_reverse(7u32) != 0xfu32) { return 5; }
+    if (x32.bit_reverse(31u32) != 0xf351624u32) { return 5; }
+    if (x32.bit_reverse(32u32) != 0x1e6a2c48u32) { return 5; }
+    if (x32.bit_reverse(33u32) != 0x1e6a2c48u32) { return 5; }
+    if (x32.bit_reverse(4294967295u32) != 0x1e6a2c48u32) { return 5; }
+    if (x32.is_power_of_two() || !u32::is_power_of_two(0x80000000u32)
+        || u32::is_power_of_two(0u32)) { return 7; }
+    if (!check64(0x0u64, 64u32, 0u32, 0u32,
+        0x1u64, 0u32, 0u32)) { return 2; }
+    if (!check64(0x1u64, 63u32, 0u32, 1u32,
+        0x1u64, 0u32, 0u32)) { return 2; }
+    if (!check64(0x2u64, 63u32, 0u32, 0u32,
+        0x2u64, 1u32, 1u32)) { return 2; }
+    if (!check64(0x3u64, 62u32, 0u32, 2u32,
+        0x4u64, 1u32, 2u32)) { return 2; }
+    if (!check64(0xffu64, 56u32, 0u32, 8u32,
+        0x100u64, 7u32, 8u32)) { return 2; }
+    if (!check64(0x3ffu64, 54u32, 0u32, 10u32,
+        0x400u64, 9u32, 10u32)) { return 2; }
+    if (!check64(0x400u64, 63u32, 0u32, 0u32,
+        0x400u64, 10u32, 10u32)) { return 2; }
+    if (!check64(0x123456789abcdef0u64, 32u32, 0u32, 0u32,
+        0x2000000000000000u64, 60u32, 61u32)) { return 2; }
+    if (!check64(0x5555555555555555u64, 32u32, 0u32, 1u32,
+        0x8000000000000000u64, 62u32, 63u32)) { return 2; }
+    if (!check64(0xaaaaaaaaaaaaaaaau64, 32u32, 1u32, 0u32,
+        0x0u64, 63u32, 64u32)) { return 2; }
+    if (!check64(0x7fffffffffffffffu64, 1u32, 0u32, 63u32,
+        0x8000000000000000u64, 62u32, 63u32)) { return 2; }
+    if (!check64(0x8000000000000000u64, 63u32, 1u32, 0u32,
+        0x8000000000000000u64, 63u32, 63u32)) { return 2; }
+    if (!check64(0x8000000000000001u64, 62u32, 1u32, 1u32,
+        0x0u64, 63u32, 64u32)) { return 2; }
+    if (!check64(0xfffffffffffffffeu64, 1u32, 63u32, 0u32,
+        0x0u64, 63u32, 64u32)) { return 2; }
+    if (!check64(0xffffffffffffffffu64, 0u32, 64u32, 64u32,
+        0x0u64, 63u32, 64u32)) { return 2; }
+    let x64 = 0x123456789abcdef0u64;
+    if (x64.rotate_left(0u32) != 0x123456789abcdef0u64
+        || x64.rotate_right(0u32) != 0x123456789abcdef0u64) { return 4; }
+    if (x64.rotate_left(1u32) != 0x2468acf13579bde0u64
+        || x64.rotate_right(1u32) != 0x91a2b3c4d5e6f78u64) { return 4; }
+    if (x64.rotate_left(63u32) != 0x91a2b3c4d5e6f78u64
+        || x64.rotate_right(63u32) != 0x2468acf13579bde0u64) { return 4; }
+    if (x64.rotate_left(64u32) != 0x123456789abcdef0u64
+        || x64.rotate_right(64u32) != 0x123456789abcdef0u64) { return 4; }
+    if (x64.rotate_left(65u32) != 0x2468acf13579bde0u64
+        || x64.rotate_right(65u32) != 0x91a2b3c4d5e6f78u64) { return 4; }
+    if (x64.rotate_left(128u32) != 0x123456789abcdef0u64
+        || x64.rotate_right(128u32) != 0x123456789abcdef0u64) { return 4; }
+    if (x64.rotate_left(4294967295u32) != 0x91a2b3c4d5e6f78u64
+        || x64.rotate_right(4294967295u32) != 0x2468acf13579bde0u64) { return 4; }
+    if (x64.bit_reverse(0u32) != 0x0u64) { return 6; }
+    if (x64.bit_reverse(1u32) != 0x0u64) { return 6; }
+    if (x64.bit_reverse(7u32) != 0x7u64) { return 6; }
+    if (x64.bit_reverse(63u32) != 0x7bd9eac8f351624u64) { return 6; }
+    if (x64.bit_reverse(64u32) != 0xf7b3d591e6a2c48u64) { return 6; }
+    if (x64.bit_reverse(65u32) != 0xf7b3d591e6a2c48u64) { return 6; }
+    if (x64.bit_reverse(4294967295u32) != 0xf7b3d591e6a2c48u64) { return 6; }
+    if (u16::swap_bytes(0x1234u16) != 0x3412u16
+        || u16::swap_bytes(0u16) != 0u16
+        || u16::swap_bytes(0xffffu16) != 0xffffu16) { return 8; }
+    return 0;
+}

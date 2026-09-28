@@ -1,0 +1,144 @@
+//! Bit operations and byte conversions for `u32`. All methods are effect-free.
+
+extend u32 {
+    /// Count the 1 bits.
+    pub proc count_ones(self) u32 with [] {
+        let v: u32 = self;
+        v = v - ((v >> 1u32) & 0x55555555u32);
+        v = (v & 0x33333333u32) + ((v >> 2u32) & 0x33333333u32);
+        v = (v + (v >> 4u32)) & 0x0f0f0f0fu32;
+        return (v * 0x01010101u32) >> 24u32;
+    }
+
+    /// Count leading zero bits. Returns 32 for zero.
+    pub proc leading_zeros(self) u32 with [] {
+        let v: u32 = self;
+        v = v | (v >> 1u32);
+        v = v | (v >> 2u32);
+        v = v | (v >> 4u32);
+        v = v | (v >> 8u32);
+        v = v | (v >> 16u32);
+        return 32u32 - u32::count_ones(v);
+    }
+
+    /// Count trailing zero bits. Returns 32 for zero.
+    pub proc trailing_zeros(self) u32 with [] {
+        if (self == 0u32) { return 32u32; }
+        return u32::count_ones((self & (0u32 - self)) - 1u32);
+    }
+
+    /// Rotate left, wrapping high bits to the low end. The count is modulo 32.
+    pub proc rotate_left(self, n: u32) u32 with [] {
+        let s: u32 = n & 31u32;
+        if (s == 0u32) { return self; }
+        return (self << s) | (self >> (32u32 - s));
+    }
+
+    /// Rotate right, wrapping low bits to the high end. The count is modulo 32.
+    pub proc rotate_right(self, n: u32) u32 with [] {
+        let s: u32 = n & 31u32;
+        if (s == 0u32) { return self; }
+        return (self >> s) | (self << (32u32 - s));
+    }
+
+    /// Reverse the byte order.
+    pub proc swap_bytes(self) u32 with [] {
+        return ((self >> 24u32) & 0x000000ffu32)
+             | ((self >>  8u32) & 0x0000ff00u32)
+             | ((self <<  8u32) & 0x00ff0000u32)
+             | ((self << 24u32) & 0xff000000u32);
+    }
+
+    /// Reverse all 32 bits: bit 0 becomes bit 31, and so on.
+    pub proc reverse_bits(self) u32 with [] {
+        let v: u32 = self;
+        v = ((v >> 1u32) & 0x55555555u32) | ((v & 0x55555555u32) << 1u32);
+        v = ((v >> 2u32) & 0x33333333u32) | ((v & 0x33333333u32) << 2u32);
+        v = ((v >> 4u32) & 0x0f0f0f0fu32) | ((v & 0x0f0f0f0fu32) << 4u32);
+        v = ((v >> 8u32) & 0x00ff00ffu32) | ((v & 0x00ff00ffu32) << 8u32);
+        return (v >> 16u32) | (v << 16u32);
+    }
+
+    /// Reverse the low `width` bits and discard the rest.
+    /// Returns 0 for width 0; widths above 32 are clamped to 32.
+    pub proc bit_reverse(self, width: u32) u32 with [] {
+        if (width == 0u32) { return 0u32; }
+        let w: u32 = width;
+        if (w > 32u32) { w = 32u32; }
+        if (w == 32u32) { return u32::reverse_bits(self); }
+        return u32::reverse_bits(self) >> (32u32 - w);
+    }
+
+    /// Whether exactly one bit is set. Returns false for zero.
+    pub proc is_power_of_two(self) bool with [] {
+        return self != 0u32 && (self & (self - 1u32)) == 0u32;
+    }
+
+    /// Return the smallest power of two at least as large as this value.
+    /// Returns 1 for 0 or 1, and 0 on overflow (values above 2^31).
+    pub proc next_power_of_two(self) u32 with [] {
+        if (self <= 1u32) { return 1u32; }
+        let v: u32 = self - 1u32;
+        v = v | (v >> 1u32);
+        v = v | (v >> 2u32);
+        v = v | (v >> 4u32);
+        v = v | (v >> 8u32);
+        v = v | (v >> 16u32);
+        return v + 1u32;
+    }
+
+    /// Return floor(log2(self)), or 0 for zero.
+    pub proc log2_floor(self) u32 with [] {
+        if (self == 0u32) { return 0u32; }
+        return 31u32 - u32::leading_zeros(self);
+    }
+
+    /// Return ceil(log2(self)), or 0 for zero or one.
+    pub proc log2_ceil(self) u32 with [] {
+        if (self <= 1u32) { return 0u32; }
+        return u32::log2_floor(self - 1u32) + 1u32;
+    }
+
+    /// Count the 0 bits.
+    pub proc count_zeros(self) u32 with [] {
+        return 32u32 - self.count_ones();
+    }
+
+    /// Count leading one bits. Returns 32 when every bit is set.
+    pub proc leading_ones(self) u32 with [] {
+        return u32::leading_zeros(self ^ 0xffffffffu32);
+    }
+
+    /// Count trailing one bits. Returns 32 when every bit is set.
+    pub proc trailing_ones(self) u32 with [] {
+        return u32::trailing_zeros(self ^ 0xffffffffu32);
+    }
+
+    /// Decode 4 bytes in little-endian order, independent of host byte order.
+    pub proc from_le_bytes(bytes: [u8; 4]) u32 with [] {
+        return numerical_cast::<u32>(bytes[0u64])
+            | (numerical_cast::<u32>(bytes[1u64]) << 8u32)
+            | (numerical_cast::<u32>(bytes[2u64]) << 16u32)
+            | (numerical_cast::<u32>(bytes[3u64]) << 24u32);
+    }
+
+    /// Decode 4 bytes in big-endian order, independent of host byte order.
+    pub proc from_be_bytes(bytes: [u8; 4]) u32 with [] {
+        return u32::from_le_bytes(bytes).swap_bytes();
+    }
+
+    /// Encode every byte in little-endian order, independent of host byte order.
+    pub proc to_le_bytes(self) [u8; 4] with [] {
+        return [
+            numerical_cast::<u8>(self & 0xffu32),
+            numerical_cast::<u8>((self >> 8u32) & 0xffu32),
+            numerical_cast::<u8>((self >> 16u32) & 0xffu32),
+            numerical_cast::<u8>((self >> 24u32) & 0xffu32),
+        ];
+    }
+
+    /// Encode every byte in big-endian order, independent of host byte order.
+    pub proc to_be_bytes(self) [u8; 4] with [] {
+        return self.swap_bytes().to_le_bytes();
+    }
+}

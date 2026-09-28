@@ -1,5 +1,7 @@
 //@ error: has effect clause `with Alloc, IO` but calls code with unknown effects
-//@ error: $b' -> 'abs'
+//@ error: path: test_effect_recursion_open$a
+//@ error: ├ test_effect_recursion_open$b
+//@ error: ╰ abs
 // An unannotated extern makes every caller in the recursive component open.
 extern abs(x: i32) i32;
 proc a(n: i32) i32 { return b(n); }

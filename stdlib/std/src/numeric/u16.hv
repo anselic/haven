@@ -1,0 +1,9 @@
+//! Byte-order helpers for `u16`.
+
+extend u16 {
+    /// Reverse the byte order.
+    pub proc swap_bytes(self) u16 with [] {
+        return numerical_cast::<u16>(((numerical_cast::<u32>(self) >> 8u32) & 0x00ffu32)
+            | ((numerical_cast::<u32>(self) << 8u32) & 0xff00u32));
+    }
+}

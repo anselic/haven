@@ -5,7 +5,7 @@
 //! synchronized; use `std/spsc` between threads.
 
 import alloc { alloc, dealloc }
-import bits { next_power_of_two_u64 }
+import numeric/u64
 import option { Option }
 import iter { IntoIterator, Iterator }
 
@@ -24,7 +24,7 @@ pub struct Ring<T> {
             return Ring::<T> {
                 data: null::<*T>(), head: 0u64, len: 0u64, mask: 0u64, cap: 0u64 };
         }
-        let n: u64 = next_power_of_two_u64(cap);
+        let n: u64 = cap.next_power_of_two();
         return Ring::<T> {
             data: alloc::<T>(n).unwrap(), head: 0u64, len: 0u64, mask: n - 1u64, cap: n };
     }

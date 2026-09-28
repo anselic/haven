@@ -1,0 +1,37 @@
+//! Bit operations and byte conversions for `f64`. All methods are effect-free.
+
+import u64
+
+extend f64 {
+    /// Reinterpret an IEEE 754 bit pattern without numerical conversion.
+    /// Preserves signed zero, infinities, subnormals, and NaN payloads.
+    pub proc from_bits(bits: u64) f64 with [] {
+        return *ptr_cast::<*f64>(&bits);
+    }
+
+    /// Return the IEEE 754 bit pattern without numerical conversion.
+    /// Preserves signed zero, infinities, subnormals, and NaN payloads.
+    pub proc to_bits(self) u64 with [] {
+        return *ptr_cast::<*u64>(&self);
+    }
+
+    /// Decode an IEEE 754 bit pattern in little-endian byte order.
+    pub proc from_le_bytes(bytes: [u8; 8]) f64 with [] {
+        return f64::from_bits(u64::from_le_bytes(bytes));
+    }
+
+    /// Decode an IEEE 754 bit pattern in big-endian byte order.
+    pub proc from_be_bytes(bytes: [u8; 8]) f64 with [] {
+        return f64::from_bits(u64::from_be_bytes(bytes));
+    }
+
+    /// Encode the exact IEEE 754 bit pattern in little-endian byte order.
+    pub proc to_le_bytes(self) [u8; 8] with [] {
+        return self.to_bits().to_le_bytes();
+    }
+
+    /// Encode the exact IEEE 754 bit pattern in big-endian byte order.
+    pub proc to_be_bytes(self) [u8; 8] with [] {
+        return self.to_bits().to_be_bytes();
+    }
+}

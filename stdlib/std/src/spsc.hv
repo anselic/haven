@@ -12,7 +12,7 @@
 
 import alloc { alloc, dealloc }
 import atomic { AtomicU64 }
-import bits { next_power_of_two_u64 }
+import numeric/u64
 import option { Option }
 
 /// A queue with exactly one producer and one consumer.
@@ -37,7 +37,7 @@ pub struct Spsc<T> {
         let n: u64 = 0u64;
         let buf: *T = null::<*T>();
         if (cap != 0u64) {
-            n = next_power_of_two_u64(cap);
+            n = cap.next_power_of_two();
             buf = alloc::<T>(n).unwrap();
         }
         let m: u64 = 0u64;

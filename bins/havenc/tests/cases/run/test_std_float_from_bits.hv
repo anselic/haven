@@ -1,4 +1,5 @@
-import std/floats
+import std/numeric/f32
+import std/numeric/f64
 
 proc check32(bits: u32) bool with [] {
     let value = f32::from_bits(bits);
@@ -12,9 +13,9 @@ proc check32(bits: u32) bool with [] {
         if (le[i] != expected || be[3u64 - i] != expected) { return false; }
         i = i + 1u64;
     }
-    return *ptr_cast::<*u32>(&value) == bits
-        && *ptr_cast::<*u32>(&from_le) == bits
-        && *ptr_cast::<*u32>(&from_be) == bits;
+    return value.to_bits() == bits
+        && from_le.to_bits() == bits
+        && from_be.to_bits() == bits;
 }
 
 proc check64(bits: u64) bool with [] {
@@ -29,13 +30,17 @@ proc check64(bits: u64) bool with [] {
         if (le[i] != expected || be[7u64 - i] != expected) { return false; }
         i = i + 1u64;
     }
-    return *ptr_cast::<*u64>(&value) == bits
-        && *ptr_cast::<*u64>(&from_le) == bits
-        && *ptr_cast::<*u64>(&from_be) == bits;
+    return value.to_bits() == bits
+        && from_le.to_bits() == bits
+        && from_be.to_bits() == bits;
 }
 
 @export
 proc main() i32 {
+    let one32 = 1.0f32;
+    let negative_one64 = -1.0f64;
+    if (one32.to_bits() != 0x3f800000u32) { return 9; }
+    if (negative_one64.to_bits() != 0xbff0000000000000u64) { return 10; }
     if (f32::from_bits(0x3f800000u32) != 1.0f32) { return 1; }
     if (f32::from_le_bytes([0u8, 0u8, 128u8, 63u8]) != 1.0f32) { return 5; }
     if (f32::from_be_bytes([191u8, 128u8, 0u8, 0u8]) != -1.0f32) { return 6; }
