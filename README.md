@@ -48,8 +48,6 @@ crates/
 ├── haven_front/    # frontend-related code (lexer, parser, modules)
 ├── haven_meta/     # .hvmeta metadata artifacts (for dependencies compilation)
 └── haven_mid/      # middle-end code (type checking, semantic analysis, etc.)
-extensions/
-└── vscode/         # VSCode extension for syntax highlighting
 stdlib/
 └── std/            # haven standard library package
 ```
