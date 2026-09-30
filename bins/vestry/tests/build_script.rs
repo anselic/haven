@@ -117,7 +117,9 @@ fn build_directives_are_stored_in_library_metadata() {
     assert!(res.status.success(), "build failed: {}", err(&res));
     let meta = haven_meta::read(
         &dir.path().join(".vestry/target/native-provider.hvmeta")).unwrap();
-    assert_eq!(meta.link_search, vec!["/native/lib"]);
+    assert_eq!(meta.link_search.len(), 1);
+    assert!(meta.link_search[0].replace('\\', "/").ends_with("/native/lib"),
+        "unexpected absolute search path: {:?}", meta.link_search);
     assert_eq!(meta.link_libs, vec!["SDL3"]);
     assert_eq!(meta.link_args, vec![
         dir.path().join("native/helper.a").to_string_lossy().into_owned(),

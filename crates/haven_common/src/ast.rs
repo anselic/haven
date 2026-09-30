@@ -1837,10 +1837,11 @@ pub struct Import<'a> {
     /// path segments as written, e.g. `["std", "math"]` or `["utils", "foo"]`
     pub path: Vec<&'a str>,
     /// `pub import`: the imported symbols are also *re-exported*, so a module
-    /// importing this one sees them as though they were declared here. Only
-    /// meaningful on a selective import - a whole-module one binds a qualifier
-    /// rather than any names, and re-exporting a qualifier needs module-level
-    /// namespaces the resolver does not have yet.
+    /// importing this one sees them as though they were declared here. A
+    /// whole-module public import instead re-exports its qualifier, including
+    /// any public qualifiers exported by the target module. In a compiled
+    /// package, that qualifier also names a virtual module import path when no
+    /// physical module occupies the path.
     ///
     /// A re-export moves no code and mints no identity: the symbol keeps the
     /// definition, and so the emitted name, it already had. Only its visibility

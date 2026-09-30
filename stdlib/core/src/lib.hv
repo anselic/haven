@@ -1,0 +1,37 @@
+//! Foundational types and operations available without the standard library.
+
+@!prelude
+
+pub import option { Option }
+pub import clone { Clone }
+pub import result { Result, Unit }
+pub import iter { IntoIterator, Iterator }
+
+import math
+import mem
+import simd
+import ffi
+
+/// The destructor trait used by the ownership pass.
+@lang(delete)
+pub trait Delete {
+    proc delete(*self);
+}
+
+extern rt_abort(msg: str) ! with IO;
+extern rt_slice_len<T>(slice: *[T]) u64 with [];
+extern rt_slice_slice<T>(slice: *[T], start: u64, end: u64, elem_sz: u64) with IO;
+
+/// Print `msg` and terminate the process.
+pub proc abort(msg: str) ! without Alloc { rt_abort(msg); }
+
+/// The number of elements in the runtime slice `slice`.
+@noalias
+pub proc slice_len<T>(slice: *[T]) u64 without Alloc { return rt_slice_len::<T>(slice); }
+
+/// Slice the runtime slice to `[start, end)`.
+pub proc slice_slice<T>(slice: *[T], start: u64, end: u64) [T] without Alloc {
+    let new_slice = slice.clone();
+    rt_slice_slice::<T>(&new_slice, start, end, sizeof::<T>());
+    return new_slice;
+}

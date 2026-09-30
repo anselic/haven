@@ -55,9 +55,9 @@ struct Module<'a> {
     file: FileId,
     /// this module's entry in `Defs`, which owns its symbol slug.
     mid: ModId,
-    /// whether this module belongs to the package supplying the prelude. The
-    /// predicate for `@!prelude` and `@lang`, which only that package may make
-    /// good on - see [`PreludeSource`].
+    package_name: String,
+    /// whether this module belongs to the package supplying the prelude. That
+    /// package owns `@!prelude` and may delegate lang items to direct deps.
     prelude_pkg: bool,
     /// where this module's source came from. Kept so the post-load `@!prelude`
     /// scan can tell a *leaf* mark (a mistake to name) from a *dependency's* one
@@ -292,6 +292,105 @@ fn resolve_within_dep<'a>(meta: &HavenMeta, pkg: &str, segs: &[&str], arena: &'a
         return Ok(ImportTarget::Dir(members));
     }
     Err(format!("package '{}' has no module '{}'", pkg, rel))
+}
+
+/// Resolve an import through a public whole-module import when no physical
+/// module occupies the requested path. The alias is read from the exporting
+/// package's source, so it works both while that package is built and when its
+/// `.hvmeta` is loaded by a consumer. Physical modules keep priority.
+fn resolve_dep_module_path<'a>(
+    deps: &HashMap<String, HavenMeta>, pkg: &str, segs: &[&str],
+    arena: &'a Bump, target: &TargetSpec, prelude_provider: Option<&str>,
+    visiting: &mut HashSet<(String, String)>,
+) -> Result<ImportTarget<'a>, String> {
+    let meta = &deps[pkg];
+    let direct = resolve_within_dep(meta, pkg, segs, arena);
+    if direct.is_ok() || segs.is_empty() { return direct; }
+    let path = segs.join("/");
+    if !visiting.insert((pkg.to_string(), path.clone())) {
+        return Err(format!("cycle in public module path '{}'/{}", pkg, path));
+    }
+
+    let mut alias_error = None;
+    // The longest existing module prefix gets first chance to export the next
+    // segment. Prefix zero is the package's root module (`lib.hv`).
+    for prefix_len in (0..segs.len()).rev() {
+        let source = if prefix_len == 0 {
+            meta.modules.iter().find(|m| m.is_root)
+        } else {
+            let key = format!("{}.hv", segs[..prefix_len].join("/"));
+            meta.modules.iter().find(|m| m.key == key)
+        };
+        let Some(source) = source else { continue };
+        let src = arena.alloc_str(&source.source);
+        let (tokens, lex_errs) = parse::lex(FileId::UNKNOWN, src);
+        let Some(tokens) = tokens.filter(|_| lex_errs.is_empty()) else { continue };
+        let tokens = arena.alloc_slice_fill_iter(tokens);
+        let (parsed, parse_errs) = parse::parse(FileId::UNKNOWN, src.len(), tokens);
+        let Some((_, mut imports, _)) = parsed.filter(|_| parse_errs.is_empty()) else { continue };
+        let mut cfg_errs = Vec::new();
+        apply_import_cfg(&mut imports, target, &mut cfg_errs);
+        if !cfg_errs.is_empty() { continue; }
+        for imp in imports {
+            if !imp.is_pub || imp.symbols.is_some()
+                || imp.path.last() != Some(&segs[prefix_len]) { continue }
+
+            // An import in a dependency module follows the same priority as
+            // ordinary imports: a bound dependency, then `self/`, then the
+            // containing directory. Append the remaining path after the alias.
+            let (next_pkg, mut next_path): (&str, Vec<&str>) =
+                if imp.path[0] != SELF_SEG && deps.contains_key(imp.path[0]) {
+                    if !dep_visible_to(imp.path[0], &deps[pkg].direct_deps, prelude_provider) {
+                        alias_error.get_or_insert_with(|| format!(
+                            "package '{}' is not a direct dependency of '{}'", imp.path[0], pkg));
+                        continue;
+                    }
+                    (imp.path[0], imp.path[1..].to_vec())
+                } else if imp.path[0] == SELF_SEG {
+                    (pkg, imp.path[1..].to_vec())
+                } else {
+                    let mut local: Vec<&str> = source.key.split('/').collect();
+                    local.pop();
+                    local.extend(imp.path.iter().copied());
+                    (pkg, local)
+                };
+            next_path.extend_from_slice(&segs[prefix_len + 1..]);
+            // A root re-export of a physical child may spell the very path we
+            // are already resolving. Its own public imports were checked as
+            // the longer module prefix above; following it again is a loop.
+            if next_pkg == pkg && next_path == segs { continue; }
+            match resolve_dep_module_path(deps, next_pkg, &next_path, arena, target,
+                                          prelude_provider, visiting) {
+                Ok(found) => {
+                    visiting.remove(&(pkg.to_string(), path));
+                    return Ok(found);
+                }
+                Err(err) => {
+                    // The source package compiled with this import, so an
+                    // unavailable nonlocal target usually means its dependency
+                    // was not bound in the consuming build.
+                    let missing_dep = imp.path[0] != SELF_SEG
+                        && !deps.contains_key(imp.path[0])
+                        && resolve_within_dep(meta, pkg, &imp.path, arena).is_err();
+                    alias_error.get_or_insert_with(|| if missing_dep {
+                        format!("public module path '{pkg}/{path}' requires dependency '{}'; bind it with `--dep {}=<path>.hvmeta`",
+                            imp.path[0], imp.path[0])
+                    } else { err });
+                }
+            }
+        }
+    }
+    visiting.remove(&(pkg.to_string(), path));
+    match direct {
+        Err(err) => Err(alias_error.unwrap_or(err)),
+        Ok(found) => Ok(found), // returned above; keeps the fallback total
+    }
+}
+
+/// A prelude provider is an implicit dependency of every package in the build.
+/// Otherwise only names declared directly by the importing package are visible.
+fn dep_visible_to(dep: &str, direct: &[String], prelude_provider: Option<&str>) -> bool {
+    prelude_provider == Some(dep) || direct.iter().any(|name| name == dep)
 }
 
 /// A raw (pre-mangling) method record, collected while desugaring an `extend`
@@ -1295,7 +1394,7 @@ struct Scopes<'a> {
 /// walks to a scope and `dsp::osc::Osc` reads a name out of it. A plain module
 /// import has no children, and a directory that also had a module of its own
 /// would fill both halves - nothing forbids it, there is just no syntax for it
-/// yet.
+/// yet. A whole-module `pub import` exports the qualifier as a child scope.
 #[derive(Default)]
 struct QualScope<'a> {
     calls: HashMap<&'a str, Sym<'a>>,
@@ -1308,6 +1407,28 @@ impl<'a> QualScope<'a> {
     fn fill_from(&mut self, st: &SymTab<'a>) {
         for (&k, v) in &st.fns { if v.is_pub { self.calls.insert(k, *v); } }
         for (&k, v) in &st.structs { if v.is_pub { self.types.insert(k, *v); } }
+    }
+
+    /// Add another module's exported qualifiers without changing the identities
+    /// of any definitions already present. Returns whether this scope grew.
+    fn merge(&mut self, other: &QualScope<'a>) -> bool {
+        let mut changed = false;
+        for (&name, &sym) in &other.calls {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.calls.entry(name) {
+                e.insert(sym);
+                changed = true;
+            }
+        }
+        for (&name, &sym) in &other.types {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.types.entry(name) {
+                e.insert(sym);
+                changed = true;
+            }
+        }
+        for (&name, child) in &other.children {
+            if self.children.entry(name).or_default().merge(child) { changed = true; }
+        }
+        changed
     }
 
     /// The descendant named by `segments`, creating empty scopes along the way.
@@ -2379,9 +2500,26 @@ fn enqueue_dep<'a>(name: &str, meta: &HavenMeta, arena: &'a Bump,
     }
 }
 
+/// An alias may point into a different bound package. Load that package too,
+/// since the resolved target's symbols and native sources belong to it.
+fn enqueue_target_deps<'a>(target: &ImportTarget<'a>, deps: &HashMap<String, HavenMeta>,
+                           arena: &'a Bump, worklist: &mut VecDeque<Pending<'a>>,
+                           seen: &HashMap<String, usize>, dep_enqueued: &mut HashSet<String>) {
+    let keys: Vec<&str> = match target {
+        ImportTarget::Module(key) => vec![key],
+        ImportTarget::Dir(members) => members.iter().map(|m| m.key.as_str()).collect(),
+    };
+    for key in keys {
+        if let Some((name, _)) = key.split_once('/')
+            && let Some(meta) = deps.get(name) {
+            enqueue_dep(name, meta, arena, worklist, seen, dep_enqueued);
+        }
+    }
+}
+
 /// Where a program's prelude comes from - the module whose `pub` items every
-/// other module sees without an import, and the only package permitted to claim
-/// lang items.
+/// other module sees without an import, and the package that chooses which
+/// lang items apply.
 ///
 /// Naming the *package* rather than a module is deliberate: which of its modules
 /// is the prelude is the package's own business, stated by the `@!prelude` mark
@@ -2516,7 +2654,8 @@ type LoadedProgram<'a> = (Vec<TopLevel<'a>>, Files<'a>, Defs<'a>, Vec<ImplDecl<'
 // loading failed.
 #[allow(clippy::result_unit_err)]
 pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: PreludeSource<'_>,
-                          deps: &HashMap<String, HavenMeta>, default_std: Option<&str>, arena: &'a Bump,
+                          deps: &HashMap<String, HavenMeta>, direct_deps: &HashSet<String>,
+                          default_std: Option<&str>, arena: &'a Bump,
                           target: &TargetSpec)
     -> Result<LoadedProgram<'a>, ()>
 {
@@ -2578,8 +2717,21 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // std on disk would report a spurious two-prelude conflict.
             let mut providers: Vec<&str> = deps.iter()
                 .filter(|(k, _)| Some(k.as_str()) != default_std)
+                .filter(|(k, _)| direct_deps.contains(k.as_str()))
                 .filter_map(|(k, m)| meta_provides_prelude(m).then_some(k.as_str()))
                 .collect();
+            // A prelude can delegate its lang items and exports to a direct
+            // dependency that also has a standalone prelude. The outer package
+            // is the provider when both are bound directly.
+            providers.retain(|candidate| !deps.iter().any(|(other, meta)|
+                other != candidate && direct_deps.contains(other)
+                    && meta_provides_prelude(meta)
+                    && meta.direct_deps.iter().any(|n| n == candidate)));
+            // The discovered default prelude likewise outranks its own direct
+            // dependencies, but an unrelated user prelude still takes over.
+            if let Some(default) = default_std.and_then(|n| deps.get(n)) {
+                providers.retain(|candidate| !default.direct_deps.iter().any(|n| n == candidate));
+            }
             providers.sort_unstable();
             match providers.as_slice() {
                 // no user dep supplies a prelude: use the discovered std if there is
@@ -2599,6 +2751,10 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             }
         }
         other => other,
+    };
+    let prelude_provider = match prelude {
+        PreludeSource::Package(name) => Some(name),
+        _ => None,
     };
 
     // the prelude's package goes on the worklist ahead of the entry, so it reads
@@ -2766,10 +2922,30 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // embedded tree exactly as before. `self` is never a dep: it is the
             // reserved package-root anchor.
             if let Some(name) = first.filter(|f| *f != SELF_SEG && deps.contains_key(*f)) {
+                let importer = p.dep.as_ref().map_or(package.as_str(), |dc| dc.package.as_str());
+                let visible = prelude_provider == Some(name)
+                    || match &p.dep {
+                        Some(dc) => deps[&dc.package].direct_deps.iter().any(|n| n == name),
+                        None => direct_deps.contains(name),
+                    };
+                if !visible {
+                    diag::report("Import error", &format!(
+                        "package '{}' is not a direct dependency of '{}'", name, importer),
+                        &imp.span, &files);
+                    had_error = true;
+                    import_keys.push(None);
+                    continue;
+                }
                 let meta = &deps[name];
                 enqueue_dep(name, meta, arena, &mut worklist, &seen, &mut dep_enqueued);
-                match resolve_within_dep(meta, name, &imp.path[1..], arena) {
-                    Ok(t) => import_keys.push(Some(t)),
+                match resolve_dep_module_path(
+                    deps, name, &imp.path[1..], arena, target, prelude_provider,
+                    &mut HashSet::new(),
+                ) {
+                    Ok(t) => {
+                        enqueue_target_deps(&t, deps, arena, &mut worklist, &seen, &mut dep_enqueued);
+                        import_keys.push(Some(t));
+                    }
                     Err(msg) => {
                         diag::report("Import error", &msg, &imp.span, &files);
                         had_error = true;
@@ -2803,10 +2979,16 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                     let resolved = if first == Some(SELF_SEG) && segs.is_empty() {
                         Err(BARE_SELF.to_string())
                     } else {
-                        resolve_within_dep(&deps[&dc.package], &dc.package, &segs, arena)
+                        resolve_dep_module_path(
+                            deps, &dc.package, &segs, arena, target, prelude_provider,
+                            &mut HashSet::new(),
+                        )
                     };
                     match resolved {
-                        Ok(t) => import_keys.push(Some(t)),
+                        Ok(t) => {
+                            enqueue_target_deps(&t, deps, arena, &mut worklist, &seen, &mut dep_enqueued);
+                            import_keys.push(Some(t));
+                        }
                         Err(msg) => {
                             diag::report("Import error", &msg, &imp.span, &files);
                             had_error = true;
@@ -2854,6 +3036,7 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         modules.push(Module {
             file,
             mid,
+            package_name: slug_pkg.to_string(),
             prelude_pkg,
             origin,
             mod_attrs,
@@ -2965,10 +3148,13 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // `check_attributes` already rejected a `@lang` with no value or an
             // unrecognized one, so this names something in `LANG_ITEMS`.
             let item = attr.value.scalar().unwrap_or_default();
+            // The AST's `def` is filled by name resolution, which has not run
+            // yet; the module's own symbol table already has the identity.
+            let Some(sym) = symtabs[i].structs.get(*name) else { continue };
 
-            // only the package supplying the prelude may claim a lang item, and
-            // claiming one is not a local decision: `@lang(delete)` decides what
-            // owning a resource *means* for every type in the program.
+            // The prelude may define a lang item itself or take it from one of
+            // its direct dependencies. This lets a richer prelude re-export a
+            // foundational package's definition without changing its identity.
             //
             // This is where the rule stops matching `@!prelude`'s, and it is not
             // an oversight. An unnominated prelude package is still perfectly
@@ -2978,15 +3164,39 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
             // package's owners as `Copy`. Ignoring the mark would be the
             // miscompile; erroring says plainly that two stdlibs do not go into
             // one program.
-            if !m.prelude_pkg {
+            let direct_to_prelude = match prelude {
+                PreludeSource::Package(provider) if provider == package => {
+                    direct_deps.contains(&m.package_name)
+                }
+                PreludeSource::Package(provider) => deps.get(provider).is_some_and(|meta|
+                    meta.direct_deps.contains(&m.package_name)),
+                _ => false,
+            };
+            let reexported_by_prelude = modules.iter().any(|pm| {
+                pm.prelude_pkg && pm.mod_attrs.iter().any(|a| a.value.name == PRELUDE_ATTR)
+                    && pm.imports.iter().zip(&pm.import_keys).any(|(imp, target)| {
+                        if !imp.is_pub || !imp.symbols.as_ref().is_some_and(|names| names.contains(name)) {
+                            return false;
+                        }
+                        let Some(ImportTarget::Module(key)) = target else { return false };
+                        modules.iter().enumerate().any(|(ti, tm)|
+                            defs.module(tm.mid).key == *key
+                                && symtabs[ti].structs.get(*name).is_some_and(|export| export.def == sym.def))
+                    })
+            });
+            let delegated = direct_to_prelude && reexported_by_prelude;
+            if !m.prelude_pkg && !delegated {
+                if direct_to_prelude {
+                    lang_errs.push(Error::new(attr.span, format!(
+                        "prelude '{}' must publicly re-export lang item '{}' from '{}'",
+                        prelude.provider(), name, m.package_name)));
+                    continue;
+                }
                 let (msg, note) = prelude.lang_item_denial(item);
                 lang_errs.push(Error::new(attr.span, msg).with_note(note));
                 continue;
             }
 
-            // the AST's `def` is filled by name resolution, which has not run
-            // yet; the module's own symbol table already has the identity.
-            let Some(sym) = symtabs[i].structs.get(*name) else { continue };
             let slot = match item {
                 "delete" => &mut lang.delete,
                 // reachable only if `LANG_ITEMS` grew without an arm here.
@@ -3069,21 +3279,51 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         if !changed { break; }
     }
 
-    // a whole-module `pub import` has no symbols to re-export - it binds a
-    // qualifier, and passing a qualifier on to *this* module's importers would
-    // need module-level namespaces the resolver doesn't have yet. Reject it
-    // outright rather than silently doing nothing.
-    for m in &modules {
-        for imp in &m.imports {
-            if imp.is_pub && imp.symbols.is_none() {
+    // Whole-module public imports export a qualifier rather than unqualified
+    // symbols. Build their namespace trees before local scopes, including
+    // qualifiers exported by the target itself. Acyclic chains settle in at
+    // most `modules.len()` passes. A cycle would otherwise grow paths forever
+    // (`a::b::a::b::...`), so reject it instead of looping indefinitely.
+    let mut exported_quals: Vec<HashMap<&'a str, QualScope<'a>>> =
+        (0..modules.len()).map(|_| HashMap::new()).collect();
+    for pass in 0..=modules.len() {
+        let mut changed = false;
+        for (id, m) in modules.iter().enumerate() {
+            for (imp, target) in m.imports.iter().zip(&m.import_keys) {
+                if !imp.is_pub || imp.symbols.is_some() { continue; }
+                let Some(target) = target else { continue };
+                let qualifier = *imp.path.last().unwrap();
+                let mut exported = QualScope::default();
+                match target {
+                    ImportTarget::Module(key) => {
+                        let target_id = seen[key];
+                        exported.fill_from(&symtabs[target_id]);
+                        for (&name, scope) in &exported_quals[target_id] {
+                            exported.children.entry(name).or_default().merge(scope);
+                        }
+                    }
+                    ImportTarget::Dir(members) => {
+                        for member in members {
+                            let target_id = seen[&member.key];
+                            let child = exported.child_at(&member.segments);
+                            child.fill_from(&symtabs[target_id]);
+                            for (&name, scope) in &exported_quals[target_id] {
+                                child.children.entry(name).or_default().merge(scope);
+                            }
+                        }
+                    }
+                }
+                if exported_quals[id].entry(qualifier).or_default().merge(&exported) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed { break; }
+        if pass == modules.len() {
+            if let Some(imp) = modules.iter().flat_map(|m| &m.imports)
+                .find(|imp| imp.is_pub && imp.symbols.is_none()) {
                 errs.push(Error::new(imp.span,
-                    format!("`pub import {}` re-exports nothing", imp.path.join("/")))
-                    .with_label(imp.span, format!(
-                        "this binds the qualifier '{}' rather than any names",
-                        imp.path.last().unwrap()))
-                    .with_note(format!(
-                        "list the symbols to re-export, e.g. `pub import {} {{ ... }}`",
-                        imp.path.join("/"))));
+                    "cycle in public module imports creates an unbounded qualifier path".to_string()));
             }
         }
     }
@@ -3139,10 +3379,13 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                     }
                 qual_owner.insert(qualifier, owner);
                 for member in members {
-                    let st = &symtabs[seen[&member.key]];
-                    scopes.quals.entry(qualifier).or_default()
-                        .child_at(&member.segments)
-                        .fill_from(st);
+                    let target_id = seen[&member.key];
+                    let child = scopes.quals.entry(qualifier).or_default()
+                        .child_at(&member.segments);
+                    child.fill_from(&symtabs[target_id]);
+                    for (&name, scope) in &exported_quals[target_id] {
+                        child.children.entry(name).or_default().merge(scope);
+                    }
                 }
                 continue;
             };
@@ -3164,7 +3407,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                     qual_owner.insert(qualifier, owner);
                     // only `pub` items are importable; private ones are invisible
                     // outside their own module.
-                    scopes.quals.entry(qualifier).or_default().fill_from(target);
+                    let qual = scopes.quals.entry(qualifier).or_default();
+                    qual.fill_from(target);
+                    for (&name, scope) in &exported_quals[target_id] {
+                        qual.children.entry(name).or_default().merge(scope);
+                    }
                 }
                 Some(syms) => {
                     // selective: the named symbols visible unqualified. a name that

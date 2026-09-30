@@ -1,0 +1,5 @@
+extend u8: Display {
+    proc display(*self) String {
+        return numerical_cast::<u64>(*self).display();
+    }
+}

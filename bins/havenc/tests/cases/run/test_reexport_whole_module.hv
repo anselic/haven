@@ -1,0 +1,16 @@
+// Whole-module public imports retain the module namespace through a chain.
+//@ exit: 0
+
+import helpers/reexport_module_mid
+import helpers/reexport_module_top
+import helpers/reexport_module_dir
+
+@export
+proc main() i32 {
+    let direct: f64 = reexport_module_mid::math::square(3.0f64);
+    let chained: f64 = reexport_module_top::reexport_module_mid::math::square(4.0f64);
+    let rect: reexport_module_dir::geo::shapes::Rect =
+        reexport_module_dir::geo::shapes::Rect::make(2, 3);
+    if (direct == 9.0f64 && chained == 16.0f64 && rect.area() == 6) { return 0; }
+    return 1;
+}

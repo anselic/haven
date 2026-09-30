@@ -1,0 +1,9 @@
+pub struct Thing { n: i32 }
+
+extend Thing {
+    pub proc new(n: i32) Thing { return Thing { n: n }; }
+    pub proc value(*self) i32 { return self.n; }
+}
+
+pub proc double(n: i32) i32 { return n * 2; }
+proc secret() i32 { return 99; }

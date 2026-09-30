@@ -1,0 +1,8 @@
+[project]
+name = "core"
+version = "0.1.0"
+kind = ["lib"]
+provides-prelude = true
+
+[[c]]
+files = ["c/rt.c"]

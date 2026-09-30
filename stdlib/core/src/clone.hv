@@ -2,8 +2,8 @@
 //! implementations can return the value itself.
 //!
 //! ```hv
-//! let a: String = String::from_str("hi");
-//! let b: String = a.clone();   // a still usable; a and b own separate buffers
+//! let a: i32 = 42;
+//! let b: i32 = a.clone();
 //! ```
 //!
 //! `Clone` is an ordinary trait and is never called implicitly. Implement it for
@@ -13,9 +13,6 @@
 //!     proc clone(*self) Point { return Point { x: self.x, y: self.y }; }
 //! }
 //! ```
-
-import string { String }
-import vec { Vec }
 
 pub trait Clone {
     proc clone(*self) Self;

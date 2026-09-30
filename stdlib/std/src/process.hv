@@ -23,7 +23,7 @@
 // `capture` adopts the shim's two malloc'd, NUL-terminated buffers straight into
 // `String`s via `from_raw_parts`/`from_bytes` (no copy), exactly as `fs::read` does.
 
-import result { Result }
+import core/result { Result }
 import string { String }
 import vec { Vec }
 

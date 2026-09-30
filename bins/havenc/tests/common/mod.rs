@@ -25,11 +25,23 @@ pub fn std_meta() -> &'static Path {
             .parent().and_then(|p| p.parent())
             .expect("repo root above bins/havenc");
         let std_dir = repo.join("stdlib/std");
+        let core_dir = repo.join("stdlib/core");
         let tmp = tempfile::tempdir().expect("temp dir for std.hvmeta");
         let meta = tmp.path().join("std.hvmeta");
+        let core_meta = tmp.path().join("core.hvmeta");
+        let core_out = Command::new(HAVENC)
+            .arg(core_dir.join("src/lib.hv"))
+            .args(["--lib", "--package-name", "core", "--prelude", "core"])
+            .arg("--c-file").arg(core_dir.join("c/rt.c"))
+            .arg("-o").arg(&core_meta)
+            .env("HAVEN_STD", "")
+            .output().expect("failed to build core.hvmeta");
+        assert!(core_out.status.success(), "building core.hvmeta failed:\n{}",
+            String::from_utf8_lossy(&core_out.stderr));
         let out = Command::new(HAVENC)
             .arg(std_dir.join("src/lib.hv"))
             .args(["--lib", "--package-name", "std", "--prelude", "std"])
+            .arg("--dep").arg(format!("core={}", core_meta.display()))
             .arg("--c-file").arg(std_dir.join("c/rt.c"))
             .arg("--c-file").arg(std_dir.join("c/env.c"))
             .arg("--c-file").arg(std_dir.join("c/fs.c"))

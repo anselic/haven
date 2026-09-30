@@ -1,0 +1,2 @@
+// Re-export a module that itself exports a module qualifier.
+pub import reexport_module_mid

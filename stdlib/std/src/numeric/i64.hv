@@ -1,0 +1,23 @@
+proc push_i64(s: *String, n: i64) {
+    if (n >= 10i64) {
+        push_i64(s, n / 10i64);
+    }
+    s.push_byte(numerical_cast::<u8>(48i64 + (n % 10i64)));
+}
+
+proc i64_string(n: i64) String {
+    let s: String = String::new();
+    if (n < 0i64) {
+        s.push_byte(45u8); // '-'
+        push_i64(&s, 0i64 - n);
+    } else {
+        push_i64(&s, n);
+    }
+    return s;
+}
+
+extend i64: Display {
+    proc display(*self) String {
+        return i64_string(*self);
+    }
+}

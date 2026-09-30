@@ -36,16 +36,21 @@ use sha2::{Digest, Sha256};
 /// the artifact stays target-independent (see [`fingerprint`]).
 ///
 /// v3 added build-script-provided library search paths and raw linker arguments.
-pub const FORMAT_VERSION: u32 = 3;
+/// v4 records direct dependency names for package-scoped import visibility.
+pub const FORMAT_VERSION: u32 = 4;
 
 /// A complete `.hvmeta` artifact: a header, the package's own source modules, and
 /// its native code (C source + libraries to link).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HavenMeta {
     pub header: Header,
-    /// This package's OWN source modules only — never `std`/prelude, which the
-    /// leaf already embeds and re-resolves against its own copy.
+    /// This package's own source modules only. Dependency modules are carried
+    /// by their own artifacts and re-resolved when a consumer compiles.
     pub modules: Vec<MetaModule>,
+    /// Packages this library may import directly. Consumers still bind the
+    /// complete transitive closure, but these names govern this package's own
+    /// imports when its source is compiled in a downstream build.
+    pub direct_deps: Vec<String>,
     /// C source files this package ships (the `[[c]] files` of its manifest). A
     /// consumer compiles and links these into any program that depends on the
     /// package. Source, not objects: the artifact stays target-independent and the
@@ -130,6 +135,7 @@ pub fn fingerprint(
     package_name: &str,
     havenc_version: &str,
     modules: &[MetaModule],
+    direct_deps: &[String],
     native: &[NativeSource],
     link_libs: &[String],
     link_search: &[String],
@@ -152,6 +158,10 @@ pub fn fingerprint(
         feed(&mut h, m.key.as_bytes());
         feed(&mut h, m.source.as_bytes());
     }
+    let mut sorted_deps: Vec<&String> = direct_deps.iter().collect();
+    sorted_deps.sort();
+    feed(&mut h, &(sorted_deps.len() as u64).to_le_bytes());
+    for dep in sorted_deps { feed(&mut h, dep.as_bytes()); }
     feed(&mut h, &(sorted_native.len() as u64).to_le_bytes());
     for n in sorted_native {
         feed(&mut h, n.name.as_bytes());
@@ -209,13 +219,17 @@ pub fn write(path: &Path, meta: &HavenMeta) -> Result<(), MetaError> {
 /// Read and validate a `.hvmeta` from `path`, rejecting a format-version mismatch.
 pub fn read(path: &Path) -> Result<HavenMeta, MetaError> {
     let bytes = std::fs::read(path).map_err(MetaError::Io)?;
-    let meta: HavenMeta = bincode::deserialize(&bytes).map_err(MetaError::Decode)?;
-    if meta.header.format_version != FORMAT_VERSION {
+    // Read the stable header prefix first. An older layout may not deserialize
+    // as this version's full struct, but should still report its version clearly.
+    let header: Header = bincode::deserialize_from(&mut std::io::Cursor::new(&bytes))
+        .map_err(MetaError::Decode)?;
+    if header.format_version != FORMAT_VERSION {
         return Err(MetaError::VersionMismatch {
-            found: meta.header.format_version,
+            found: header.format_version,
             expected: FORMAT_VERSION,
         });
     }
+    let meta: HavenMeta = bincode::deserialize(&bytes).map_err(MetaError::Decode)?;
     Ok(meta)
 }
 
@@ -224,7 +238,7 @@ mod tests {
     use super::*;
 
     fn sample(modules: Vec<MetaModule>) -> HavenMeta {
-        let fp = fingerprint("foo", "0.1.0", &modules, &[], &[], &[], &[]);
+        let fp = fingerprint("foo", "0.1.0", &modules, &[], &[], &[], &[], &[]);
         HavenMeta {
             header: Header {
                 format_version: FORMAT_VERSION,
@@ -233,6 +247,7 @@ mod tests {
                 fingerprint: fp,
             },
             modules,
+            direct_deps: vec![],
             native: vec![],
             link_libs: vec![],
             link_search: vec![],
@@ -277,38 +292,39 @@ mod tests {
         let mut native_reordered = native_a();
         native_reordered.reverse();
         assert_eq!(
-            fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &["m".into()], &[], &[]),
-            fingerprint("foo", "0.1.0", &reordered, &native_reordered, &["m".into()], &[], &[]),
+            fingerprint("foo", "0.1.0", &mods_a(), &[], &native_a(), &["m".into()], &[], &[]),
+            fingerprint("foo", "0.1.0", &reordered, &[], &native_reordered, &["m".into()], &[], &[]),
         );
     }
 
     #[test]
     fn fingerprint_changes_with_content() {
-        let base = fingerprint("foo", "0.1.0", &mods_a(), &[], &[], &[], &[]);
+        let base = fingerprint("foo", "0.1.0", &mods_a(), &[], &[], &[], &[], &[]);
         let mut changed = mods_a();
         changed[0].source.push_str(" // tweak");
-        assert_ne!(base, fingerprint("foo", "0.1.0", &changed, &[], &[], &[], &[]));
+        assert_ne!(base, fingerprint("foo", "0.1.0", &changed, &[], &[], &[], &[], &[]));
         // name and compiler version both participate
-        assert_ne!(base, fingerprint("bar", "0.1.0", &mods_a(), &[], &[], &[], &[]));
-        assert_ne!(base, fingerprint("foo", "0.2.0", &mods_a(), &[], &[], &[], &[]));
+        assert_ne!(base, fingerprint("bar", "0.1.0", &mods_a(), &[], &[], &[], &[], &[]));
+        assert_ne!(base, fingerprint("foo", "0.2.0", &mods_a(), &[], &[], &[], &[], &[]));
+        assert_ne!(base, fingerprint("foo", "0.1.0", &mods_a(), &["core".into()], &[], &[], &[], &[]));
     }
 
     #[test]
     fn fingerprint_changes_with_native_code() {
         // a lib that differs only in its C source, or only in a `-l` it requests,
         // must not fingerprint identically - else a stale-dep check links old code.
-        let base = fingerprint("foo", "0.1.0", &mods_a(), &[], &[], &[], &[]);
-        assert_ne!(base, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[], &[], &[]));
+        let base = fingerprint("foo", "0.1.0", &mods_a(), &[], &[], &[], &[], &[]);
+        assert_ne!(base, fingerprint("foo", "0.1.0", &mods_a(), &[], &native_a(), &[], &[], &[]));
 
-        let with_native = fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[], &[], &[]);
+        let with_native = fingerprint("foo", "0.1.0", &mods_a(), &[], &native_a(), &[], &[], &[]);
         let mut tweaked = native_a();
         tweaked[0].source.push_str(" /* tweak */");
-        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &tweaked, &[], &[], &[]));
+        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &[], &tweaked, &[], &[], &[]));
 
         // a changed link-lib set participates too
-        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &["m".into()], &[], &[]));
-        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[], &["lib".into()], &[]));
-        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &native_a(), &[], &[], &["archive.a".into()]));
+        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &[], &native_a(), &["m".into()], &[], &[]));
+        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &[], &native_a(), &[], &["lib".into()], &[]));
+        assert_ne!(with_native, fingerprint("foo", "0.1.0", &mods_a(), &[], &native_a(), &[], &[], &["archive.a".into()]));
     }
 
     #[test]

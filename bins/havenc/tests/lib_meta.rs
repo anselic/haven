@@ -108,11 +108,11 @@ fn embeds_c_sources_and_link_libs() {
     // that includes it, and dropping it changes the digest.
     let recomputed = haven_meta::fingerprint(
         &meta.header.package_name, &meta.header.havenc_version, &meta.modules,
-        &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args);
+        &meta.direct_deps, &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args);
     assert_eq!(meta.header.fingerprint, recomputed);
     let without_native = haven_meta::fingerprint(
         &meta.header.package_name, &meta.header.havenc_version, &meta.modules,
-        &[], &[], &[], &[]);
+        &meta.direct_deps, &[], &[], &[], &[]);
     assert_ne!(meta.header.fingerprint, without_native);
 }
 
@@ -174,7 +174,7 @@ fn round_trips_with_correct_modules_and_no_std() {
     // fingerprint in the header matches a fresh recompute over the modules.
     let recomputed = haven_meta::fingerprint(
         &meta.header.package_name, &meta.header.havenc_version, &meta.modules,
-        &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args);
+        &meta.direct_deps, &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args);
     assert_eq!(meta.header.fingerprint, recomputed);
 }
 
@@ -274,8 +274,8 @@ fn fingerprint_ignores_module_load_order() {
     let mut reversed = meta.modules.clone();
     reversed.reverse();
     assert_eq!(
-        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &meta.modules, &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args),
-        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &reversed, &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args),
+        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &meta.modules, &meta.direct_deps, &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args),
+        haven_meta::fingerprint(&meta.header.package_name, &meta.header.havenc_version, &reversed, &meta.direct_deps, &meta.native, &meta.link_libs, &meta.link_search, &meta.link_args),
     );
 }
 

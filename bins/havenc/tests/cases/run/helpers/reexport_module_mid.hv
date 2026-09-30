@@ -1,0 +1,2 @@
+// A dependency module is available under this module's public qualifier.
+pub import std/math

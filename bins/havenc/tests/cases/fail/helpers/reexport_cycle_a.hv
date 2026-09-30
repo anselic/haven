@@ -1,0 +1,2 @@
+pub import reexport_cycle_b
+pub proc a() i32 { return 1; }

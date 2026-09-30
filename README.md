@@ -33,8 +33,9 @@ $ havenc --version
 # To uninstall the binaries with the script, you can also run:
 $ python install.py --uninstall [--path <install_path>]
 ```
-The script will also install and compile the standard library, which is required
-for compiling any haven program.
+The script also builds and installs `core.hvmeta` and `std.hvmeta` together.
+`std` depends on `core` and is the default prelude. A program can use `core`
+without `std` by selecting `core` as its prelude.
 
 ## Directory Structure
 ```
@@ -48,8 +49,8 @@ crates/
 ├── haven_front/    # frontend-related code (lexer, parser, modules)
 ├── haven_meta/     # .hvmeta metadata artifacts (for dependencies compilation)
 └── haven_mid/      # middle-end code (type checking, semantic analysis, etc.)
-stdlib/
-└── std/            # haven standard library package
+stdlib/             # default packages provided with the compiler
+└── ...
 ```
 
 ## License

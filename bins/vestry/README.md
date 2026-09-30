@@ -15,6 +15,11 @@ name = "..."
 package-name = { version = "1.0.0", path = "path/to/package" }
 ```
 
+A package can import only dependencies listed in its own manifest. Vestry builds
+the full transitive graph, so a dependency can use its dependencies and publicly
+re-export their APIs. Consumers import those APIs through the direct dependency's
+package path.
+
 ## Build scripts
 
 A vestry project can run a Haven script before compilation and a separate packaging script after its artifact exists:

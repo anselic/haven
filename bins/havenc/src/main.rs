@@ -46,7 +46,7 @@ fn main() {
     // as a clean diagnostic before compilation rather than mid-resolution. The
     // parsed source travels into `load_and_merge`, which resolves an `import
     // name/...` against it exactly the way it resolves `std/...`.
-    let mut deps = load_deps(&args.dep);
+    let (mut deps, direct_deps, mut artifact_paths) = load_deps(&args.dep, &args.available_dep);
 
     // The compiler embeds no std of its own: it discovers the `std` library on
     // disk (see `discover_std`) and binds it exactly like a `--dep std=...` would,
@@ -62,11 +62,13 @@ fn main() {
             .unwrap_or_else(|| "pkg".to_string())
     });
     let mut default_std: Option<&str> = None;
-    if self_pkg != "std" && !deps.contains_key("std")
-        && let Some(std_meta) = discover_std() {
+    if args.prelude.as_deref() != Some(self_pkg.as_str()) && !deps.contains_key("std")
+        && let Some((std_meta, path)) = discover_std() {
             deps.insert("std".to_string(), std_meta);
+            artifact_paths.push(("std".to_string(), path));
             default_std = Some("std");
         }
+    load_adjacent_deps(&mut deps, artifact_paths);
 
     // where the prelude comes from. `--no-prelude` and `--prelude <name>` are
     // mutually exclusive at the CLI, so the three cases are disjoint.
@@ -86,7 +88,8 @@ fn main() {
     // `defs` owns every definition's identity: it produced the symbol names now
     // in `ast`, and carries the member table both typecheck passes use.
     let (mut ast, files, mut defs, impls, package_name) = match module::load_and_merge(
-        input, args.package_name.as_deref(), prelude, &deps, default_std, &arena, &target) {
+        input, args.package_name.as_deref(), prelude, &deps, &direct_deps,
+        default_std, &arena, &target) {
         Ok(loaded) => loaded,
         Err(()) => std::process::exit(1),
     };
@@ -150,7 +153,7 @@ fn main() {
             // Validation above operates on rebuilt concrete code. The artifact
             // stores original source so consumers can instantiate generic templates.
             write_lib_metadata(
-                input, &package_name, &defs, &files, &args.c_file,
+                input, &package_name, &defs, &files, &direct_deps, &args.c_file,
                 &args.link_lib, &args.link_search, &args.link_arg, &args.output,
             );
         } else {
@@ -580,19 +583,20 @@ fn temp_file(suffix: &str) -> tempfile::NamedTempFile {
 /// Returns `None` when nothing is set and no sibling artifact exists, letting the
 /// caller fall back to the (soon-to-be-removed) embedded tree. A found-but-wrong
 /// artifact is a hard error rather than a silent fallback.
-fn discover_std() -> Option<haven_meta::HavenMeta> {
+fn discover_std() -> Option<(haven_meta::HavenMeta, std::path::PathBuf)> {
     if let Some(val) = std::env::var_os("HAVEN_STD") {
         if val.is_empty() {
             return None; // explicit opt-out
         }
-        return Some(load_std_from(std::path::Path::new(&val), "$HAVEN_STD"));
+        let path = std::path::PathBuf::from(val);
+        return Some((load_std_from(&path, "$HAVEN_STD"), path));
     }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     for rel in ["std.hvmeta", "../lib/haven/std.hvmeta"] {
         let cand = dir.join(rel);
         if cand.is_file() {
-            return Some(load_std_from(&cand, "the compiler's sysroot"));
+            return Some((load_std_from(&cand, "the compiler's sysroot"), cand));
         }
     }
     None
@@ -629,9 +633,13 @@ fn load_std_from(path: &std::path::Path, whence: &str) -> haven_meta::HavenMeta 
 /// to modules slugged `foo.*` and silently disagree with the library's own build.
 /// Exits the process on any malformed spec, unreadable/incompatible artifact, or
 /// duplicate name.
-fn load_deps(specs: &[String]) -> std::collections::HashMap<String, haven_meta::HavenMeta> {
+fn load_deps(direct: &[String], available: &[String])
+    -> (std::collections::HashMap<String, haven_meta::HavenMeta>, std::collections::HashSet<String>, Vec<(String, std::path::PathBuf)>) {
     let mut deps = std::collections::HashMap::new();
-    for spec in specs {
+    let mut direct_names = std::collections::HashSet::new();
+    let mut paths = Vec::new();
+    for (spec, is_direct) in direct.iter().map(|s| (s, true))
+        .chain(available.iter().map(|s| (s, false))) {
         let (name, path) = match spec.split_once('=') {
             Some((n, p)) if !n.is_empty() && !p.is_empty() => (n, p),
             _ => {
@@ -661,15 +669,55 @@ fn load_deps(specs: &[String]) -> std::collections::HashMap<String, haven_meta::
                 "dependency '{}' is specified more than once", name));
             std::process::exit(1);
         }
+        if is_direct { direct_names.insert(name.to_string()); }
+        paths.push((name.to_string(), std::path::PathBuf::from(path)));
     }
-    deps
+    (deps, direct_names, paths)
+}
+
+/// Load dependencies installed beside an artifact, recursively. Explicit CLI
+/// bindings take priority, as Vestry may keep artifacts in separate directories.
+/// These sidecars only make definitions available; they never enter the root
+/// package's direct import scope.
+fn load_adjacent_deps(
+    deps: &mut std::collections::HashMap<String, haven_meta::HavenMeta>,
+    paths: Vec<(String, std::path::PathBuf)>,
+) {
+    let mut pending = paths;
+    while let Some((provider, path)) = pending.pop() {
+        let Some(meta) = deps.get(&provider) else { continue };
+        let names = meta.direct_deps.clone();
+        for name in names {
+            let sidecar = path.with_file_name(format!("{name}.hvmeta"));
+            if let Some(bound) = deps.get(&name) {
+                if sidecar.is_file() {
+                    let installed = haven_meta::read(&sidecar).unwrap_or_else(|e| fatal(format!(
+                        "cannot load '{}' beside '{}': {}", name, path.display(), e)));
+                    if installed.header.fingerprint != bound.header.fingerprint {
+                        fatal(format!(
+                            "package '{}' is bound to a different artifact than the one required beside '{}'; package names must identify one artifact in a build",
+                            name, path.display()));
+                    }
+                }
+                continue;
+            }
+            let dep = haven_meta::read(&sidecar).unwrap_or_else(|e| fatal(format!(
+                "dependency '{}' required by '{}' is unavailable: cannot load '{}': {}",
+                name, provider, sidecar.display(), e)));
+            if dep.header.package_name != name {
+                fatal(format!("artifact '{}' is package '{}', expected '{}'",
+                    sidecar.display(), dep.header.package_name, name));
+            }
+            deps.insert(name.clone(), dep);
+            pending.push((name, sidecar));
+        }
+    }
 }
 
 /// Assemble and write a native library's `.hvmeta` artifact: a header, every one
 /// of the package's OWN source modules, and its native code (the `--c-file`
-/// sources and `--link-lib` names). `std`/prelude are excluded - they are embedded
-/// in every `havenc`, so a consumer re-resolves `import std/...` against its own
-/// copy. Module keys are made package-root-relative and forward-slashed, so the
+/// sources and `--link-lib` names). Dependencies are excluded and loaded from
+/// their own artifacts by each consumer. Module keys are package-root-relative and forward-slashed, so the
 /// artifact carries no absolute path and fingerprints identically from any checkout
 /// location; the C files are carried by base name only, for the same reason. Exits
 /// the process on any error.
@@ -678,6 +726,7 @@ fn write_lib_metadata(
     package_name: &str,
     defs: &haven_common::defs::Defs<'_>,
     files: &haven_common::diag::Files<'_>,
+    direct_deps: &std::collections::HashSet<String>,
     c_files: &[std::path::PathBuf],
     link_libs: &[String],
     link_search: &[String],
@@ -760,8 +809,10 @@ fn write_lib_metadata(
     let link_args = link_args.to_vec();
 
     let havenc_version = env!("CARGO_PKG_VERSION").to_string();
+    let mut direct_deps: Vec<String> = direct_deps.iter().cloned().collect();
+    direct_deps.sort();
     let fingerprint = haven_meta::fingerprint(
-        package_name, &havenc_version, &modules, &native,
+        package_name, &havenc_version, &modules, &direct_deps, &native,
         &link_libs, &link_search, &link_args,
     );
     let meta = haven_meta::HavenMeta {
@@ -772,6 +823,7 @@ fn write_lib_metadata(
             fingerprint,
         },
         modules,
+        direct_deps,
         native,
         link_libs,
         link_search,

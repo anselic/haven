@@ -9,8 +9,8 @@
 // trying to destroy their old contents.
 
 import alloc { alloc, realloc, dealloc }
-import option { Option }
-import iter { IntoIterator, Iterator }
+import core/option { Option }
+import core/iter { IntoIterator, Iterator }
 
 pub struct Vec<T> {
     data: *T,  /// heap buffer, or null when cap == 0

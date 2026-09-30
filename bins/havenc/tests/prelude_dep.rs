@@ -97,6 +97,31 @@ fn build_mini(dir: &Path) -> std::process::Output {
         &["--prelude", "mini", "--c-file", "mini/rt.c"], &dir.join("mini"))
 }
 
+#[test]
+fn delegated_lang_item_must_be_publicly_reexported() {
+    let dir = tempfile::tempdir().unwrap();
+    scaffold(dir.path(), &[
+        ("base/lib.hv", "@!prelude\n@lang(delete)\npub trait Delete { proc delete(*self); }\n"),
+        ("outer/lib.hv", "@!prelude\nimport base { Delete }\n"),
+    ]);
+    let base = dir.path().join("base.hvmeta");
+    let built = build_lib(dir.path(), "base/lib.hv", "base",
+        &["--prelude", "base"], &base);
+    assert!(built.status.success(), "base failed: {}", stderr_of(&built));
+    let binding = format!("base={}", base.display());
+    let outer = dir.path().join("outer.hvmeta");
+    let flags = ["--prelude", "outer", "--dep", binding.as_str()];
+    let private = build_lib(dir.path(), "outer/lib.hv", "outer", &flags, &outer);
+    assert!(!private.status.success(), "private lang-item import must fail");
+    assert!(stderr_of(&private).contains("must publicly re-export lang item"),
+        "wrong diagnostic: {}", stderr_of(&private));
+
+    std::fs::write(dir.path().join("outer/lib.hv"),
+        "@!prelude\npub import base { Delete }\n").unwrap();
+    let public = build_lib(dir.path(), "outer/lib.hv", "outer", &flags, &outer);
+    assert!(public.status.success(), "public lang-item delegation failed: {}", stderr_of(&public));
+}
+
 /// The whole point: a program's prelude comes from a dependency. `say` and
 /// `double` are called with no import at all, and the program never mentions
 /// `mini`.

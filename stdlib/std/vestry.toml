@@ -4,6 +4,9 @@ version = "0.1.0"
 kind = ["lib"]
 provides-prelude = true
 
+[dependencies]
+core = { path = "../core" }
+
 [[c]]
 files = ["c/atomic.c", "c/env.c", "c/fs.c", "c/process.c", "c/rt.c"]
 libs = ["m"]

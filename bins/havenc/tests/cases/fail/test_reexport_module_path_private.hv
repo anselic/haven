@@ -1,0 +1,9 @@
+// An ordinary import must not create a public path in the importing package.
+//@ dep: corebox=bins/havenc/tests/pkgs/corebox
+//@ dep: facade=bins/havenc/tests/pkgs/facade
+//@ error: has no module 'bridge/shapes'
+
+import facade/bridge/shapes
+
+@export
+proc main() i32 { return 0; }

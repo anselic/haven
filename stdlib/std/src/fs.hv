@@ -18,7 +18,7 @@
 // `Vec<u8>` via `from_raw_parts` (no copy), since rt_alloc and libc malloc are
 // the same allocator.
 
-import result { Result, Unit }
+import core/result { Result, Unit }
 import string { String }
 import vec { Vec }
 

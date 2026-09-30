@@ -54,8 +54,19 @@ fn std_meta() -> &'static Path {
             .parent().and_then(|p| p.parent())
             .expect("repo root above bins/havenc");
         let std_dir = repo.join("stdlib/std");
+        let core_dir = repo.join("stdlib/core");
         let tmp = tempfile::tempdir().expect("temp dir for std.hvmeta");
         let meta = tmp.path().join("std.hvmeta");
+        let core_meta = tmp.path().join("core.hvmeta");
+        let core_status = Command::new(COMPILER_BIN)
+            .arg(core_dir.join("src/lib.hv"))
+            .args(["--lib", "--package-name", "core", "--prelude", "core"])
+            .arg("--c-file").arg(core_dir.join("c/rt.c"))
+            .arg("-o").arg(&core_meta)
+            .env("HAVEN_STD", "")
+            .output().expect("failed to spawn havenc to build core.hvmeta");
+        assert!(core_status.status.success(), "building core.hvmeta failed:\n{}",
+            String::from_utf8_lossy(&core_status.stderr));
         // every `.c` in the package's `c/` directory, discovered rather than
         // listed: a hardcoded list silently drops a newly added runtime file,
         // and the resulting failure is a link error in whichever fixture happens
@@ -69,7 +80,8 @@ fn std_meta() -> &'static Path {
         assert!(!c_files.is_empty(), "no .c files found in the std package");
         let mut cmd = Command::new(COMPILER_BIN);
         cmd.arg(std_dir.join("src/lib.hv"))
-            .args(["--lib", "--package-name", "std", "--prelude", "std"]);
+            .args(["--lib", "--package-name", "std", "--prelude", "std"])
+            .arg("--dep").arg(format!("core={}", core_meta.display()));
         for f in &c_files {
             cmd.arg("--c-file").arg(f);
         }

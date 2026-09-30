@@ -1,0 +1,6 @@
+//@ error: cycle in public module imports
+
+import helpers/reexport_cycle_a
+
+@export
+proc main() i32 { return 0; }

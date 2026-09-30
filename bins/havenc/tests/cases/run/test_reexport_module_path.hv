@@ -1,0 +1,18 @@
+// A package root's public module imports become importable virtual paths.
+//@ exit: 0
+//@ dep: corebox=bins/havenc/tests/pkgs/corebox
+//@ dep: facade=bins/havenc/tests/pkgs/facade
+//@ dep: facade2=bins/havenc/tests/pkgs/facade2
+
+import facade/thing { Thing }
+import facade/shapes/rect { area }
+import facade/bridge/thing
+import facade2/thing { double }
+
+@export
+proc main() i32 {
+    let t: Thing = Thing::new(7);
+    if (t.value() == 7 && double(4) == 8 && area(2, 3) == 6
+        && thing::double(5) == 10) { return 0; }
+    return 1;
+}

@@ -250,8 +250,13 @@ fn cmd_build(opts: BuildOpts<'_>) -> Result<PathBuf, String> {
 /// full dependency closure, then compile `project` against it. When
 /// `force_executable` is set (as `run` requires), the manifest's `kind` is
 /// overridden to build an executable so there is a binary to launch.
-/// A dependency's package name and the path to its built `.hvmeta` file.
-type DepBinding = (String, PathBuf);
+/// A dependency's package name, source identity, and built artifact.
+#[derive(Clone)]
+struct DepBinding {
+    name: String,
+    root: PathBuf,
+    artifact: PathBuf,
+}
 /// Caches each package's built `.hvmeta` file and all of its dependencies.
 type DepCache = HashMap<PathBuf, (PathBuf, Vec<DepBinding>)>;
 
@@ -277,29 +282,37 @@ fn canonical_root(project: &Project) -> PathBuf {
 }
 
 /// Build every package reachable from `project` through `[dependencies]` and
-/// return the flat `(name, artifact)` set to bind as `--dep` when `project`
-/// compiles. The set is *transitive*: an intermediate library's own
-/// dependencies have to be bound at the leaf too, because a `.hvmeta` records no
-/// dependency list, so the leaf re-resolves the intermediate's `import`s itself.
+/// return the flat artifact set to bind when `project` compiles. The set is
+/// transitive because the leaf re-resolves each library's imports from source.
+/// Each artifact records its direct dependency names for visibility checks.
 fn dep_closure(
     project: &Project,
     opts: BuildOpts<'_>,
     cache: &mut DepCache,
     on_stack: &mut Vec<PathBuf>,
 ) -> Result<Vec<DepBinding>, String> {
-    // BTreeMap dedups a diamond by package name and keeps the command line
-    // deterministic; a direct dependency wins over the same name reached only
-    // transitively.
-    let mut flat: BTreeMap<String, PathBuf> = BTreeMap::new();
+    // The compiler's symbols are named by package name, so two different
+    // package roots with the same name cannot coexist in one build. Reject the
+    // conflict instead of silently selecting whichever branch was visited first.
+    let mut flat: BTreeMap<String, DepBinding> = BTreeMap::new();
     for dep in project.dependencies()? {
         let (artifact, sub) = build_dependency(&dep.project, opts, cache, on_stack)
             .map_err(|e| format!("dependency `{}`: {}", dep.name, e))?;
-        for (name, path) in sub {
-            flat.entry(name).or_insert(path);
+        for binding in sub.into_iter().chain(std::iter::once(DepBinding {
+            name: dep.name.clone(),
+            root: canonical_root(&dep.project),
+            artifact,
+        })) {
+            if let Some(prev) = flat.get(&binding.name)
+                && prev.root != binding.root {
+                return Err(format!(
+                    "two different packages are named '{}': '{}' and '{}'. Package names must be unique in one build",
+                    binding.name, prev.root.display(), binding.root.display()));
+            }
+            flat.insert(binding.name.clone(), binding);
         }
-        flat.insert(dep.name.clone(), artifact);
     }
-    Ok(flat.into_iter().collect())
+    Ok(flat.into_values().collect())
 }
 
 /// Build one library dependency to its `.hvmeta`, memoized so a package shared
@@ -332,7 +345,7 @@ fn build_dependency(
 /// run its post-build hook. Dependency resolution is the caller's job.
 fn compile_project(
     project: &Project,
-    deps: &[(String, PathBuf)],
+    deps: &[DepBinding],
     force_executable: bool,
     opts: BuildOpts<'_>,
 ) -> Result<PathBuf, String> {
@@ -399,8 +412,13 @@ fn compile_project(
         Output::Executable => {}
     }
 
-    for (name, artifact) in deps {
-        cmd.arg("--dep").arg(format!("{}={}", name, artifact.display()));
+    for binding in deps {
+        let flag = if project.dependencies.contains_key(&binding.name) {
+            "--dep"
+        } else {
+            "--available-dep"
+        };
+        cmd.arg(flag).arg(format!("{}={}", binding.name, binding.artifact.display()));
     }
 
     // A prelude-providing package (only `std` today) nominates itself: its

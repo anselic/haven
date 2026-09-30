@@ -216,3 +216,8 @@ extend String: Clone {
     @noalias
     proc clone(*self) String { return String::from_str(self.as_str()); }
 }
+
+// a `String` renders as a copy of itself, so the result is independently owned.
+extend String: Display {
+    proc display(*self) String { return String::from_str(self.as_str()); }
+}

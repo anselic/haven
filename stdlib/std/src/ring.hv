@@ -6,8 +6,8 @@
 
 import alloc { alloc, dealloc }
 import numeric/u64
-import option { Option }
-import iter { IntoIterator, Iterator }
+import core/option { Option }
+import core/iter { IntoIterator, Iterator }
 
 /// A queue whose indices wrap around a fixed buffer.
 pub struct Ring<T> {

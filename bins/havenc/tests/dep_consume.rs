@@ -213,8 +213,8 @@ fn generics_across_boundary() {
     assert_eq!(stdout_of(&run), "12\n");
 }
 
-/// The dep and the program both `import std/math`. std must resolve to the leaf's
-/// single embedded copy for both, so `square` is defined exactly once — a second
+/// The dep and the program both `import std/math`. The re-export resolves to
+/// one `core/math` definition for both, so `square` is defined exactly once; a second
 /// copy would be a duplicate-symbol link error. The program links and runs.
 #[test]
 fn std_is_shared_not_doubled() {
@@ -237,16 +237,16 @@ fn std_is_shared_not_doubled() {
 
     let app = dir.path().join("app");
     let res = build_app(dir.path(), "main.hv", "app", &["baz=baz.hvmeta"], &app);
-    // linking is itself the test: if std were loaded twice, `std.math$square`
+    // linking is itself the test: if core were loaded twice, `core.math$square`
     // would be a duplicate LLVM symbol and this link would fail.
     assert!(res.status.success(), "std-shared build failed: {}", String::from_utf8_lossy(&res.stderr));
 
-    // and, directly: exactly one definition of the mangled std proc.
+    // and, directly: exactly one definition with core's original identity.
     let ll = std::fs::read_to_string(app.with_extension("ll")).unwrap();
     let defs = ll.lines()
-        .filter(|l| l.trim_start().starts_with("define") && l.contains("std.math$square"))
+        .filter(|l| l.trim_start().starts_with("define") && l.contains("core.math$square"))
         .count();
-    assert_eq!(defs, 1, "std/math::square defined {defs} times (std double-loaded?)");
+    assert_eq!(defs, 1, "core/math::square defined {defs} times (re-export lost identity?)");
 
     // (9+1) + 4 == 14 > 13.
     let run = Command::new(exe(&app)).output().unwrap();
@@ -328,7 +328,7 @@ fn version_mismatch_errors_cleanly() {
         source: "pub proc thing() i32 { return 1; }\n".into(),
         is_root: true,
     }];
-    let fp = haven_meta::fingerprint("qux", "0.0.0", &modules, &[], &[], &[], &[]);
+    let fp = haven_meta::fingerprint("qux", "0.0.0", &modules, &[], &[], &[], &[], &[]);
     let bad = haven_meta::HavenMeta {
         header: haven_meta::Header {
             format_version: haven_meta::FORMAT_VERSION + 1,
@@ -337,6 +337,7 @@ fn version_mismatch_errors_cleanly() {
             fingerprint: fp,
         },
         modules,
+        direct_deps: vec![],
         native: vec![],
         link_libs: vec![],
         link_search: vec![],

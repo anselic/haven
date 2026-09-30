@@ -10,7 +10,7 @@
 // backed by rt_alloc/rt_realloc/rt_free in std/c/rt.c (always linked in). the raw
 // externs deal in untyped `*void`; the generic wrappers add the typing + sizing.
 
-import option { Option }
+import core/option { Option }
 
 extern rt_alloc(size: u64) *void with Alloc;
 extern rt_realloc(ptr: *void, size: u64) *void with Alloc;

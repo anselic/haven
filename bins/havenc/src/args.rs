@@ -98,14 +98,20 @@ pub struct Args {
     #[arg(long, value_name = "NAME")]
     pub package_name: Option<String>,
 
-    /// Consume a compiled Haven library: `--dep <name>=<path.hvmeta>`. Repeatable.
+    /// Bind a direct dependency: `--dep <name>=<path.hvmeta>`. Repeatable.
     /// An `import <name>/<module>` in this program then resolves against the named
     /// artifact's source (produced by `havenc --lib`) instead of the filesystem,
     /// merged under package name `<name>` so it re-derives the library's own
     /// package-anchored symbols. v1: one explicit dep per flag, no version or
-    /// lockfile resolution and no transitive deps.
+    /// lockfile resolution. Also use `--available-dep` for transitive artifacts.
     #[arg(long = "dep", value_name = "NAME=PATH")]
     pub dep: Vec<String>,
+
+    /// Make a transitive dependency artifact available for resolving a direct
+    /// dependency's source and public re-exports. It is not directly importable
+    /// by the package being compiled.
+    #[arg(long = "available-dep", value_name = "NAME=PATH")]
+    pub available_dep: Vec<String>,
 
     /// A C source file this package ships (`--c-file <path>`, repeatable). Only
     /// meaningful with `--lib`: the source is embedded verbatim into the emitted

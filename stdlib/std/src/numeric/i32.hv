@@ -1,0 +1,5 @@
+extend i32: Display {
+    proc display(*self) String {
+        return numerical_cast::<i64>(*self).display();
+    }
+}

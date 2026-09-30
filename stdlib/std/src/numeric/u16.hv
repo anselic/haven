@@ -7,3 +7,9 @@ extend u16 {
             | ((numerical_cast::<u32>(self) << 8u32) & 0xff00u32));
     }
 }
+
+extend u16: Display {
+    proc display(*self) String {
+        return numerical_cast::<u64>(*self).display();
+    }
+}

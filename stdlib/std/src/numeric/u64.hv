@@ -153,3 +153,18 @@ extend u64 {
         return self.swap_bytes().to_le_bytes();
     }
 }
+
+proc push_u64(s: *String, n: u64) {
+    if (n >= 10u64) {
+        push_u64(s, n / 10u64);
+    }
+    s.push_byte(numerical_cast::<u8>(48u64 + (n % 10u64)));
+}
+
+proc u64_string(n: u64) String {
+    let s: String = String::new();
+    push_u64(&s, n);
+    return s;
+}
+
+extend u64: Display { proc display(*self) String { return u64_string(*self); } }

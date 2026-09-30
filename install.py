@@ -8,7 +8,7 @@ import argparse
 import subprocess
 from pathlib import Path
 
-STD_ARTIFACT = "std.hvmeta"
+LIB_ARTIFACTS = ("core.hvmeta", "std.hvmeta")
 
 DEFAULT_DEST = Path.home() / ".vestry"
 
@@ -19,26 +19,28 @@ def build_lib(source_dir, dest_dir, pkg, artifact, env=None):
     if not vestry.exists() or not havenc.exists():
         print(f"Warning: {vestry} or its sibling {havenc.name} not found; cannot build "
               f"{artifact}. Programs will need $HAVEN_STD or --dep.")
-        return
+        return False
     pkg_dir = (Path("stdlib") / pkg).resolve()
     result = subprocess.run([str(vestry), "build"], cwd=str(pkg_dir), env=env,
                             encoding="utf-8", capture_output=True, text=True)
     if result.returncode != 0:
         print(f"Failed to build {artifact}:\n{result.stderr}")
-        return
+        return False
     else:
         print(result.stdout, end="")
     built = pkg_dir / ".vestry" / "target" / artifact
     if not built.exists():
         print(f"Failed to build {artifact}: `vestry build` produced no artifact "
               f"at {built}.")
-        return
+        return False
     out = dest_dir / artifact
     try:
         shutil.copy2(built, out)
         print(f"Built and installed {artifact} to {out}")
+        return True
     except Exception as e:
         print(f"Failed to install {artifact}: {e}")
+        return False
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
@@ -69,7 +71,7 @@ def main():
         removed_any = False
         for d in dirs_to_check:
             if not d.is_dir(): continue
-            for bin_name in binaries + STD_ARTIFACT:
+            for bin_name in binaries + list(LIB_ARTIFACTS):
                 target_file = d / bin_name
                 if target_file.exists():
                     try:
@@ -127,7 +129,9 @@ def main():
             else:
                 print(f"Warning: {src_file} not found in {source_dir}. Skipping.")
 
-        build_lib(source_dir, dest_dir, "std", STD_ARTIFACT)
+        for package, artifact in (("core", LIB_ARTIFACTS[0]), ("std", LIB_ARTIFACTS[1])):
+            if not build_lib(source_dir, dest_dir, package, artifact):
+                sys.exit(1)
 
         # `~/.vestry` is not on `PATH` by default; nudge the user to add it.
         path_dirs = os.environ.get("PATH", "").split(os.pathsep)

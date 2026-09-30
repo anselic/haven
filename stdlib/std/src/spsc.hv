@@ -13,7 +13,7 @@
 import alloc { alloc, dealloc }
 import atomic { AtomicU64 }
 import numeric/u64
-import option { Option }
+import core/option { Option }
 
 /// A queue with exactly one producer and one consumer.
 /// Padding spaces the head and tail 64 bytes apart to reduce cache contention

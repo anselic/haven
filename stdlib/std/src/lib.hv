@@ -1,8 +1,6 @@
-//! Core types, memory management, I/O, and other facilities available to every Haven program.
+//! Allocation, I/O, and other facilities available to ordinary Haven programs.
 //!
-//! The haven's standard library (`std`) is a package of modules that every program
-//! can use. It provides core types, memory management, I/O, and other facilities.
-//! The `std` package is always available on every packages and modules by default.
+//! `std` depends on `core` and re-exports its foundational APIs.
 //!
 //! You can use the search button to find the documentation for any type or function
 //! in the standard library, and then import it using `import` statements in your code.
@@ -16,13 +14,23 @@
 @!prelude
 
 // what every module in every program using this package sees without an import.
-pub import clone { Clone }
+pub import core/clone { Clone }
 pub import fmt { Display, print, println }
 pub import string { String }
 pub import vec { Vec }
-pub import result { Result, Unit }
-pub import option { Option }
-pub import iter { IntoIterator, Iterator } // needed for `for` loops
+pub import core { Delete, abort, slice_len, slice_slice }
+pub import core/result { Result, Unit }
+pub import core/option { Option }
+pub import core/iter { IntoIterator, Iterator } // needed for `for` loops
+
+pub import core/option
+pub import core/clone
+pub import core/result
+pub import core/iter
+pub import core/math
+pub import core/mem
+pub import core/simd
+pub import core/ffi
 
 import fmt { display_print, display_println }
 
@@ -32,58 +40,8 @@ import numeric
 import alloc
 import atomic
 import env
-import ffi
 import fs
-import iter
-import math
-import mem
-import option
 import process
 import rand
-import result
 import ring
-import simd
 import spsc
-
-/// A destructor. Implement it to give a type ownership of a resource:
-/// ```hv
-/// extend Buf: Delete {
-///     proc delete(*self) { dealloc::<u8>(self.data, self.cap); }
-/// }
-/// ```
-/// `Delete` is a lang item. Implementing it makes the type non-`Copy`; passing
-/// the value transfers ownership. The compiler calls `delete` for each live
-/// owner at scope exit, before overwrite, and on return.
-///
-/// Never call `delete` directly, or the automatic call will release it twice.
-@lang(delete)
-pub trait Delete {
-    proc delete(*self);
-}
-
-// backing symbols from std/c/rt.c (always linked in)
-extern strlen(s: str) u64 with [];
-
-extern rt_abort(msg: str) ! with IO;
-extern rt_slice_len<T>(slice: *[T]) u64 with [];
-// aborts (IO) on an invalid range.
-extern rt_slice_slice<T>(slice: *[T], start: u64, end: u64, elem_sz: u64) with IO;
-
-/// Print `msg` and terminate the process. Its result type is the bottom type `!`,
-/// so it coerces to any expected type - `return abort("...")` type-checks in a
-/// function of any return type, and a bare `abort("...")` ends a `match` arm
-/// without a value.
-pub proc abort(msg: str) ! without Alloc { rt_abort(msg); }
-
-/// The number of elements in the runtime slice `slice`.
-@noalias
-pub proc slice_len<T>(slice: *[T]) u64 without Alloc { return rt_slice_len::<T>(slice); }
-
-/// The runtime slice `slice` is sliced to the range `[start, end)`, and the new length is returned.
-/// panics: `start > end` or `end > slice length`
-// TODO: think of a better name
-pub proc slice_slice<T>(slice: *[T], start: u64, end: u64) [T] without Alloc {
-    let new_slice = slice.clone();
-    rt_slice_slice::<T>(&new_slice, start, end, sizeof::<T>());
-    return new_slice;
-}

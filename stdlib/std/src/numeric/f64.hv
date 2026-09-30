@@ -35,3 +35,12 @@ extend f64 {
         return self.to_bits().to_be_bytes();
     }
 }
+
+// snprintf may allocate for large precision, even with a static output buffer.
+extern rt_f64_to_str(d: f64, precision: i32) str with Alloc;
+
+extend f64: Display {
+    proc display(*self) String {
+        return String::from_str(rt_f64_to_str(*self, -1));
+    }
+}

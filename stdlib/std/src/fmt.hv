@@ -19,10 +19,6 @@
 import string { String }
 import vec { Vec }
 
-// snprintf may allocate for large precision, even with a static output buffer.
-extern rt_f32_to_str(f: f32, precision: i32) str with Alloc;
-extern rt_f64_to_str(d: f64, precision: i32) str with Alloc;
-
 pub trait Display {
     proc display(*self) String;
 }
@@ -40,61 +36,6 @@ pub proc display_println<T: Display>(x: *T) {
     println(s.as_str());
 }
 
-// --- integers
-//
-// All integer rendering funnels through `push_u64`: it appends the decimal
-// digits of `n` to `s`, most-significant first, by recursing on `n / 10` before
-// emitting `n % 10`. `48` is ASCII '0'. Signed types print a '-' and then the
-// magnitude as a `u64` (the cast is on the already-negated value).
-
-proc push_u64(s: *String, n: u64) {
-    if (n >= 10u64) {
-        push_u64(s, n / 10u64);
-    }
-    s.push_byte(numerical_cast::<u8>(48u64 + (n % 10u64)));
-}
-
-proc u64_string(n: u64) String {
-    let s: String = String::new();
-    push_u64(&s, n);
-    return s;
-}
-
-proc i64_string(n: i64) String {
-    let s: String = String::new();
-    if (n < 0i64) {
-        s.push_byte(45u8); // '-'
-        push_u64(&s, numerical_cast::<u64>(0i64 - n));
-    } else {
-        push_u64(&s, numerical_cast::<u64>(n));
-    }
-    return s;
-}
-
-extend u8:  Display { proc display(*self) String { return u64_string(numerical_cast::<u64>(*self)); } }
-extend u16: Display { proc display(*self) String { return u64_string(numerical_cast::<u64>(*self)); } }
-extend i16: Display { proc display(*self) String { return i64_string(numerical_cast::<i64>(*self)); } }
-extend u32: Display { proc display(*self) String { return u64_string(numerical_cast::<u64>(*self)); } }
-extend u64: Display { proc display(*self) String { return u64_string(*self); } }
-extend i32: Display { proc display(*self) String { return i64_string(numerical_cast::<i64>(*self)); } }
-extend i64: Display { proc display(*self) String { return i64_string(*self); } }
-
-// --- floats
-
-extend f32: Display {
-    proc display(*self) String {
-        return String::from_str(rt_f32_to_str(*self, -1));
-    }
-}
-
-extend f64: Display {
-    proc display(*self) String {
-        return String::from_str(rt_f64_to_str(*self, -1));
-    }
-}
-
-// --- other scalars
-
 extend bool: Display {
     proc display(*self) String {
         if (*self) { return String::from_str("true"); }
@@ -105,11 +46,6 @@ extend bool: Display {
 // a `str` renders as its own text: a fresh owned copy of the bytes.
 extend str: Display {
     proc display(*self) String { return String::from_str(*self); }
-}
-
-// a `String` renders as a copy of itself, so the result is independently owned.
-extend String: Display {
-    proc display(*self) String { return String::from_str(self.as_str()); }
 }
 
 // --- containers
