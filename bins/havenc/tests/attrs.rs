@@ -59,6 +59,61 @@ fn define_line<'a>(ir: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
+fn array_argument_in_loop_reuses_entry_stack_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = compile_ir(dir.path(), r#"
+proc sum4(bytes: [i32; 4]) i32 {
+    return bytes[0] + bytes[1] + bytes[2] + bytes[3];
+}
+
+@export
+proc main() i32 {
+    let i: i32 = 0;
+    let total: i32 = 0;
+    while (i < 1000) {
+        total = total + sum4([i, 1, 2, 3]);
+        i = i + 1;
+    }
+    if (total == 505500) { return 0; }
+    return 1;
+}
+"#);
+    let main = ir.split("define ").find(|part| part.contains("@main("))
+        .unwrap_or_else(|| panic!("missing main in:\n{ir}"));
+    let entry_end = main.find("b1:").expect("loop must have a second block");
+    assert_eq!(main.matches("alloca [4 x i32]").count(), 1, "{main}");
+    assert!(main[..entry_end].contains("alloca [4 x i32]"), "{main}");
+
+    let result = std::process::Command::new(dir.path().join("app"))
+        .output().expect("failed to run fixture");
+    assert!(result.status.success(), "exit: {:?}\nstderr: {}",
+        result.status.code(), String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
+fn pointer_argument_does_not_reuse_loop_temporary() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = compile_ir(dir.path(), r#"
+proc inspect(bytes: *[i32; 4]) i32 { return (*bytes)[0]; }
+
+@export
+proc main() i32 {
+    let i: i32 = 0;
+    while (i < 2) {
+        inspect(&[i, 1, 2, 3]);
+        i = i + 1;
+    }
+    return 0;
+}
+"#);
+    let main = ir.split("define ").find(|part| part.contains("@main("))
+        .unwrap_or_else(|| panic!("missing main in:\n{ir}"));
+    let entry_end = main.find("b1:").expect("loop must have a second block");
+    assert_eq!(main.matches("alloca [4 x i32]").count(), 1, "{main}");
+    assert!(!main[..entry_end].contains("alloca [4 x i32]"), "{main}");
+}
+
+#[test]
 fn inline_hints_become_llvm_function_attributes() {
     let dir = tempfile::tempdir().unwrap();
     let ir = ir(dir.path());

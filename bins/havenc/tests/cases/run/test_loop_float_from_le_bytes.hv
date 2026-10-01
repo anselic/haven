@@ -1,0 +1,17 @@
+// A by-value array argument in a sample loop must reuse stack storage. A
+// per-iteration alloca eventually exhausts the stack on this long run.
+import std/numeric/f32
+
+@export
+proc main() i32 {
+    let i = 0u64;
+    let sum = 0.0f32;
+    while (i < 200000u64) {
+        let sign = 63u8;
+        if (i % 2u64 == 1u64) { sign = 191u8; }
+        sum = sum + f32::from_le_bytes([0u8, 0u8, 128u8, sign]);
+        i = i + 1u64;
+    }
+    if (sum != 0.0f32) { return 1; }
+    return 0;
+}

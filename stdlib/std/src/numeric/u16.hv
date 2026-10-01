@@ -6,6 +6,30 @@ extend u16 {
         return numerical_cast::<u16>(((numerical_cast::<u32>(self) >> 8u32) & 0x00ffu32)
             | ((numerical_cast::<u32>(self) << 8u32) & 0xff00u32));
     }
+
+    /// Decode 2 bytes in little-endian order, independent of host byte order.
+    pub proc from_le_bytes(bytes: [u8; 2]) u16 with [] {
+        return numerical_cast::<u16>(bytes[0u64])
+            | (numerical_cast::<u16>(bytes[1u64]) << 8u16);
+    }
+
+    /// Decode 2 bytes in big-endian order, independent of host byte order.
+    pub proc from_be_bytes(bytes: [u8; 2]) u16 with [] {
+        return u16::from_le_bytes(bytes).swap_bytes();
+    }
+
+    /// Encode every byte in little-endian order, independent of host byte order.
+    pub proc to_le_bytes(self) [u8; 2] with [] {
+        return [
+            numerical_cast::<u8>(self & 0xffu16),
+            numerical_cast::<u8>((self >> 8u16) & 0xffu16),
+        ];
+    }
+
+    /// Encode every byte in big-endian order, independent of host byte order.
+    pub proc to_be_bytes(self) [u8; 2] with [] {
+        return self.swap_bytes().to_le_bytes();
+    }
 }
 
 extend u16: Display {
