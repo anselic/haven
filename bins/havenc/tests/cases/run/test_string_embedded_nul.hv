@@ -1,0 +1,24 @@
+// A `String` holds raw bytes and may contain a NUL. Copies of it (`clone`,
+// `display`, and f-string interpolation) must keep all `len` bytes, not stop at
+// the first NUL the way a C `str` view does.
+import std/ring { Ring }
+
+@export
+proc main() i32 {
+    let s: String = String::from_str("ab");
+    s.push_byte(0u8);
+    s.push_byte(99u8); // 'c'
+    println(s.len());  // 4
+
+    let c: String = s.clone();
+    println(c.len());  // 4
+    println(c.eq(&s)); // true
+
+    let d: String = s.display();
+    println(d.len());  // 4
+
+    let f: String = f"<{s}>";
+    println(f.len());  // 6
+
+    return 0;
+}

@@ -79,6 +79,9 @@ pub struct Ring<T> {
     /// element was dropped, or `false` otherwise. Useful for a rolling history.
     /// Dropping an element may call the allocator.
     pub proc push_overwrite(*self, value: T) bool {
+        if (self.cap == 0u64) {
+            return false;
+        }
         if (self.len < self.cap) {
             ptr_write::<T>(self.slot(self.len), value);
             self.len = self.len + 1u64;
