@@ -17,9 +17,17 @@ extern rt_realloc(ptr: *void, size: u64) *void with Alloc;
 extern rt_free(ptr: *void) void with Alloc;
 
 /// Allocate uninitialized room for `count` values of type `T`. Returns `Some(*T)`
-/// pointer on success, or `None` if the allocation failed.
+/// pointer on success, or `None` if the allocation failed or the byte size
+/// `count * sizeof::<T>()` does not fit in a `u64`.
 pub proc alloc<T>(count: u64) Option<*T> {
-    let ptr: *void = rt_alloc(count * sizeof::<T>());
+    let elem: u64 = sizeof::<T>();
+    let size: u64 = count * elem;
+    // nobody really allocates 2^61 or more bytes (i hope so), but if they do,
+    // we handle that for them :)
+    if (elem != 0u64 && size / elem != count) {
+        return Option::None;
+    }
+    let ptr: *void = rt_alloc(size);
     if (ptr == null::<*void>()) {
         return Option::None;
     }
@@ -28,10 +36,16 @@ pub proc alloc<T>(count: u64) Option<*T> {
 
 /// Resize the allocation at `ptr` to hold `count` values of type `T`, preserving
 /// existing contents. Returns `some` new pointer on success, or `none` on
-/// failure (in which case the original allocation is left untouched).
+/// failure or size overflow (in which case the original allocation is left
+/// untouched).
 @noalias
 pub proc realloc<T>(ptr: *T, count: u64) Option<*T> {
-    let new_ptr: *void = rt_realloc(ptr_cast::<*void>(ptr), count * sizeof::<T>());
+    let elem: u64 = sizeof::<T>();
+    let size: u64 = count * elem;
+    if (elem != 0u64 && size / elem != count) {
+        return Option::None;
+    }
+    let new_ptr: *void = rt_realloc(ptr_cast::<*void>(ptr), size);
     if (new_ptr == null::<*void>()) {
         return Option::None;
     }

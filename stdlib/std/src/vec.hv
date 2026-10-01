@@ -52,7 +52,12 @@ pub struct Vec<T> {
         if (self.cap < needed) {
             let new_cap: u64 = self.cap;
             if (new_cap == 0u64) { new_cap = 4u64; }
-            while (new_cap < needed) { new_cap = new_cap * 2u64; }
+            while (new_cap < needed) {
+                // doubling past 2^63 wraps to 0 and would loop forever, so ask for
+                // exactly `needed` instead; `realloc` rejects a size that is too big
+                let doubled: u64 = new_cap * 2u64;
+                if (doubled <= new_cap) { new_cap = needed; } else { new_cap = doubled; }
+            }
             // realloc copies the old elements over; a null `data` makes this a malloc.
             self.data = realloc::<T>(self.data, new_cap).unwrap();
             self.cap = new_cap;
