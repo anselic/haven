@@ -1,0 +1,25 @@
+//@ exit: 12
+// Trait method effect clauses: an impl may narrow the clause (`with []` under
+// `with IO`, `without Alloc` under `with IO`) or omit it and inherit it, and a
+// generic caller bounded by the trait may rely on the trait's clause.
+trait Io { proc run(*self) i32 with IO; }
+trait Pure { proc run(*self) i32 with []; }
+
+struct A { v: i32 }
+struct B { v: i32 }
+struct C { v: i32 }
+
+extend A: Io { proc run(*self) i32 with [] { return self.v; } }
+extend B: Io { proc run(*self) i32 without Alloc { return self.v; } }
+// no clause: inherits `with []`, which this body satisfies
+extend C: Pure { proc run(*self) i32 { return self.v; } }
+
+proc pure_run<P: Pure>(p: *P) i32 with [] { return p.run(); }
+
+@export
+proc main() i32 with IO {
+    let a = A { v: 2 };
+    let b = B { v: 3 };
+    let c = C { v: 7 };
+    return a.run() + b.run() + pure_run::<C>(&c);
+}

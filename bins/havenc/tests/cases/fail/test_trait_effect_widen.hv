@@ -1,0 +1,15 @@
+//@ error: allows more effects than trait 'Process' does
+// An impl may narrow its trait method's effect clause but never widen it: a
+// caller bounded by the trait relies on the trait's clause.
+trait Process { proc process(*self) i32 with []; }
+
+struct Gain { k: i32 }
+
+extend Gain: Process {
+    proc process(*self) i32 with Alloc, IO { return self.k; }
+}
+
+proc main() i32 {
+    let g = Gain { k: 3 };
+    return g.process();
+}

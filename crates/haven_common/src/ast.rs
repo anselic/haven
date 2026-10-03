@@ -1393,6 +1393,11 @@ pub struct TraitMethod<'a> {
     pub name: &'a str,
     pub params: Vec<(&'a str, Type<'a>)>,
     pub return_type: Type<'a>,
+    /// The bound every impl of this method is held to. An impl may narrow it
+    /// with a clause of its own, but never widen it, and an impl that writes no
+    /// clause inherits this one - so `with []` on a trait method is a promise a
+    /// generic caller can rely on. `None` leaves impls unconstrained.
+    pub effect_clause: Option<Metadata<EffectClause>>,
     /// The default body, if the trait wrote one. `haven_front::module` copies it
     /// into every conforming impl that did not define the method itself, as an
     /// ordinary method of that impl - so the trait is still a set of signatures

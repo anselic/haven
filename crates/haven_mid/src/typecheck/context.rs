@@ -67,6 +67,8 @@ pub struct TraitMethodSig<'a> {
     pub receiver: Receiver,
     pub params: Vec<Type<'a>>,
     pub return_type: Type<'a>,
+    /// The bound an impl's own clause may narrow but not widen.
+    pub effect_clause: Option<EffectClause>,
 }
 
 /// A declared `trait`: its required method signatures, keyed by method name.

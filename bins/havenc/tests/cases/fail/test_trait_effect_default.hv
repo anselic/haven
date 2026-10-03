@@ -1,0 +1,15 @@
+//@ error: has effect clause `with []` but may allocate
+// A default body is held to its own trait method's clause.
+trait Process {
+    proc process(*self) with [] { println("hi"); }
+}
+
+struct Logger {}
+
+extend Logger: Process {}
+
+proc main() i32 {
+    let l = Logger {};
+    l.process();
+    return 0;
+}

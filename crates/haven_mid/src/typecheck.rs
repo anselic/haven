@@ -656,7 +656,8 @@ pub fn typecheck_program<'a>(
                 let params = m.params.iter()
                     .map(|(_, t)| t.clone()).collect();
                 let return_type = m.return_type.clone();
-                ms.insert(m.name, TraitMethodSig { receiver: m.receiver, params, return_type });
+                let effect_clause = m.effect_clause.as_ref().map(|c| c.value.clone());
+                ms.insert(m.name, TraitMethodSig { receiver: m.receiver, params, return_type, effect_clause });
             }
             if dup { continue; }
             cx.traits.insert(*def, TraitDef { methods: ms, assoc_types: assoc_types.clone() });
@@ -686,8 +687,17 @@ pub fn typecheck_program<'a>(
     // associated-type bound may be satisfied by an impl declared later in the
     // source, and declaration order must not change conformance.
     cx.impls.extend(impls.iter().cloned());
+    // every function's effect clause, for comparing an impl method's against
+    // its trait's. Function types carry no effects, so this is read off the
+    // items themselves.
+    let clauses: HashMap<&'a str, &Metadata<EffectClause>> = program.iter()
+        .filter_map(|node| match &node.value {
+            TopLevelNode::Function { name, effect_clause: Some(c), .. } => Some((*name, c)),
+            _ => None,
+        })
+        .collect();
     for imp in impls {
-        check_impl_conformance(cx, imp, &mut errors);
+        check_impl_conformance(cx, imp, &clauses, &mut errors);
     }
 
     // --- typecheck pass
@@ -727,7 +737,12 @@ fn toplevel_def(node: &TopLevelNode) -> Option<DefId> {
 /// avoids a duplicate "does not implement" at the bound site). A method's
 /// receiver is expanded to the concrete `self` type and any `Self` in the trait
 /// signature is substituted with the implementing type before comparison.
-fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: &mut Vec<Error>) {
+fn check_impl_conformance<'a>(
+    cx: &mut Context<'a>,
+    imp: &ImplDecl<'a>,
+    clauses: &HashMap<&'a str, &Metadata<EffectClause>>,
+    errors: &mut Vec<Error>,
+) {
     // the implementing type, which is no longer necessarily nameable as a
     // definition - `[T]` and `i32` have only their written form.
     let self_ty = imp.self_ty.clone();
@@ -792,7 +807,8 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
         // compared symbolically - in terms of the impl's own parameters, which
         // is also how `self_ty` is spelled - so `extend Vec<T>: Delete` is
         // checked once for all `T` rather than per instance.
-        let found = match cx.members.get(&(imp.head, *mname)) {
+        let member = cx.members.get(&(imp.head, *mname));
+        let found = match member {
             Some(m) if m.generics.is_empty() => match cx.lookup(m.name) {
                 Some((_, Type::Function { params, return_type })) =>
                     Some((params.clone(), (**return_type).clone())),
@@ -830,6 +846,24 @@ fn check_impl_conformance<'a>(cx: &mut Context<'a>, imp: &ImplDecl<'a>, errors: 
                 .with_note(format!("expected `({}) {}`",
                     expected.iter().map(|t| cx.show(t)).collect::<Vec<_>>().join(", "),
                     cx.show(&expected_ret))));
+        }
+
+        // an impl may narrow the trait's effects but not widen them: a generic
+        // caller bounded by the trait relies on its clause. One that wrote no
+        // clause inherited the trait's in the front end, so it is equal here.
+        let (Some(bound), Some(m)) = (&sig.effect_clause, member) else { continue };
+        let Some(clause) = clauses.get(m.name) else { continue };
+        let extra: Vec<Effect> = Effect::ALL.into_iter()
+            .filter(|&e| !clause.value.forbids(e) && bound.forbids(e))
+            .collect();
+        if !extra.is_empty() {
+            let extra = extra.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            errors.push(Error::new(clause.span,
+                format!("'{}::{}' allows more effects than trait '{}' does", target, mname, trait_))
+                .with_label(clause.span, format!("allows {}, which `{}` forbids", extra, bound))
+                .with_note(format!(
+                    "the trait declares `{}`; an impl may narrow a trait method's effects, \
+                     but not widen them", bound)));
         }
     }
 

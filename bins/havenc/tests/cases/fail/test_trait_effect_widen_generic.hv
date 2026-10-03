@@ -1,0 +1,14 @@
+//@ error: allows more effects than trait 'Process' does
+// A generic impl is checked once, symbolically, like its signature.
+trait Process { proc process(*self) i32 without IO; }
+
+struct Wrap<T> { x: T }
+
+extend Wrap<T>: Process {
+    proc process(*self) i32 with IO { return 1; }
+}
+
+proc main() i32 {
+    let w = Wrap { x: 1 };
+    return w.process();
+}

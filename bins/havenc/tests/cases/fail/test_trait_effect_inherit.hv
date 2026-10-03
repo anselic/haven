@@ -1,0 +1,16 @@
+//@ error: has effect clause `with []` but may allocate
+// An impl method that writes no clause inherits its trait's, so saying nothing
+// is not a way around it.
+trait Process { proc process(*self) with []; }
+
+struct Logger {}
+
+extend Logger: Process {
+    proc process(*self) { println("hi"); }
+}
+
+proc main() i32 {
+    let l = Logger {};
+    l.process();
+    return 0;
+}

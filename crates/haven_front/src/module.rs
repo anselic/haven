@@ -435,9 +435,11 @@ struct RawImpl<'a> {
     /// `type Item = Ty;` bindings, still unresolved: resolved in `load_and_merge`
     /// through the module's scopes with the impl's inferred parameters in scope.
     assoc_bindings: Vec<(&'a str, Type<'a>)>,
-    /// The names this block defined itself. What a trait's *default* bodies are
-    /// checked against: a default is copied in only where the impl was silent.
-    defined: Vec<&'a str>,
+    /// The methods this block defined itself, as (method name, synthesized
+    /// function name). What a trait's *default* bodies are checked against: a
+    /// default is copied in only where the impl was silent. The function name is
+    /// where a trait method's effect clause is inherited to.
+    defined: Vec<(&'a str, &'a str)>,
     span: Span,
 }
 
@@ -1062,22 +1064,8 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
             kept.push(tl);
             continue;
         };
-        // record the conformance obligation; resolved through the module's
-        // scopes in `load_and_merge`, which is also where the target's inferred
-        // parameters are worked out - they need a type scope, which does not
-        // exist yet at parse time.
-        if let Some(tr) = trait_ {
-            impls.push(RawImpl {
-                target: target.clone(),
-                generics: Vec::new(),
-                where_bounds: where_bounds.clone(),
-                trait_: tr,
-                assoc_bindings: assoc_bindings.clone(),
-                defined: methods.iter().map(|m| m.value.name).collect(),
-                span: tl.span,
-            });
-        }
         let key = target_key(target);
+        let mut defined: Vec<(&'a str, &'a str)> = Vec::with_capacity(methods.len());
         for m in methods {
             let mnode = &m.value;
             let mut params: Vec<(&'a str, Type<'a>)> = Vec::with_capacity(mnode.params.len() + 1);
@@ -1115,6 +1103,7 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 base = format!("{}${}${}", key, mnode.name, n);
             }
             let fname: &'a str = arena.alloc_str(&base);
+            defined.push((mnode.name, fname));
             methods_out.push(RawMethod {
                 target: target.clone(),
                 // filled in by `load_and_merge` once a type scope exists.
@@ -1149,6 +1138,21 @@ fn lower_methods<'a>(items: &mut Vec<TopLevel<'a>>, arena: &'a Bump)
                 },
                 m.span,
             ));
+        }
+        // record the conformance obligation; resolved through the module's
+        // scopes in `load_and_merge`, which is also where the target's inferred
+        // parameters are worked out - they need a type scope, which does not
+        // exist yet at parse time.
+        if let Some(tr) = trait_ {
+            impls.push(RawImpl {
+                target: target.clone(),
+                generics: Vec::new(),
+                where_bounds: where_bounds.clone(),
+                trait_: tr,
+                assoc_bindings: assoc_bindings.clone(),
+                defined,
+                span: tl.span,
+            });
         }
     }
     *items = kept;
@@ -3488,7 +3492,8 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         }
     }
 
-    // pass 1.15: give every trait impl the default bodies it did not override.
+    // pass 1.15: give every trait impl the default bodies it did not override,
+    // and the trait's effect clause on every method that wrote none.
     //
     // A default is *copied into the impl* as an ordinary method - the same shape
     // `lower_methods` produces for one written by hand - rather than dispatched to
@@ -3513,8 +3518,11 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
     for (id, m) in modules.iter().enumerate() {
         for tl in &m.items {
             let TopLevelNode::Trait { name, methods, .. } = &tl.value else { continue };
-            let with_body: Vec<TraitMethod<'a>> =
-                methods.iter().filter(|tm| tm.body.is_some()).cloned().collect();
+            // a method matters here if it has a default to copy or an effect
+            // clause to hand down to the impls that wrote no clause of their own.
+            let with_body: Vec<TraitMethod<'a>> = methods.iter()
+                .filter(|tm| tm.body.is_some() || tm.effect_clause.is_some())
+                .cloned().collect();
             if with_body.is_empty() { continue }
             if let Some(sym) = all_scopes[id].types.get(*name) {
                 trait_defaults.insert(sym.def, with_body);
@@ -3531,11 +3539,22 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
         // that lands in the trait's module.
         let mut synthesized: Vec<(&'a str, TopLevel<'a>, RawMethod<'a>)> = Vec::new();
         let mut used: HashSet<String> = HashSet::new();
+        // (function, trait clause) for each written impl method that states no
+        // clause: it inherits the trait's. Leaving it inferred instead would let
+        // an impl widen the trait's bound just by saying nothing. One that does
+        // state a clause is checked against the trait's in typecheck.
+        let mut inherit: Vec<(&'a str, Metadata<EffectClause>)> = Vec::new();
         for ri in &modules[id].impls {
             let Some(sym) = all_scopes[id].types.get(ri.trait_) else { continue };
             let Some(defaults) = trait_defaults.get(&sym.def) else { continue };
             for tm in defaults {
-                if ri.defined.contains(&tm.name) { continue }
+                if let Some(&(_, fname)) = ri.defined.iter().find(|(m, _)| *m == tm.name) {
+                    if let Some(clause) = &tm.effect_clause {
+                        inherit.push((fname, clause.clone()));
+                    }
+                    continue
+                }
+                if tm.body.is_none() { continue }
                 let mut params: Vec<(&'a str, Type<'a>)> =
                     Vec::with_capacity(tm.params.len() + 1);
                 let self_ty = ri.target.clone();
@@ -3584,7 +3603,9 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                             // *function* is private, the *member* is not.
                             is_pub: false,
                             attributes: Vec::new(),
-                            effect_clause: None,
+                            // a default is held to its trait's bound like any
+                            // other impl of the method.
+                            effect_clause: tm.effect_clause.clone(),
                             // a trait method declares no parameters of its own;
                             // the impl's are prepended by pass 1.25.
                             generics: Vec::new(),
@@ -3608,6 +3629,14 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                         span: ri.span,
                     },
                 ));
+            }
+        }
+        for (fname, clause) in inherit {
+            for tl in modules[id].items.iter_mut() {
+                let TopLevelNode::Function { name, effect_clause, .. } = &mut tl.value else { continue };
+                if *name != fname { continue }
+                if effect_clause.is_none() { *effect_clause = Some(clause) }
+                break
             }
         }
         for (fname, item, rm) in synthesized {

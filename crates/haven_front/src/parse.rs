@@ -1674,7 +1674,7 @@ fn parse_method<'tks, 'src: 'tks>() -> P<'tks, 'src, Method<'src>> {
 }
 
 /// One method inside a `trait` declaration:
-/// `proc name(receiver?, params...) [RetType];` for a required one, or the same
+/// `proc name(receiver?, params...) [RetType] [with/without effects];` for a required one, or the same
 /// header followed by `{ body }` for one with a default. Mirrors `parse_method`'s
 /// receiver/param shapes but omits attributes, `pub` and generics (a trait method
 /// is public with the trait, and declares no parameters of its own).
@@ -1695,10 +1695,11 @@ fn parse_trait_method<'tks, 'src: 'tks>() -> P<'tks, 'src, TraitMethod<'src>> {
     just(Token::Proc)
         .ignore_then(var.map(|s| *s))
         .then(parse_params())
-        .then(parse_type().or_not().map(|t| t.unwrap_or(Type::Void)))
+        .then(parse_return_type())
+        .then(parse_effect_clause())
         .then(tail)
-        .map(|(((name, (receiver, params)), return_type), body)|
-            TraitMethod { receiver, name, params, return_type, body })
+        .map(|((((name, (receiver, params)), return_type), effect_clause), body)|
+            TraitMethod { receiver, name, params, return_type, effect_clause, body })
         .boxed()
 }
 
