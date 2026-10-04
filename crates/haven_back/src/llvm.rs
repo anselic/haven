@@ -292,11 +292,11 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 emitln!(cx, "    {dst} = sub {ty_str} {zero}, {}", emit_value(val));
             }
         }
-        Unary { dst, op, val, ty } =>
+        Unary { dst, op, val, ty: _ } =>
             emitln!(cx, "    {dst} = {}, {}", match op {
                 UnaryOp::Neg => unreachable!("handled above"),
-                UnaryOp::Not if ty == Type::Int32 => "xor i32 -1",
-                UnaryOp::Not => "xor i1 1", // logical not
+                // typecheck admits `!` on `bool` alone, so this is always i1
+                UnaryOp::Not => "xor i1 1",
                 // this should've be mapped to different instructions (mil.rs)
                 UnaryOp::Deref | UnaryOp::AddrOf => unreachable!(),
             }, emit_value(val)),
@@ -342,8 +342,11 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 Mod if is_float => "frem",
                 Mod => unreachable!("{}", ty),
 
+                // `!=` is the one *unordered* predicate: IEEE 754 says `x != y`
+                // holds when either side is NaN, which is what makes `x != x` a
+                // NaN test. `one` would be false for every NaN operand.
                 Eq if is_float => "fcmp oeq",
-                Ne if is_float => "fcmp one",
+                Ne if is_float => "fcmp une",
                 Lt if is_float => "fcmp olt",
                 Le if is_float => "fcmp ole",
                 Gt if is_float => "fcmp ogt",

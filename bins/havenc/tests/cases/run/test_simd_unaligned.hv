@@ -1,0 +1,43 @@
+// `simd_load`/`simd_store` take any element offset, so the address is only as
+// aligned as one element. The vector access used to carry the vector's own
+// alignment (16 for `simd<f32, 4>`), which on x86 became `movaps` and faulted
+// at every offset that was not a multiple of 4.
+
+import std/simd { simd_splat, simd_load, simd_store, simd_load_ptr, simd_store_ptr }
+
+@inline(never)
+proc twice(buf: [f32], off: u64) void {
+    let v: simd<f32, 4> = simd_load::<f32, 4>(buf, off);
+    simd_store::<f32, 4>(buf, off, v + v);
+}
+
+@inline(never)
+proc add_one_ptr(p: *f64, off: u64) void {
+    let v: simd<f64, 2> = simd_load_ptr::<f64, 2>(p, off);
+    let one: simd<f64, 2> = simd_splat::<f64, 2>(1.0f64);
+    simd_store_ptr::<f64, 2>(p, off, v + one);
+}
+
+@export
+proc main() i32 {
+    let buf: [f32] = [1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32];
+    let i = 0u64;
+    while (i < 5u64) {
+        twice(buf, i);
+        i = i + 1u64;
+    }
+    // element k is doubled once per window that covers it
+    i = 0u64;
+    while (i < 8u64) {
+        println(buf[i]);
+        i = i + 1u64;
+    }
+
+    let d: [f64; 5] = [0.0f64; 5];
+    add_one_ptr(&d[0], 1u64);
+    add_one_ptr(&d[0], 3u64);
+    println(d[0]);
+    println(d[1]);
+    println(d[4]);
+    return 0;
+}

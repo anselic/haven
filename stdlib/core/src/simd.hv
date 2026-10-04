@@ -73,7 +73,7 @@ pub proc simd_store_ptr<T, const N: u64>(dst: *T, offset: u64, value: simd<T, N>
 /// `M` must be even and equal to twice `N`.
 ///
 /// `simd_concat::<f32, 2, 4>(a, b)` -> `simd<f32, 4>` = `(a0, a1, b0, b1)`.
-pub proc simd_concat<T, const N: u64, const M: u64>(lo: simd<T, N>, hi: simd<T, M>) simd<T, M> {
+pub proc simd_concat<T, const N: u64, const M: u64>(lo: simd<T, N>, hi: simd<T, N>) simd<T, M> {
     return __simd_concat::<T, M>(lo, hi);
 }
 

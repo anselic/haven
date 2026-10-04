@@ -3,6 +3,7 @@ use crate::intrinsics::Intrinsic;
 use crate::typecheck::RecvAdjust;
 use super::ir::*;
 use haven_common::defs::DefId;
+use haven_common::layout;
 use super::ctx::{LowerCtx, coerce, aggregate_def, is_aggregate_ty, enum_const, lit_const, ta_type, ta_const};
 
 fn lower_intrinsic<'a>(
@@ -173,9 +174,13 @@ fn lower_intrinsic<'a>(
             // get the element pointer with the offset
             let elem_ptr = cx.fresh_reg();
             cx.emit(Inst::Index { dst: elem_ptr, slice: data_ptr, index: offset_val, index_ty: cx.node_types[&args[1].id].clone(), element_ty: ty.clone() });
-            // load the SIMD vector from the element pointer
+            // load the SIMD vector from the element pointer. `offset` is any
+            // element index, so the address is only as aligned as one element;
+            // left implicit, LLVM would assume the whole vector's alignment
+            // (16 for `<4 x float>`) and emit an aligned load that faults.
+            let align = Some(layout::align_of(&ty, &cx.types));
             let dst = cx.fresh_reg();
-            cx.emit(Inst::Load { dst, ptr: elem_ptr, ty: Type::Simd(Box::new(ty), ConstVal::Lit(size)), align: None });
+            cx.emit(Inst::Load { dst, ptr: elem_ptr, ty: Type::Simd(Box::new(ty), ConstVal::Lit(size)), align });
             Value::Reg(dst)
         }
         Intrinsic::SimdStore => {
@@ -205,8 +210,10 @@ fn lower_intrinsic<'a>(
             let elem_ptr = cx.fresh_reg();
             cx.emit(Inst::Comment("simd_store".to_string()));
             cx.emit(Inst::Index { dst: elem_ptr, slice: data_ptr, index: offset_val, index_ty: cx.node_types[&args[1].id].clone(), element_ty: ty.clone() });
-            // store the SIMD vector to the element pointer
-            cx.emit(Inst::Store { ptr: elem_ptr, val: value_val, ty: Type::Simd(Box::new(ty), ConstVal::Lit(size)), align: None });
+            // store the SIMD vector to the element pointer, element-aligned for
+            // the same reason as `SimdLoad`
+            let align = Some(layout::align_of(&ty, &cx.types));
+            cx.emit(Inst::Store { ptr: elem_ptr, val: value_val, ty: Type::Simd(Box::new(ty), ConstVal::Lit(size)), align });
             Value::Const(Const::Undef) // placeholder since void return
         }
         Intrinsic::SimdConcat => {

@@ -1,0 +1,30 @@
+// `simd_concat` takes two `N`-lane halves and returns `M = 2 * N` lanes. Its
+// second parameter used to be typed `simd<T, M>`, so no call could typecheck.
+
+import std/simd { simd_splat, simd_concat, simd_low, simd_high, simd_load, simd_store }
+
+@export
+proc main() i32 {
+    let src: [f32] = [1.0f32, 2.0f32, 3.0f32, 4.0f32];
+    let lo: simd<f32, 2> = simd_load::<f32, 2>(src, 0u64);
+    let hi: simd<f32, 2> = simd_load::<f32, 2>(src, 2u64);
+
+    // swap the halves: (3, 4, 1, 2)
+    let swapped: simd<f32, 4> = simd_concat::<f32, 2, 4>(hi, lo);
+    let out: [f32] = [0.0f32; 4];
+    simd_store::<f32, 4>(out, 0u64, swapped);
+    println(out[0]);
+    println(out[1]);
+    println(out[2]);
+    println(out[3]);
+
+    // and back apart again
+    let a: simd<f32, 2> = simd_low::<f32, 4, 2>(swapped);
+    let b: simd<f32, 2> = simd_high::<f32, 4, 2>(swapped);
+    let both: [f32] = [0.0f32; 4];
+    simd_store::<f32, 2>(both, 0u64, b);
+    simd_store::<f32, 2>(both, 2u64, a);
+    println(both[0]);
+    println(both[3]);
+    return 0;
+}

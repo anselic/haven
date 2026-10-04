@@ -633,6 +633,25 @@ fn binary_operand_ty<'a>(
     }
 }
 
+/// A comparison of two SIMD vectors is lane-wise: LLVM yields one `i1` per
+/// lane (`<N x i1>`), not the single `bool` a comparison is typed as. Until
+/// there is a mask type to give it, reject it here rather than emit IR that
+/// clang refuses.
+fn reject_simd_comparison<'a>(
+    cx: &Context<'a>,
+    op: BinaryOp,
+    operand_ty: &Type<'a>,
+    span: Span,
+) -> Result<(), Error> {
+    if !matches!(operand_ty, Type::Simd(..)) {
+        return Ok(());
+    }
+    Err(Error::new(span, format!("comparison operator '{}' is not supported on SIMD vectors", op))
+        .with_label(span, format!("got `{}`", cx.show(operand_ty)))
+        .with_note("a lane-wise comparison yields one result per lane, \
+            and there is no SIMD mask type yet"))
+}
+
 /// The type arguments a generic enum's constructor is built with, and the
 /// substitutions they induce. Three sources, in order of authority: an explicit
 /// turbofish always wins; a constructor without one takes the arguments of the
@@ -1173,7 +1192,16 @@ pub(crate) fn infer<'a>(
                         .with_label(span, format!("expected a numeric type, got `{}`",
                             operand_ty)));
                 },
-                UnaryOp::Not => Type::Bool,
+                // logical not only: there is no bitwise `!` on integers, and
+                // the backend lowers this to `xor i1`, so anything but a `bool`
+                // operand would reach LLVM as ill-typed IR.
+                UnaryOp::Not => if operand_ty == Type::Bool {
+                    Type::Bool
+                } else {
+                    return Err(Error::new(span, "`!` needs a `bool` operand")
+                        .with_label(span, format!("expected `bool`, got `{}`",
+                            cx.show(&operand_ty))));
+                },
             }
         },
 
@@ -1181,7 +1209,8 @@ pub(crate) fn infer<'a>(
             use haven_common::ast::BinaryOp::*;
             match op {
                 Eq | Ne => {
-                    binary_operand_ty(cx, left, right)?;
+                    let left_ty = binary_operand_ty(cx, left, right)?;
+                    reject_simd_comparison(cx, *op, &left_ty, span)?;
                     Type::Bool
                 },
                 Add | Sub | Mul | Div | Mod
@@ -1196,7 +1225,10 @@ pub(crate) fn infer<'a>(
 
                     match op {
                         Add | Sub | Mul | Div | Mod => left_ty, // returns scalar or SIMD
-                        Lt | Gt | Le | Ge => Type::Bool,
+                        Lt | Gt | Le | Ge => {
+                            reject_simd_comparison(cx, *op, &left_ty, span)?;
+                            Type::Bool
+                        }
                         _ => unreachable!(),
                     }
                 },

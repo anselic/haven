@@ -1,0 +1,10 @@
+// `!` is logical not. On an integer it used to typecheck as `bool` and reach
+// clang as ill-typed IR (`xor i1 1, i64 ...`).
+//@ error: `!` needs a `bool` operand
+
+@export
+proc main() i32 {
+    let x = 5u64;
+    if (!x) { return 1; }
+    return 0;
+}

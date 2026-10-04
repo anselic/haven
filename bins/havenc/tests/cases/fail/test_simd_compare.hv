@@ -1,0 +1,13 @@
+// A comparison of two vectors is lane-wise and has no single `bool` result. It
+// used to typecheck as `bool` and reach clang as `<4 x i1>` where `i1` was
+// expected.
+//@ error: is not supported on SIMD vectors
+
+import std/simd { simd_splat }
+
+@export
+proc main() i32 {
+    let v: simd<f32, 4> = simd_splat::<f32, 4>(1.0f32);
+    if (v < v) { return 1; }
+    return 0;
+}

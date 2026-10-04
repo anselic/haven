@@ -1,0 +1,30 @@
+// `!=` on floats is IEEE "unordered or not equal": true whenever either side is
+// NaN. It used to lower to `fcmp one` (ordered), so `nan != nan` was false and
+// the usual `x != x` NaN test never fired.
+
+import std/numeric/f32
+import std/numeric/f64
+
+@inline(never)
+proc is_nan32(x: f32) bool { return x != x; }
+
+@inline(never)
+proc is_nan64(x: f64) bool { return x != x; }
+
+@inline(never)
+proc ne32(a: f32, b: f32) bool { return a != b; }
+
+@export
+proc main() i32 {
+    let nan32 = f32::from_bits(0x7fc00000u32);
+    let nan64 = f64::from_bits(0x7ff8000000000000u64);
+
+    println(is_nan32(nan32));       // true
+    println(is_nan64(nan64));       // true
+    println(is_nan32(1.0f32));      // false
+    println(ne32(1.0f32, nan32));   // true
+    println(ne32(1.0f32, 2.0f32));  // true
+    println(ne32(1.0f32, 1.0f32));  // false
+    println(nan32 == nan32);        // false
+    return 0;
+}
