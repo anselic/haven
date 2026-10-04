@@ -132,43 +132,40 @@ fn emit_field_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>, symbols: &HashMap<D
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum FastMathFlags {
-    None,
-    Fast,
-    Reassoc,
-    NNaN,
-    NInf,
-    NSz,
-    Arcp,
-    Contract,
-}
+/// The set of LLVM fast-math flags a `@fastmath(...)` function's float
+/// instructions carry. One bit per flag, so `@fastmath(reassoc, nsz)` keeps both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FastMathFlags(u8);
 
 impl FastMathFlags {
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "fast"     => Some(FastMathFlags::Fast),
-            "reassoc"  => Some(FastMathFlags::Reassoc),
-            "nnan"     => Some(FastMathFlags::NNaN),
-            "ninf"     => Some(FastMathFlags::NInf),
-            "nsz"      => Some(FastMathFlags::NSz),
-            "arcp"     => Some(FastMathFlags::Arcp),
-            "contract" => Some(FastMathFlags::Contract),
-            _ => None,
+    /// Every individual flag, in the order LLVM itself prints them. `afn` has no
+    /// spelling of its own in `@fastmath` (nothing calls a math function through
+    /// a flaggable instruction yet), but it is part of `fast`, so it has a bit.
+    const NAMES: [&'static str; 7] = ["nnan", "ninf", "nsz", "arcp", "contract", "afn", "reassoc"];
+    const ALL: Self = Self((1 << Self::NAMES.len()) - 1);
+
+    fn from_name(s: &str) -> Option<Self> {
+        if s == "fast" {
+            return Some(Self::ALL);
         }
+        Self::NAMES.iter().position(|n| *n == s).map(|i| Self(1 << i))
     }
 
-    fn to_str(self) -> &'static str {
-        match self {
-            FastMathFlags::None     => "",
-            FastMathFlags::Fast     => "fast",
-            FastMathFlags::Reassoc  => "reassoc",
-            FastMathFlags::NNaN     => "nnan",
-            FastMathFlags::NInf     => "ninf",
-            FastMathFlags::NSz      => "nsz",
-            FastMathFlags::Arcp     => "arcp",
-            FastMathFlags::Contract => "contract",
+    fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// The flags as instruction text with a leading space (`" reassoc nsz"`), or
+    /// nothing at all for an empty set. All of them together print as `fast`,
+    /// LLVM's own shorthand.
+    fn to_ir(self) -> String {
+        if self == Self::ALL {
+            return " fast".to_string();
         }
+        Self::NAMES.iter().enumerate()
+            .filter(|(i, _)| self.0 & (1 << i) != 0)
+            .map(|(_, n)| format!(" {n}"))
+            .collect()
     }
 }
 
@@ -286,7 +283,8 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             };
             let ty_str = emit_type(&ty, &cx.types, &cx.symbols);
             if matches!(inner, Type::Float32 | Type::Float64) {
-                emitln!(cx, "    {dst} = fneg {ty_str} {}", emit_value(val));
+                let flags = cx.current_fast_math_flags.to_ir();
+                emitln!(cx, "    {dst} = fneg{flags} {ty_str} {}", emit_value(val));
             } else {
                 let zero = if matches!(ty, Type::Simd(_, _)) { "zeroinitializer" } else { "0" };
                 emitln!(cx, "    {dst} = sub {ty_str} {zero}, {}", emit_value(val));
@@ -313,13 +311,13 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             let is_signed_int = matches!(inner, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64);
             let is_unsigned_int = matches!(inner, Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64);
 
-            let flags_str = if *inner == Type::Float32 || *inner == Type::Float64 {
-                format!(" {}", cx.current_fast_math_flags.to_str())
+            let flags_str = if is_float {
+                cx.current_fast_math_flags.to_ir()
             } else {
                 String::new()
             };
 
-            emitln!(cx, "    {dst} = {}{flags_str} {} {}, {}", match op {
+            let inst = match op {
                 Add if is_signed_int || is_unsigned_int => "add",
                 Add if is_float => "fadd",
                 Add => unreachable!("{}", ty),
@@ -379,7 +377,17 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 Shr if is_signed_int => "ashr",
                 Shr if is_unsigned_int => "lshr",
                 Shr => unreachable!("{}", ty),
-            }, emit_type(&ty, &cx.types, &cx.symbols), emit_value(lhs), emit_value(rhs));
+            };
+            // fast-math flags follow the opcode, which for `fcmp` comes before
+            // its predicate: `fcmp nsz olt`, never `fcmp olt nsz` (rejected by
+            // LLVM, so any float comparison in a `@fastmath` function used to
+            // fail to compile).
+            let inst = match inst.split_once(' ') {
+                Some((opcode, predicate)) => format!("{opcode}{flags_str} {predicate}"),
+                None => format!("{inst}{flags_str}"),
+            };
+            emitln!(cx, "    {dst} = {inst} {} {}, {}",
+                emit_type(&ty, &cx.types, &cx.symbols), emit_value(lhs), emit_value(rhs));
         }
         Call { dst, callee, args, return_type, sret } => {
             // %result = call <return_type> <callee>(<arg_type> <arg_val>, ...)
@@ -755,10 +763,19 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
     let mut export = false;
     // `@fastmath` is per function: without this reset the previous function's
     // flags would ride along into every one emitted after it
-    cx.current_fast_math_flags = FastMathFlags::None;
+    cx.current_fast_math_flags = FastMathFlags::default();
 
     let attrs = func.attributes.iter()
         .filter_map(|a| match (a.value.name, a.value.scalar()) {
+            // a list has no single scalar, so this arm reads every value
+            ("fastmath", _) => {
+                for flag in a.value.values() {
+                    let bits = FastMathFlags::from_name(flag)
+                        .unwrap_or_else(|| unreachable!("`@fastmath({flag})` passed attribute validation"));
+                    cx.current_fast_math_flags = cx.current_fast_math_flags.union(bits);
+                }
+                None
+            }
             // the value sets below are the ones `ast::KNOWN_ATTRIBUTES` admits;
             // anything else was rejected as a diagnostic long before codegen
             ("inline", Some("always")) => Some(String::from("alwaysinline")),
@@ -767,13 +784,6 @@ fn emit_function<'a>(cx: &mut EmitCtx<'a>, func: Function<'a>) {
 
             ("export", None) => { export = true; None },
             ("export", v) => unreachable!("`@export({v:?})` passed attribute validation"),
-
-            ("fastmath", Some(flag)) => {
-                cx.current_fast_math_flags = FastMathFlags::from_str(flag)
-                    .unwrap_or_else(|| unreachable!("`@fastmath({flag})` passed attribute validation"));
-                None
-            }
-            ("fastmath", None) => unreachable!("bare `@fastmath` passed attribute validation"),
 
             _ => None,
         }).collect::<Vec<_>>()
@@ -1017,7 +1027,7 @@ pub fn emit<'a>(module: Module<'a>) -> String {
 
     let mut cx = EmitCtx {
         buf: header,
-        current_fast_math_flags: FastMathFlags::None,
+        current_fast_math_flags: FastMathFlags::default(),
         types,
         symbols,
         unions,

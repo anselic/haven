@@ -1,0 +1,10 @@
+// Two `@fastmath` attributes on one function used to compile, and only the last
+// one took effect: this compiled to `nsz` alone, dropping `reassoc` silently.
+//@ error: `@fastmath` is written more than once on the same item
+//@ error: list every flag in one attribute
+
+@fastmath(reassoc)
+@fastmath(nsz)
+proc sum(a: f32, b: f32) f32 { return a + b; }
+
+proc main() i32 { return 0; }

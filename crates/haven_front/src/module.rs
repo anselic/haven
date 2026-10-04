@@ -1337,9 +1337,22 @@ fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], imports: &[Import<'a>],
                         items: &[TopLevel<'a>]) -> Vec<Error> {
     let mut errs = Vec::new();
     let check = |attrs: &[Attribute<'a>], target: AttrTarget, errs: &mut Vec<Error>| {
-        for a in attrs {
+        for (i, a) in attrs.iter().enumerate() {
             if let Err((msg, note)) = check_attribute(&a.value, target) {
                 errs.push(Error::new(a.span, msg).with_note(note));
+            }
+            // every reader takes the first or the last copy, so a repeat is
+            // silently half-ignored: `@fastmath(reassoc) @fastmath(nsz)` used to
+            // compile to `nsz` alone. `@cfg` is the exception - each one is a
+            // condition, and all of them must hold.
+            if a.value.name != "cfg" && attrs[..i].iter().any(|b| b.value.name == a.value.name) {
+                errs.push(Error::new(a.span,
+                    format!("`@{}` is written more than once on the same item", a.value.name))
+                    .with_note(if a.value.name == "fastmath" {
+                        "list every flag in one attribute: `@fastmath(reassoc, nsz)`".to_string()
+                    } else {
+                        "keep one of them".to_string()
+                    }));
             }
         }
     };

@@ -1,0 +1,7 @@
+// A flag listed twice is a typo, not a stronger request.
+//@ error: `nsz` is listed more than once in `@fastmath`
+
+@fastmath(nsz, reassoc, nsz)
+proc sum(a: f32, b: f32) f32 { return a + b; }
+
+proc main() i32 { return 0; }

@@ -1079,11 +1079,15 @@ impl Display for CfgExpr<'_> {
 }
 
 /// The contents of an attribute's parentheses. Most attributes take one simple
-/// scalar; `@cfg` keeps a structured expression so nested boolean predicates do
-/// not get flattened into an unvalidated string.
+/// scalar; a few take a comma-separated list of them (`@fastmath(reassoc, nsz)`);
+/// `@cfg` keeps a structured expression so nested boolean predicates do not get
+/// flattened into an unvalidated string.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttributeArgs<'a> {
     Scalar(String),
+    /// Two or more scalars. A single value is always a `Scalar`, so an
+    /// attribute that takes a list reads both shapes through [`AttributeNode::values`].
+    List(Vec<String>),
     Cfg(CfgExpr<'a>),
 }
 
@@ -1111,6 +1115,16 @@ impl<'a> AttributeNode<'a> {
         }
     }
 
+    /// Every scalar value written: one for `@name(v)`, several for
+    /// `@name(a, b)`, none for a bare `@name` or a `@cfg`.
+    pub fn values(&self) -> Vec<&str> {
+        match &self.args {
+            Some(AttributeArgs::Scalar(value)) => vec![value.as_str()],
+            Some(AttributeArgs::List(values)) => values.iter().map(String::as_str).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn cfg_expr(&self) -> Option<&CfgExpr<'a>> {
         match &self.args {
             Some(AttributeArgs::Cfg(expr)) if self.name == "cfg" => Some(expr),
@@ -1131,6 +1145,7 @@ impl<'a> Display for AttributeNode<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match &self.args {
             Some(AttributeArgs::Scalar(value)) => write!(f, "@{}({})", self.name, value),
+            Some(AttributeArgs::List(values)) => write!(f, "@{}({})", self.name, values.join(", ")),
             Some(AttributeArgs::Cfg(expr)) => write!(f, "@{}({})", self.name, expr),
             None => write!(f, "@{}", self.name),
         }
@@ -1232,10 +1247,10 @@ pub const LANG_ATTR: &str = "lang";
 /// `@!prelude`. Read by the module loader, same as [`LANG_ATTR`].
 pub const PRELUDE_ATTR: &str = "prelude";
 
-/// Whether an attribute is written bare (`@export`) or with a value
-/// (`@inline(always)`).
+/// Whether an attribute is written bare (`@export`), with one value
+/// (`@inline(always)`), or with one or more values (`@fastmath(reassoc, nsz)`).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum AttrValue { Never, Always, Optional, Cfg }
+enum AttrValue { Never, Always, Optional, List, Cfg }
 
 /// One attribute the compiler acts on: where it may be written, what shape it
 /// takes, and - where the set is small and this is the only place that knows it
@@ -1282,8 +1297,10 @@ pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
         name: "inline", value: AttrValue::Always, values: Some(&["always", "never"]),
         targets: &[AttrTarget::Function],
     },
+    // `@fastmath(reassoc, nsz, contract)` turns on exactly the flags listed;
+    // `fast` is all of them and is written alone.
     AttrSpec {
-        name: "fastmath", value: AttrValue::Always,
+        name: "fastmath", value: AttrValue::List,
         values: Some(&["fast", "reassoc", "nnan", "ninf", "nsz", "arcp", "contract"]),
         targets: &[AttrTarget::Function],
     },
@@ -1315,24 +1332,40 @@ pub fn check_attribute(
         (AttrValue::Never, Some(_)) => return Err((
             format!("`@{}` takes no value", attr.name),
             format!("write `@{}` on its own", attr.name))),
-        (AttrValue::Always | AttrValue::Cfg, None) => return Err((
+        (AttrValue::Always | AttrValue::List | AttrValue::Cfg, None) => return Err((
             format!("`@{}` needs a value", attr.name),
             format!("e.g. `@{}({})`", attr.name,
                 spec.values.and_then(|v| v.first()).unwrap_or(&"...")))),
-        (AttrValue::Cfg, Some(AttributeArgs::Scalar(_))) => return Err((
+        (AttrValue::Cfg, Some(AttributeArgs::Scalar(_) | AttributeArgs::List(_))) => return Err((
             "`@cfg` needs a target predicate".to_string(),
             "e.g. `@cfg(target_os = \"windows\")`".to_string())),
-        (AttrValue::Always | AttrValue::Optional, Some(AttributeArgs::Cfg(_))) => return Err((
+        (AttrValue::Always | AttrValue::Optional | AttrValue::List, Some(AttributeArgs::Cfg(_))) => return Err((
             format!("`@{}` takes one simple value", attr.name),
+            format!("write `@{}(<value>)`", attr.name))),
+        (AttrValue::Always | AttrValue::Optional, Some(AttributeArgs::List(_))) => return Err((
+            format!("`@{}` takes one value, not a list", attr.name),
             format!("write `@{}(<value>)`", attr.name))),
         _ => {}
     }
-    if let (Some(allowed), Some(written)) = (spec.values, attr.scalar())
-        && !allowed.contains(&written) {
+    let written = attr.values();
+    if let Some(allowed) = spec.values
+        && let Some(bad) = written.iter().find(|v| !allowed.contains(v)) {
             return Err((
-                format!("`@{}({})` is not a valid value", attr.name, written),
+                format!("`@{}({})` is not a valid value", attr.name, bad),
                 format!("expected {}", allowed.join(" or "))));
         }
+    if let Some((_, dup)) = written.iter().enumerate().find(|&(i, v)| written[..i].contains(v)) {
+        return Err((
+            format!("`{}` is listed more than once in `@{}`", dup, attr.name),
+            "write each value once".to_string()));
+    }
+    // `fast` is every fast-math flag at once, so listing it beside another
+    // flag is either redundant or a misunderstanding of what `fast` allows.
+    if attr.name == "fastmath" && written.len() > 1 && written.contains(&"fast") {
+        return Err((
+            "`fast` already turns on every fast-math flag".to_string(),
+            "write `@fastmath(fast)` alone, or list only the flags you want".to_string()));
+    }
     if !spec.targets.contains(&target) {
         let ok = spec.targets.iter().map(|t| t.label()).collect::<Vec<_>>().join(", ");
         // a module attribute misplaced onto an item is a spelling mistake more

@@ -1421,19 +1421,30 @@ fn parse_cfg_expr<'tks, 'src: 'tks>() -> P<'tks, 'src, CfgExpr<'src>> {
 
 /// Everything in an attribute after the sigil: `name` and optional arguments.
 /// Shared so that the item and module spellings cannot drift. Ordinary
-/// attributes take one scalar; `@cfg` takes the structured grammar above.
+/// attributes take one scalar or a comma-separated list of them (whether a list
+/// is allowed is the attribute table's call, not the grammar's); `@cfg` takes
+/// the structured grammar above.
 fn attribute_tail<'tks, 'src: 'tks>() -> P<'tks, 'src, AttributeNode<'src>> {
+    let scalar = select_ref! {
+        Token::Var(s) => s.to_string(),
+        Token::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        Token::IntLit(i) => i.to_string(),
+    };
+    let scalars = scalar
+        .separated_by(just(Token::Comma))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .map(|mut values| if values.len() == 1 {
+            AttributeArgs::Scalar(values.pop().unwrap())
+        } else {
+            AttributeArgs::List(values)
+        });
     select_ref! { Token::Var(ident) => ident }
         .then(
             just(Token::LParen)
                 .ignore_then(choice((
                     parse_cfg_expr().map(AttributeArgs::Cfg),
-                    select_ref! {
-                        Token::Var(s) => AttributeArgs::Scalar(s.to_string()),
-                        Token::Bool(b) => AttributeArgs::Scalar(
-                            if *b { "true" } else { "false" }.to_string()),
-                        Token::IntLit(i) => AttributeArgs::Scalar(i.to_string()),
-                    },
+                    scalars,
                 )))
                 .then_ignore(just(Token::RParen))
                 .or_not()
@@ -1450,6 +1461,8 @@ fn attribute_tail<'tks, 'src: 'tks>() -> P<'tks, 'src, AttributeNode<'src>> {
             )),
             (name, Some(AttributeArgs::Scalar(value))) =>
                 Ok(AttributeNode::new(name, Some(value))),
+            (name, Some(args @ AttributeArgs::List(_))) =>
+                Ok(AttributeNode { name, args: Some(args) }),
             (name, None) => Ok(AttributeNode::new(name, None)),
         })
         .boxed()

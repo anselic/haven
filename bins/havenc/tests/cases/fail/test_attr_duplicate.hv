@@ -1,0 +1,9 @@
+// Any attribute other than `@cfg` may be written once per item; a second copy
+// was always half-ignored, whichever one the reader happened to look at.
+//@ error: `@inline` is written more than once on the same item
+
+@inline(always)
+@inline(never)
+proc f() i32 { return 0; }
+
+proc main() i32 { return f(); }

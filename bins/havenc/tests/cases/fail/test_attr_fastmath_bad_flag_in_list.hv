@@ -1,0 +1,7 @@
+// Every value in a list is checked, not only the first one.
+//@ error: `@fastmath(fsat)` is not a valid value
+
+@fastmath(reassoc, fsat)
+proc sum(a: f32, b: f32) f32 { return a + b; }
+
+proc main() i32 { return 0; }

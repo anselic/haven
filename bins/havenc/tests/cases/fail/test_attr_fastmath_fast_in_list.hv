@@ -1,0 +1,7 @@
+// `fast` is every flag at once; combining it with others is redundant at best.
+//@ error: `fast` already turns on every fast-math flag
+
+@fastmath(fast, nsz)
+proc sum(a: f32, b: f32) f32 { return a + b; }
+
+proc main() i32 { return 0; }

@@ -1,0 +1,7 @@
+// Only attributes that accept a list take one; `@inline` takes one value.
+//@ error: `@inline` takes one value, not a list
+
+@inline(always, never)
+proc f() i32 { return 0; }
+
+proc main() i32 { return f(); }

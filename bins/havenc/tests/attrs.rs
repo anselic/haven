@@ -132,6 +132,69 @@ fn fastmath_flags_apply_to_that_function_only() {
     assert_eq!(all, 2, "`plain` has its own, unflagged `fmul`:\n{ir}");
 }
 
+/// The body of the function whose symbol contains `name`, from its `define`
+/// line to the closing brace.
+fn function_body<'a>(ir: &'a str, name: &str) -> &'a str {
+    let start = ir.find(define_line(ir, name)).unwrap();
+    let len = ir[start..].find("\n}").expect("function has a closing brace");
+    &ir[start..start + len]
+}
+
+#[test]
+fn fastmath_flag_list_sets_exactly_the_listed_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = compile_ir(dir.path(), "\
+@fastmath(reassoc, nsz, contract)
+proc listed(a: f32, b: f32) f32 { return -(a * b + a); }
+
+@fastmath(nsz)
+proc single(a: f32, b: f32) f32 { return -(a * b + a); }
+
+@fastmath(fast)
+proc all(a: f32, b: f32) f32 { return -(a * b + a); }
+
+proc none(a: f32, b: f32) f32 { return -(a * b + a); }
+
+@fastmath(nsz, reassoc)
+proc less(a: f32, b: f32) bool { return a < b; }
+
+proc main() i32 {
+    let c: bool = less(1.0, 2.0);
+    let x: f32 = listed(1.0, 2.0) + single(1.0, 2.0) + all(1.0, 2.0) + none(1.0, 2.0);
+    return 0;
+}
+");
+    // every float instruction of the function gets every listed flag, printed
+    // in LLVM's own order, and nothing that was not listed (no `nnan`/`ninf`)
+    let listed = function_body(&ir, "$listed");
+    for op in ["fmul", "fadd", "fneg"] {
+        assert!(listed.contains(&format!("{op} nsz contract reassoc float")), "{op}:\n{listed}");
+    }
+    assert!(!listed.contains("nnan") && !listed.contains("ninf") && !listed.contains("fast"),
+        "only the listed flags:\n{listed}");
+
+    let single = function_body(&ir, "$single");
+    for op in ["fmul", "fadd", "fneg"] {
+        assert!(single.contains(&format!("{op} nsz float")), "{op}:\n{single}");
+    }
+
+    let all = function_body(&ir, "$all");
+    for op in ["fmul", "fadd", "fneg"] {
+        assert!(all.contains(&format!("{op} fast float")), "{op}:\n{all}");
+    }
+
+    // an unflagged instruction has no flags and no stray double space
+    let none = function_body(&ir, "$none");
+    for op in ["fmul", "fadd", "fneg"] {
+        assert!(none.contains(&format!("{op} float")), "{op}:\n{none}");
+    }
+
+    // `fcmp` takes its flags between the opcode and the predicate. Written
+    // after the predicate (as they once were) LLVM rejects the module.
+    let less = function_body(&ir, "$less");
+    assert!(less.contains("fcmp nsz reassoc olt float"), "{less}");
+}
+
 #[test]
 fn explicit_noalias_marks_pointer_parameters_even_without_accesses() {
     let dir = tempfile::tempdir().unwrap();
