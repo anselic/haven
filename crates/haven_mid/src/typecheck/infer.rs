@@ -633,6 +633,47 @@ fn binary_operand_ty<'a>(
     }
 }
 
+/// An LLVM intrinsic has no address: LLVM rejects a module that takes one. So
+/// an extern bound to one is only ever called directly, never used as a value.
+fn intrinsic_as_value(span: Span, name: &str) -> Error {
+    Error::new(span, format!("`{name}` is bound to an LLVM intrinsic and cannot be used as a value"))
+        .with_label(span, "an intrinsic has no address")
+        .with_note(format!("call it directly, or wrap the call in a proc: \
+            `proc f(x: f32) f32 {{ return {name}(x); }}`"))
+}
+
+/// For a call to an extern bound to an LLVM intrinsic, check the concrete
+/// types: every argument and the result must be a number, `bool`, pointer or
+/// vector. That is all an intrinsic takes, it is exactly the set with an
+/// overload suffix, and it keeps aggregates away from the C-ABI lowering
+/// (`sret`, register coercion) that an intrinsic call must not get. A no-op
+/// for any other call, and inside a generic body, where the types still name
+/// parameters; the instance is checked when mono re-typechecks the program.
+fn check_intrinsic_call<'a>(
+    cx: &Context<'a>,
+    name: &str,
+    args: &[Expr<'a>],
+    return_type: &Type<'a>,
+    span: Span,
+) -> Result<(), Error> {
+    use haven_common::llvm_intrinsic::{is_concrete, overload_suffix};
+    if !cx.llvm_intrinsics.contains_key(name) {
+        return Ok(());
+    }
+    let arg_tys: Vec<Type<'a>> = args.iter().map(|a| cx.node_types[&a.id].clone()).collect();
+    if !is_concrete(return_type) || !arg_tys.iter().all(is_concrete) {
+        return Ok(());
+    }
+    let result = (!matches!(return_type, Type::Void | Type::Never)).then_some(return_type);
+    match arg_tys.iter().chain(result).find(|ty| overload_suffix(ty).is_none()) {
+        None => Ok(()),
+        Some(ty) => Err(Error::new(span, format!("cannot call LLVM intrinsic `{name}` with these types"))
+            .with_label(span, format!("`{}` cannot be passed to or returned from an LLVM intrinsic",
+                cx.show(ty)))
+            .with_note("an intrinsic takes and returns numbers, `bool`, pointers and `simd<T, N>`")),
+    }
+}
+
 /// A comparison of two SIMD vectors is lane-wise: LLVM yields one `i1` per
 /// lane (`<N x i1>`), not the single `bool` a comparison is typed as. Until
 /// there is a mask type to give it, reject it here rather than emit IR that
@@ -1064,6 +1105,11 @@ pub(crate) fn infer<'a>(
             if let Some(b) = binding {
                 cx.resolved.insert(metadata.id, b);
             }
+            if binding.is_none()
+                && cx.llvm_intrinsics.contains_key(name)
+                && cx.intrinsic_callee != Some(metadata.id) {
+                    return Err(intrinsic_as_value(span, name));
+                }
             ty
         },
 
@@ -1075,6 +1121,9 @@ pub(crate) fn infer<'a>(
         ExprNode::FnRef { name, type_args } => {
             let fname = name.path.as_single().ok_or_else(|| Error::new(span, format!(
                 "'{}' is not a function", name)))?;
+            if cx.llvm_intrinsics.contains_key(fname) {
+                return Err(intrinsic_as_value(span, fname));
+            }
             let Some(sig) = cx.generic_fns.get(fname).cloned() else {
                 // a non-generic function reference carries no turbofish, so a name
                 // here that isn't a generic fn is either undefined or a plain fn
@@ -1518,6 +1567,7 @@ pub(crate) fn infer<'a>(
                     if let Some(targs) = inferred {
                         cx.inferred_type_args.insert(expr.id, targs);
                     }
+                    check_intrinsic_call(cx, name, args, &ty, span)?;
                     cx.node_types.insert(expr.id, ty.clone());
                     return Ok(ty);
                 }
@@ -1536,7 +1586,11 @@ pub(crate) fn infer<'a>(
                 return Err(Error::new(span, "unexpected type arguments")
                     .with_note("`::<...>` is only valid on a generic or intrinsic call"));
             }
-            let callee_ty = infer(cx, func)?;
+            // the callee position is the one place an intrinsic's name may stand
+            cx.intrinsic_callee = Some(func.id);
+            let callee_ty = infer(cx, func);
+            cx.intrinsic_callee = None;
+            let callee_ty = callee_ty?;
             match callee_ty {
                 Type::Function { params, return_type } => {
                     if params.len() != args.len() {
@@ -1548,6 +1602,10 @@ pub(crate) fn infer<'a>(
                         check_expr(cx, param_ty, arg_expr)?;
                     }
 
+                    if let ExprNode::Var(name) = &func.value
+                        && !cx.resolved.contains_key(&func.id) {
+                            check_intrinsic_call(cx, name, args, &return_type, span)?;
+                        }
                     *return_type
                 }
                 _ => {

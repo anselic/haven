@@ -1,0 +1,7 @@
+// A string keeps its quotes: an attribute that takes a bare word rejects it.
+//@ error: `@inline("always")` is not a valid value
+
+@inline("always")
+proc f() i32 { return 0; }
+
+proc main() i32 { return f(); }

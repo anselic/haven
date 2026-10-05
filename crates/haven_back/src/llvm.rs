@@ -138,9 +138,8 @@ fn emit_field_type<'a>(ty: &Type<'a>, types: &TypeTable<'a>, symbols: &HashMap<D
 struct FastMathFlags(u8);
 
 impl FastMathFlags {
-    /// Every individual flag, in the order LLVM itself prints them. `afn` has no
-    /// spelling of its own in `@fastmath` (nothing calls a math function through
-    /// a flaggable instruction yet), but it is part of `fast`, so it has a bit.
+    /// Every individual flag, in the order LLVM itself prints them. `afn` only
+    /// matters on a call to a math intrinsic, which is where it is emitted.
     const NAMES: [&'static str; 7] = ["nnan", "ninf", "nsz", "arcp", "contract", "afn", "reassoc"];
     const ALL: Self = Self((1 << Self::NAMES.len()) - 1);
 
@@ -453,7 +452,17 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 None => {
                     let dst_prefix = dst.map(|dst| format!("{dst} = ")).unwrap_or_default();
                     let call_ty = emit_type(&return_type, &cx.types, &cx.symbols);
-                    emitln!(cx, "    {dst_prefix}call {call_ty} {callee_str}({args_str})");
+                    // a call to a float-valued intrinsic (`llvm.sqrt`,
+                    // `llvm.vector.reduce.fadd`, ...) takes the function's
+                    // fast-math flags like any float instruction: `afn` and
+                    // `reassoc` mean nothing anywhere else. LLVM rejects flags on
+                    // a call that does not return a float, so only those get them.
+                    let flags = match &callee {
+                        Callee::Direct(name) if name.starts_with("llvm.") && is_float_valued(&return_type) =>
+                            cx.current_fast_math_flags.to_ir(),
+                        _ => String::new(),
+                    };
+                    emitln!(cx, "    {dst_prefix}call{flags} {call_ty} {callee_str}({args_str})");
                 }
             }
         }
@@ -651,6 +660,16 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             emitln!(cx, "    {dst} = shufflevector {simd_ty} {v0}, {simd_ty} {v1}, <{size} x i32> <{mask}>");
         }
     };
+}
+
+/// Whether a value of `ty` is a float or a vector of floats: the only results
+/// LLVM allows fast-math flags on.
+fn is_float_valued(ty: &Type<'_>) -> bool {
+    match ty {
+        Type::Float32 | Type::Float64 => true,
+        Type::Simd(elem, _) => matches!(elem.as_ref(), Type::Float32 | Type::Float64),
+        _ => false,
+    }
 }
 
 fn emit_terminator<'a>(cx: &mut EmitCtx<'a>, term: Terminator<'a>) {
@@ -994,7 +1013,12 @@ fn emit_module<'a>(cx: &mut EmitCtx<'a>, module: Module<'a>) {
         emitln!(cx, "");
     }
 
-    module.externs.into_iter().for_each(|ext| emit_extern(cx, ext));
+    // an intrinsic the prelude below already declares (the saturating casts
+    // `numerical_cast` uses) must not be declared a second time: LLVM rejects a
+    // redefinition even when the two agree.
+    module.externs.into_iter()
+        .filter(|ext| !PREPEND.contains(&format!("@{}(", ext.name)))
+        .for_each(|ext| emit_extern(cx, ext));
     module.functions.into_iter().for_each(|func| emit_function(cx, func));
 }
 

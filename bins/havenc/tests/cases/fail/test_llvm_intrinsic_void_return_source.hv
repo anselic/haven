@@ -1,0 +1,6 @@
+//@ error: `return` names no type: this extern returns `void`
+
+@llvm_intrinsic_infer("llvm.prefetch", return)
+extern prefetch(p: *f32, rw: i32, locality: i32, cache: i32) void with [];
+
+proc main() i32 { return 0; }

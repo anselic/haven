@@ -1,0 +1,9 @@
+//@ error: is bound to an LLVM intrinsic and cannot be used as a value
+
+@llvm_intrinsic_infer("llvm.sqrt")
+extern vsqrt<T>(x: T) T with [];
+
+proc main() i32 {
+    let f = vsqrt::<f32>;
+    return 0;
+}

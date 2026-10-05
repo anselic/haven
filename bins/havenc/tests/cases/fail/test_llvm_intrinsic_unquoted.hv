@@ -1,0 +1,7 @@
+// The name has dots in it, so it is written as a string.
+//@ error: needs the intrinsic's name as a string first
+
+@llvm_intrinsic_infer(sqrt)
+extern vsqrt(x: f32) f32 with [];
+
+proc main() i32 { return 0; }

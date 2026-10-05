@@ -1,0 +1,7 @@
+// Only `llvm.*` symbols are intrinsics; a C function is an ordinary extern.
+//@ error: is not an LLVM intrinsic name
+
+@llvm_intrinsic_exact("sqrtf")
+extern vsqrt(x: f32) f32 with [];
+
+proc main() i32 { return 0; }

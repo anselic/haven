@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use haven_common::ast::*;
 use haven_common::defs::{DefId, Defs, TyHead};
 use haven_common::layout::{self, TypeInfo, TypeTable, EnumRepr};
+use haven_common::llvm_intrinsic::LlvmIntrinsic;
 
 mod context;
 mod generics;
@@ -579,6 +580,10 @@ pub fn typecheck_program<'a>(
 
     // forward declare functions so that they can be called before their definition
     for node in program {
+        if let TopLevelNode::Extern { name, attributes, params, .. } = &node.value
+            && let Some(intrinsic) = LlvmIntrinsic::from_extern(attributes, params) {
+                cx.llvm_intrinsics.insert(name, intrinsic);
+            }
         match &node.value {
             // generic functions go into a separate table; not callable via the
             // ordinary function-type path, only through turbofish.

@@ -1365,8 +1365,22 @@ fn check_attributes<'a>(mod_attrs: &[Attribute<'a>], imports: &[Import<'a>],
             TopLevelNode::Function { attributes, .. } => {
                 check(attributes, AttrTarget::Function, &mut errs);
             }
-            TopLevelNode::Extern { attributes, .. } => {
+            TopLevelNode::Extern { attributes, generics, params, return_type, .. } => {
+                let before = errs.len();
                 check(attributes, AttrTarget::Extern, &mut errs);
+                // an intrinsic binding is checked against the extern's own
+                // signature too, once each attribute is well-formed by itself
+                if errs.len() == before
+                    && let Err((msg, note)) = haven_common::llvm_intrinsic::check_extern(
+                        attributes,
+                        !generics.is_empty(),
+                        params, return_type)
+                {
+                    let span = attributes.iter()
+                        .rfind(|a| a.value.name.starts_with("llvm_intrinsic_"))
+                        .map_or(tl.span, |a| a.span);
+                    errs.push(Error::new(span, msg).with_note(note));
+                }
             }
             TopLevelNode::Struct { attributes, .. } =>
                 check(attributes, AttrTarget::Struct, &mut errs),

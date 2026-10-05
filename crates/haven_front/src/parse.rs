@@ -1425,10 +1425,16 @@ fn parse_cfg_expr<'tks, 'src: 'tks>() -> P<'tks, 'src, CfgExpr<'src>> {
 /// is allowed is the attribute table's call, not the grammar's); `@cfg` takes
 /// the structured grammar above.
 fn attribute_tail<'tks, 'src: 'tks>() -> P<'tks, 'src, AttributeNode<'src>> {
+    // a string keeps its quotes, so the value is its source spelling: an
+    // attribute that wants a bare word (`@inline(always)`) rejects `"always"` as
+    // an invalid value instead of silently accepting either. `return` is a
+    // keyword, so it is only ever an overload source of `@llvm_intrinsic_infer`.
     let scalar = select_ref! {
         Token::Var(s) => s.to_string(),
         Token::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         Token::IntLit(i) => i.to_string(),
+        Token::Str(s) => format!("\"{s}\""),
+        Token::Return => "return".to_string(),
     };
     let scalars = scalar
         .separated_by(just(Token::Comma))

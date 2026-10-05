@@ -1,0 +1,7 @@
+// A source is `return` or one of the extern's own parameter names.
+//@ error: `y` is not a parameter of this extern
+
+@llvm_intrinsic_infer("llvm.sqrt", y)
+extern vsqrt(x: f32) f32 with [];
+
+proc main() i32 { return 0; }

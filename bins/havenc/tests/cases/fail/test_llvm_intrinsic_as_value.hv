@@ -1,0 +1,12 @@
+// An intrinsic has no address, so its extern cannot become a function pointer.
+//@ error: is bound to an LLVM intrinsic and cannot be used as a value
+
+@llvm_intrinsic_exact("llvm.sqrt.f32")
+extern vsqrt(x: f32) f32 with [];
+
+proc apply(f: proc(f32) f32, x: f32) f32 { return f(x); }
+
+proc main() i32 {
+    let y = apply(vsqrt, 4.0f32);
+    return 0;
+}

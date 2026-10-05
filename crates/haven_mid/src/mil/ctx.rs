@@ -290,6 +290,13 @@ pub struct LowerCtx<'a> {
     /// outermost literal and never leaks into nested field/element literals.
     pub store_target: Option<Register>,
     pub strings: Vec<Vec<u8>>,                // interned string-literal blobs (-> @.str.N)
+    /// Externs bound to an LLVM intrinsic, from typecheck. Their calls go to a
+    /// per-instance symbol instead of the extern's own name.
+    pub llvm_intrinsics: HashMap<&'a str, haven_common::llvm_intrinsic::LlvmIntrinsic>,
+    /// One declaration per intrinsic symbol actually called, in first-use order.
+    pub intrinsic_decls: Vec<ExternDecl<'a>>,
+    /// Where the symbols minted for `intrinsic_decls` live.
+    pub arena: &'a bumpalo::Bump,
 }
 
 impl<'a> LowerCtx<'a> {

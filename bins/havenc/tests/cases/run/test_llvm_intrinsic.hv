@@ -1,0 +1,66 @@
+// Externs bound to LLVM intrinsics compute what LLVM documents, including the
+// edge cases that make them worth binding: saturating casts, NaN-aware min,
+// and `i1` immediate arguments passed as `bool` literals.
+
+import std/numeric/f32
+import std/simd { simd_splat, simd_load, simd_store }
+
+@llvm_intrinsic_infer("llvm.sqrt")
+extern vsqrt<T>(x: T) T with [];
+
+@llvm_intrinsic_exact("llvm.fma.f64")
+extern fma64(a: f64, b: f64, c: f64) f64 with [];
+
+@llvm_intrinsic_infer("llvm.fptosi.sat", return, x)
+extern sat<R, T>(x: T) R with [];
+
+@llvm_intrinsic_infer("llvm.minnum")
+extern minnum<T>(a: T, b: T) T with [];
+
+@llvm_intrinsic_infer("llvm.copysign")
+extern copysign<T>(mag: T, sign: T) T with [];
+
+@llvm_intrinsic_infer("llvm.ctpop")
+extern popcount<T>(x: T) T with [];
+
+// the `bool` is an immediate: LLVM requires a constant there
+@llvm_intrinsic_infer("llvm.ctlz")
+extern ctlz<T>(x: T, zero_is_poison: bool) T with [];
+
+@llvm_intrinsic_infer("llvm.abs")
+extern iabs<T>(x: T, min_is_poison: bool) T with [];
+
+@llvm_intrinsic_infer("llvm.vector.reduce.fadd", v)
+extern reduce_fadd<T, const N: u64>(acc: T, v: simd<T, N>) T with [];
+
+// a typed wrapper, the way the standard library is meant to expose these
+proc root<T>(x: T) T without Alloc { return vsqrt(x); }
+
+@export
+proc main() i32 {
+    let nan = f32::from_bits(0x7fc00000u32);
+
+    println(root(16.0f32));                       // 4
+    println(root(2.25f64));                       // 1.5
+    let roots: [f32] = [0.0f32; 4];
+    simd_store::<f32, 4>(roots, 0u64, root(simd_splat::<f32, 4>(9.0f32)));
+    println(roots[3]);                            // 3
+
+    println(fma64(2.0f64, 3.0f64, 1.0f64));       // 7
+
+    println(numerical_cast::<i32>(sat::<i8, f32>(300.0f32)));   // 127, not wrapped
+    println(numerical_cast::<i32>(sat::<i8, f32>(-300.0f32)));  // -128
+    println(sat::<i32, f32>(nan));                // 0
+
+    println(minnum(nan, 2.0f32));                 // 2: NaN loses
+    println(copysign(3.0f32, -0.0f32));           // -3
+
+    println(numerical_cast::<i32>(popcount(255u8)));            // 8
+    println(ctlz(1u32, false));                   // 31
+    println(iabs(-5i32, false));                  // 5
+
+    let src: [f32] = [1.0f32, 2.0f32, 3.0f32, 4.0f32];
+    let v: simd<f32, 4> = simd_load::<f32, 4>(src, 0u64);
+    println(reduce_fadd::<f32, 4>(0.5f32, v));    // 10.5
+    return 0;
+}

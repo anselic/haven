@@ -689,6 +689,9 @@ pub fn lower<'a>(
         sret_param: None,
         store_target: None,
         strings: Vec::new(),
+        llvm_intrinsics: typecheck_context.llvm_intrinsics.clone(),
+        intrinsic_decls: Vec::new(),
+        arena,
     };
 
     let mut functions = Vec::new();
@@ -731,6 +734,9 @@ pub fn lower<'a>(
                 cx.blocks.clear();
                 cx.env.clear();
             }
+            // an extern bound to an LLVM intrinsic declares one symbol per
+            // concrete instance, as its calls are lowered (`intrinsic_decls`)
+            TopLevelNode::Extern { name, .. } if cx.llvm_intrinsics.contains_key(name) => {}
             TopLevelNode::Extern { name, attributes, generics, params, return_type, .. } => {
                 // a generic extern's type-param slots (`arg: T`) have no concrete
                 // layout, so drop them from the declaration and keep only the
@@ -796,6 +802,7 @@ pub fn lower<'a>(
         }
     }
 
+    externs.append(&mut cx.intrinsic_decls);
     Module {
         functions, externs, structs, globals, strings: cx.strings, enum_unions,
         types: cx.types, symbols: cx.symbols,

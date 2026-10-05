@@ -1298,10 +1298,11 @@ pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
         targets: &[AttrTarget::Function],
     },
     // `@fastmath(reassoc, nsz, contract)` turns on exactly the flags listed;
-    // `fast` is all of them and is written alone.
+    // `fast` is all of them and is written alone. `afn` lets LLVM approximate
+    // the math intrinsics a function calls (`llvm.sin`, `llvm.exp`, ...).
     AttrSpec {
         name: "fastmath", value: AttrValue::List,
-        values: Some(&["fast", "reassoc", "nnan", "ninf", "nsz", "arcp", "contract"]),
+        values: Some(&["fast", "reassoc", "nnan", "ninf", "nsz", "arcp", "contract", "afn"]),
         targets: &[AttrTarget::Function],
     },
     // Unsafe optimization contract: memory accessed through each `*T`
@@ -1310,6 +1311,19 @@ pub const KNOWN_ATTRIBUTES: &[AttrSpec] = &[
     AttrSpec {
         name: "noalias", value: AttrValue::Never, values: None,
         targets: &[AttrTarget::Function],
+    },
+    // Bind an extern to an LLVM intrinsic (see `crate::llvm_intrinsic`):
+    // `@llvm_intrinsic_exact("llvm.x86.sse.rcp.ps")`, or
+    // `@llvm_intrinsic_infer("llvm.sqrt", return, x)` to add type suffixes.
+    // The checks against the extern's own signature are in
+    // `llvm_intrinsic::check_extern`.
+    AttrSpec {
+        name: crate::llvm_intrinsic::EXACT_ATTR, value: AttrValue::List, values: None,
+        targets: &[AttrTarget::Extern],
+    },
+    AttrSpec {
+        name: crate::llvm_intrinsic::INFER_ATTR, value: AttrValue::List, values: None,
+        targets: &[AttrTarget::Extern],
     },
 ];
 
@@ -1365,6 +1379,32 @@ pub fn check_attribute(
         return Err((
             "`fast` already turns on every fast-math flag".to_string(),
             "write `@fastmath(fast)` alone, or list only the flags you want".to_string()));
+    }
+    {
+        use crate::llvm_intrinsic::{EXACT_ATTR, INFER_ATTR, unquote, valid_name};
+        if attr.name == EXACT_ATTR || attr.name == INFER_ATTR {
+            let Some(name) = unquote(written[0]) else {
+                return Err((
+                    format!("`@{}` needs the intrinsic's name as a string first", attr.name),
+                    format!("e.g. `@{}(\"llvm.sqrt\")`", attr.name)));
+            };
+            if !valid_name(name) {
+                return Err((
+                    format!("`\"{name}\"` is not an LLVM intrinsic name"),
+                    "an intrinsic name starts with `llvm.` and has dot-separated parts \
+                     of letters, digits and `_`".to_string()));
+            }
+            if attr.name == EXACT_ATTR && written.len() > 1 {
+                return Err((
+                    format!("`@{EXACT_ATTR}` takes only the intrinsic's name"),
+                    format!("to add type suffixes per instance, use `@{INFER_ATTR}`")));
+            }
+            if let Some(quoted) = written[1..].iter().find(|v| unquote(v).is_some()) {
+                return Err((
+                    format!("overload source {quoted} must be a bare name, not a string"),
+                    "write `return` or a parameter name without quotes".to_string()));
+            }
+        }
     }
     if !spec.targets.contains(&target) {
         let ok = spec.targets.iter().map(|t| t.label()).collect::<Vec<_>>().join(", ");

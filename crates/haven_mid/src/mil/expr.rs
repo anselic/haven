@@ -267,6 +267,31 @@ fn lower_intrinsic<'a>(
     }
 }
 
+/// The symbol a call to the intrinsic-bound extern `name` reaches with these
+/// argument and return types, declared on first use. Each distinct symbol is
+/// declared once, however many instances or call sites share it.
+fn intrinsic_symbol<'a>(
+    cx: &mut LowerCtx<'a>,
+    name: &str,
+    args: &[(Value, Type<'a>)],
+    return_type: &Type<'a>,
+) -> &'a str {
+    let arg_tys: Vec<Type<'a>> = args.iter().map(|(_, ty)| ty.clone()).collect();
+    let symbol = cx.llvm_intrinsics[name].symbol(&arg_tys, return_type)
+        .unwrap_or_else(|e| unreachable!("intrinsic call `{name}` passed typecheck: `{e:?}` has no suffix"));
+    if let Some(decl) = cx.intrinsic_decls.iter().find(|d| d.name == symbol) {
+        return decl.name;
+    }
+    let symbol: &'a str = cx.arena.alloc_str(&symbol);
+    cx.intrinsic_decls.push(ExternDecl {
+        name: symbol,
+        attributes: Vec::new(),
+        params: arg_tys,
+        return_type: return_type.clone(),
+    });
+    symbol
+}
+
 pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
     match &expr.value {
         ExprNode::Bool(b)    => Value::Const(Const::Bool(*b)),
@@ -837,7 +862,7 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
                 Some(Type::Function { params, .. }) => params,
                 _ => vec![],
             };
-            let lowered_args = args.iter().enumerate().map(|(i, arg)| {
+            let lowered_args: Vec<(Value, Type<'a>)> = args.iter().enumerate().map(|(i, arg)| {
                 let arg_ty = cx.node_types[&arg.id].clone();
                 let val = lower_expr(cx, arg);
                 let param_ty = param_tys.get(i).cloned()
@@ -853,6 +878,11 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             }
 
             let return_type = cx.node_types[&expr.id].clone();
+            let callee = match callee {
+                Callee::Direct(name) if cx.llvm_intrinsics.contains_key(name) =>
+                    Callee::Direct(intrinsic_symbol(cx, name, &lowered_args, &return_type)),
+                other => other,
+            };
             // a call to a `!`-returning proc never comes back: emit it as a void
             // call and mark the block unreachable, exactly like `abort`.
             if return_type == Type::Never {

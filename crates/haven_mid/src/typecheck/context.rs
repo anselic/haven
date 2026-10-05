@@ -136,6 +136,12 @@ pub struct Context<'a> {
     /// Generic function signatures, by name. NOT callable via the ordinary
     /// `Type::Function` path; calls go through `check_generic_call`.
     pub generic_fns: HashMap<&'a str, GenericFnSig<'a>>,
+    /// Externs bound to an LLVM intrinsic, by name. Such an extern can only be
+    /// called directly: an intrinsic has no address to take.
+    pub llvm_intrinsics: HashMap<&'a str, haven_common::llvm_intrinsic::LlvmIntrinsic>,
+    /// The callee `Var` of the call being checked, while it is inferred. The one
+    /// place a name in `llvm_intrinsics` may appear as an expression.
+    pub intrinsic_callee: Option<usize>,
     /// Names of module-level constants. Used to reject direct assignment to a
     /// `const` global (they are read-only).
     pub global_consts: std::collections::HashSet<&'a str>,
@@ -251,6 +257,8 @@ impl<'a> Context<'a> {
             generics: Vec::new(),
             const_generics: Vec::new(),
             generic_fns: HashMap::new(),
+            llvm_intrinsics: HashMap::new(),
+            intrinsic_callee: None,
             global_consts: std::collections::HashSet::new(),
             enums: HashMap::new(),
             generic_enums: std::collections::HashMap::new(),

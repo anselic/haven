@@ -1,0 +1,16 @@
+// The suffix is checked on each concrete instance: a struct has no LLVM spelling,
+// even when it arrives through a generic wrapper.
+//@ error: cannot call LLVM intrinsic `vsqrt` with these types
+//@ error: `Pair` cannot be passed to or returned from an LLVM intrinsic
+
+@llvm_intrinsic_infer("llvm.sqrt")
+extern vsqrt<T>(x: T) T with [];
+
+struct Pair { a: f32, b: f32 }
+
+proc root<T>(x: T) T { return vsqrt(x); }
+
+proc main() i32 {
+    let p = root(Pair { a: 1.0f32, b: 2.0f32 });
+    return 0;
+}

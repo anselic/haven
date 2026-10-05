@@ -1,0 +1,6 @@
+//@ error: `@llvm_intrinsic_infer` cannot be written on a function
+
+@llvm_intrinsic_infer("llvm.sqrt")
+proc vsqrt(x: f32) f32 { return x; }
+
+proc main() i32 { return 0; }

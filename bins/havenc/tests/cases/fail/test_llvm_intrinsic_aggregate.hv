@@ -1,0 +1,13 @@
+// Every argument and the result are checked, not only the overload sources: an
+// intrinsic never takes the C-ABI path an aggregate would (`sret`, coercion),
+// so a tuple result is rejected even on an exact binding with no suffix at all.
+//@ error: cannot call LLVM intrinsic `sadd` with these types
+//@ error: `(i32, bool)` cannot be passed to or returned from an LLVM intrinsic
+
+@llvm_intrinsic_exact("llvm.sadd.with.overflow.i32")
+extern sadd(a: i32, b: i32) (i32, bool) with [];
+
+proc main() i32 {
+    let r = sadd(1, 2);
+    return 0;
+}

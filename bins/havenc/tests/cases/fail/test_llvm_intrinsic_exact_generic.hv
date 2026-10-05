@@ -1,0 +1,8 @@
+// An exact symbol has one signature; a generic extern would call it with a
+// different one per instance.
+//@ error: `@llvm_intrinsic_exact` cannot be written on a generic extern
+
+@llvm_intrinsic_exact("llvm.sqrt.f32")
+extern vsqrt<T>(x: T) T with [];
+
+proc main() i32 { return 0; }

@@ -1,0 +1,7 @@
+//@ error: cannot both be written on one extern
+
+@llvm_intrinsic_exact("llvm.sqrt.f32")
+@llvm_intrinsic_infer("llvm.sqrt")
+extern vsqrt(x: f32) f32 with [];
+
+proc main() i32 { return 0; }

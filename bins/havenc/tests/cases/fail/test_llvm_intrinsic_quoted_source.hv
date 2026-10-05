@@ -1,0 +1,6 @@
+//@ error: must be a bare name, not a string
+
+@llvm_intrinsic_infer("llvm.sqrt", "x")
+extern vsqrt(x: f32) f32 with [];
+
+proc main() i32 { return 0; }

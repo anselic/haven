@@ -1,0 +1,6 @@
+//@ error: `@llvm_intrinsic_exact` takes only the intrinsic's name
+
+@llvm_intrinsic_exact("llvm.sqrt.f32", x)
+extern vsqrt(x: f32) f32 with [];
+
+proc main() i32 { return 0; }
