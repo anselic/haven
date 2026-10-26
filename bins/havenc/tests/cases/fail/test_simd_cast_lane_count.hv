@@ -1,0 +1,11 @@
+// A vector cast keeps the lane count; changing it is not a conversion.
+//@ error: cannot change the lane count
+
+import std/simd { simd_splat }
+
+@export
+proc main() i32 {
+    let v: simd<i32, 8> = simd_splat::<i32, 8>(1);
+    let w: simd<f32, 4> = numerical_cast::<simd<f32, 4>>(v);
+    return 0;
+}

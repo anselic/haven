@@ -1,0 +1,43 @@
+// Assigning a whole fixed array: `a = b;`, `a = f();`, and a struct field
+// `h.up = [...]`. A fixed array is held by pointer, and the assignment used to
+// `store` that pointer as if it were the array value, which clang rejects
+// ("defined with type 'ptr' but expected '[4 x float]'"). It must copy the
+// elements, and the copy must not alias the source afterwards.
+
+struct H { up: [[f32; 2]; 3], tail: i32 }
+
+proc make(x: f32) [f32; 4] { return [x, x, x, x]; }
+
+proc pick(mode: u32) [f32; 4] {
+    let r: [f32; 4] = [0.0f32; 4];
+    if (mode == 1u32) { r = make(1.0f32); } else { r = make(2.0f32); }
+    return r;
+}
+
+@export
+proc main() i32 {
+    let a: [f32; 4] = [1.0f32; 4];
+    let b: [f32; 4] = [2.0f32; 4];
+    a = b;
+    println(a[0u64] + a[3u64]);              // 4
+    b[0u64] = 7.0f32;
+    println(a[0u64]);                        // 2, not the 7 written to b
+
+    a = make(5.0f32);
+    println(a[1u64]);                        // 5
+    println(pick(1u32)[2u64] + pick(0u32)[2u64]); // 3
+
+    a = a;                                   // self-assignment keeps the value
+    println(a[3u64]);                        // 5
+
+    let h: H = H { up: [[1.0f32; 2]; 3], tail: 42 };
+    h.up = [[0.0f32; 2]; 3];
+    println(h.up[2u64][1u64]);               // 0
+    println(h.tail);                         // 42, the neighbour field survives
+
+    let row: [f32; 2] = [3.0f32, 4.0f32];
+    h.up[1u64] = row;
+    row[0u64] = 9.0f32;
+    println(h.up[1u64][0u64]);               // 3
+    return 0;
+}

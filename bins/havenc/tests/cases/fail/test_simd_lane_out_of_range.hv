@@ -1,0 +1,11 @@
+// A literal lane index past the last lane is a compile error.
+//@ error: lane 4 is out of range for a vector of 4 lanes
+
+import std/simd { simd_splat }
+
+@export
+proc main() i32 {
+    let v: simd<f32, 4> = simd_splat::<f32, 4>(1.0f32);
+    let x: f32 = v[4u64];
+    return 0;
+}

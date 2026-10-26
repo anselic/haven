@@ -147,6 +147,10 @@ pub enum Inst<'a> {
     Splat { dst: Register, val: Value, ty: Type<'a>, size: usize },
     // %dst = shufflevector ty(simd) %v0, ty(simd) %v1, <size x i32> <mask>
     Shuffle { dst: Register, value_size: usize, v0: Value, v1: Value, ty: Type<'a>, size: usize, mask: Vec<usize> },
+    // %dst = select <size x i1> %mask, ty(simd) %a, ty(simd) %b (per lane)
+    Select { dst: Register, mask: Value, a: Value, b: Value, ty: Type<'a> },
+    // %dst = extractelement <size x ty> %vec, index_ty %index (read one lane)
+    ExtractLane { dst: Register, vec: Value, index: Value, index_ty: Type<'a>, ty: Type<'a>, size: usize },
 }
 
 #[derive(Clone, Debug)]

@@ -1,0 +1,12 @@
+// Masks are not compared with `==`/`!=`; `a ^ b` gives the lanes that differ.
+//@ error: is not supported on SIMD vectors
+
+import std/simd { simd_splat }
+
+@export
+proc main() i32 {
+    let v: simd<f32, 4> = simd_splat::<f32, 4>(1.0f32);
+    let m: simd<bool, 4> = v < v;
+    let n: simd<bool, 4> = m == m;
+    return 0;
+}

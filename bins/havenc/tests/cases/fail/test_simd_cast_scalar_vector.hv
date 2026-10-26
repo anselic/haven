@@ -1,0 +1,8 @@
+// A scalar does not become a vector by a cast (that is `simd_splat`).
+//@ error: cannot convert between a scalar and a vector
+
+@export
+proc main() i32 {
+    let w: simd<f32, 4> = numerical_cast::<simd<f32, 4>>(1i32);
+    return 0;
+}

@@ -1,0 +1,102 @@
+// Comparing two vectors gives a `simd<bool, N>` mask. Masks combine with
+// `& | ^ !`, pick lanes with `select`, reduce with `any`/`all`, convert to and
+// from integer lanes, and can be stored in a struct field. The last part is a
+// branchless gain-reduction smoother written the way the Vepres compressor
+// bank is (attack/hold/release per lane), checked lane by lane against a
+// scalar version of the same logic.
+
+import std/simd { simd_splat, simd_load, simd_store, select, any, all, simd_mask_to_int, simd_int_to_mask }
+
+struct Bank {
+    gr: simd<f32, 4>,
+    hold: simd<f32, 4>,
+    releasing: simd<bool, 4>,   // a mask kept between samples
+}
+
+proc show_i32(v: simd<i32, 4>) {
+    let a: [i32] = [0, 0, 0, 0];
+    simd_store::<i32, 4>(a, 0u64, v);
+    println(a[0]); println(a[1]); println(a[2]); println(a[3]);
+}
+
+proc tick(b: *Bank, target: simd<f32, 4>) {
+    let zero: simd<f32, 4> = simd_splat::<f32, 4>(0.0f32);
+    let attacking: simd<bool, 4> = target < b.gr;
+    let gr_att: simd<f32, 4> = target + simd_splat::<f32, 4>(0.5f32) * (b.gr - target);
+    let free: simd<bool, 4> = (b.hold <= zero) & (b.releasing | (target - b.gr > simd_splat::<f32, 4>(1.0f32)));
+    let up: simd<f32, 4> = b.gr + simd_splat::<f32, 4>(0.25f32);
+    let gr_rel: simd<f32, 4> = select(free, select(up < target, up, target), b.gr);
+    b.gr = select(attacking, gr_att, gr_rel);
+    b.releasing = !attacking & free & (b.gr < target);
+    let down: simd<f32, 4> = b.hold - simd_splat::<f32, 4>(1.0f32);
+    b.hold = select(attacking, simd_splat::<f32, 4>(3.0f32), select(down > zero, down, zero));
+}
+
+// the same smoother on one lane, with branches
+struct Lane { gr: f32, hold: f32, releasing: bool }
+
+proc tick_lane(l: *Lane, target: f32) {
+    let attacking: bool = target < l.gr;
+    let gr_att: f32 = target + 0.5f32 * (l.gr - target);
+    let free: bool = l.hold <= 0.0f32 && (l.releasing || target - l.gr > 1.0f32);
+    let gr_rel: f32 = l.gr;
+    if (free) {
+        let up: f32 = l.gr + 0.25f32;
+        gr_rel = target;
+        if (up < target) { gr_rel = up; }
+    }
+    if (attacking) { l.gr = gr_att; } else { l.gr = gr_rel; }
+    l.releasing = !attacking && free && l.gr < target;
+    if (attacking) { l.hold = 3.0f32; } else { l.hold = l.hold - 1.0f32; if (l.hold < 0.0f32) { l.hold = 0.0f32; } }
+}
+
+@export
+proc main() i32 {
+    let xs: [f32] = [1.0f32, 5.0f32, -2.0f32, 3.0f32];
+    let ys: [f32] = [2.0f32, 5.0f32, -3.0f32, 9.0f32];
+    let x: simd<f32, 4> = simd_load::<f32, 4>(xs, 0u64);
+    let y: simd<f32, 4> = simd_load::<f32, 4>(ys, 0u64);
+
+    let lt: simd<bool, 4> = x < y;                    // T F F T
+    let eq: simd<bool, 4> = x == y;                   // F T F F
+    show_i32(simd_mask_to_int::<i32, 4>(lt));          // -1 0 0 -1
+    show_i32(simd_mask_to_int::<i32, 4>(lt | eq));     // -1 -1 0 -1
+    show_i32(simd_mask_to_int::<i32, 4>(!lt ^ eq));    // 0 0 -1 0
+    println(any(eq));                                 // true
+    println(all(lt | eq));                            // false
+    println(all(x == x));                             // true
+
+    let mx: simd<f32, 4> = select(x > y, x, y);        // lane-wise max
+    println(mx[0u64]); println(mx[2u64]); println(mx[3u64]);   // 2 -2 9
+
+    let ints: [i32] = [0, 7, -1, 0];
+    let m: simd<bool, 4> = simd_int_to_mask::<i32, 4>(simd_load::<i32, 4>(ints, 0u64));
+    show_i32(simd_mask_to_int::<i32, 4>(m));           // 0 -1 -1 0
+
+    // the smoother: 4 lanes at once vs each lane alone, over a changing target
+    let b: Bank = Bank {
+        gr: simd_splat::<f32, 4>(0.0f32),
+        hold: simd_splat::<f32, 4>(0.0f32),
+        releasing: simd_splat::<f32, 4>(0.0f32) != simd_splat::<f32, 4>(0.0f32),
+    };
+    let lanes: [Lane; 4] = [Lane { gr: 0.0f32, hold: 0.0f32, releasing: false }; 4];
+    let targets: [f32] = [-6.0f32, -1.0f32, -3.0f32, 0.0f32, -8.0f32, -0.5f32, 0.0f32, 0.0f32,
+                          -2.0f32, -2.0f32, 0.0f32, -5.0f32, 0.0f32, 0.0f32, 0.0f32, -1.5f32];
+    let same: i32 = 0;
+    let step = 0u64;
+    while (step < 30u64) {
+        let t: [f32] = [0.0f32; 4];
+        let k = 0u64;
+        while (k < 4u64) { t[k] = targets[(step + k * 3u64) % 16u64]; k = k + 1u64; }
+        tick(&b, simd_load::<f32, 4>(t, 0u64));
+        k = 0u64;
+        while (k < 4u64) {
+            tick_lane(&lanes[k], t[k]);
+            if (b.gr[k] == lanes[k].gr && b.hold[k] == lanes[k].hold) { same = same + 1; }
+            k = k + 1u64;
+        }
+        step = step + 1u64;
+    }
+    println(same);                                    // 120
+    return 0;
+}

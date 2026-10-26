@@ -1,0 +1,9 @@
+// A float literal is range-checked against the width it names, like an integer
+// one: `1e39` is past the largest f32 (about 3.4e38) and would be infinity.
+//@ error: does not fit in f32
+
+@export
+proc main() i32 {
+    let x: f32 = 1e39f32;
+    return 0;
+}

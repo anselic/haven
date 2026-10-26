@@ -1,0 +1,65 @@
+// `let b: [T; N] = a;` copies. A fixed array is held by pointer, and binding
+// one to a new local used to adopt the source's pointer, so writing `b` wrote
+// `a`. Every kind of place a source can be is covered: a local, a parameter, a
+// struct field, an element of an array of arrays, an element reached through a
+// pointer, and a deref. A call result is a fresh slot, so it is still adopted.
+// Each line must print the original value, never the 9 written to the copy.
+
+struct P { arr: [f32; 2] }
+
+proc make() [f32; 3] { return [1.0f32, 2.0f32, 3.0f32]; }
+
+/// the parameter is the callee's own copy; a copy of it must not write it either
+proc from_param(x: [f32; 3]) f32 {
+    let y: [f32; 3] = x;
+    y[0u64] = 9.0f32;
+    return x[0u64];
+}
+
+proc from_ptr_elem(rows: *[f32; 2]) f32 {
+    let r: [f32; 2] = rows[1u64];
+    r[0u64] = 9.0f32;
+    return rows[1u64][0u64];
+}
+
+@export
+proc main() i32 {
+    let audio: [f32; 3] = make();
+    let det: [f32; 3] = audio;
+    det[0u64] = 9.0f32;
+    println(audio[0u64]);                    // 1
+    println(det[0u64]);                      // 9
+
+    let arr: [f32; 3] = [1.0f32, 2.0f32, 3.0f32];
+    println(from_param(arr));                // 1
+    println(arr[0u64]);                      // 1
+
+    let p: P = P { arr: [1.0f32, 1.0f32] };
+    let r: [f32; 2] = p.arr;
+    r[0u64] = 9.0f32;
+    println(p.arr[0u64]);                    // 1
+
+    let rows: [[f32; 2]; 2] = [[1.0f32, 1.0f32], [1.0f32, 1.0f32]];
+    let row: [f32; 2] = rows[1u64];
+    row[1u64] = 9.0f32;
+    println(rows[1u64][1u64]);               // 1
+    println(from_ptr_elem(&rows[0u64]));     // 1
+
+    let pa: *[f32; 3] = &arr;
+    let d: [f32; 3] = *pa;
+    d[2u64] = 9.0f32;
+    println(arr[2u64]);                      // 3
+
+    // a copy made in a loop: each pass gets the source as it is now
+    let src: [i32; 2] = [0, 0];
+    let i: i32 = 0;
+    while (i < 3) {
+        let c: [i32; 2] = src;
+        c[0u64] = 100;
+        src[1u64] = src[1u64] + c[1u64] + 1;
+        i = i + 1;
+    }
+    println(src[0u64]);                      // 0
+    println(src[1u64]);                      // 7
+    return 0;
+}

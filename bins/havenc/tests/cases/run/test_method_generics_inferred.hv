@@ -1,0 +1,56 @@
+// A method's own generic parameters are inferred from its arguments, the same
+// way a free proc's are. The `extend` block's parameters still come from the
+// receiver; only the ones the method declares itself are read off the call.
+// Covered: a slice method with a value parameter, a generic `extend` with one
+// more parameter of its own, a trait-bounded pointer argument (the shape of a
+// "run this per sample" helper), a call inside a generic body, and a turbofish,
+// which still works and wins.
+//@ exit: 0
+
+extend [T] {
+    proc first_or<U>(self, d: U) U { return d; }
+}
+
+struct Box<T> { v: T }
+
+extend Box<T> {
+    proc pair_sum<U>(*self, x: U, f: proc(T, U) i32) i32 { return f(self.v, x); }
+}
+
+proc add(a: i32, b: i64) i32 { return a + numerical_cast::<i32>(b); }
+
+trait Shaper {
+    proc shape(*self, x: f32) f32;
+}
+
+struct Gain { g: f32 }
+
+extend Gain: Shaper {
+    proc shape(*self, x: f32) f32 { return x * self.g; }
+}
+
+struct Os { k: f32 }
+
+extend Os {
+    proc process<F: Shaper>(*self, x: f32, f: *F) f32 { return f.shape(x) + self.k; }
+}
+
+proc run_twice<F: Shaper>(os: *Os, x: f32, f: *F) f32 {
+    return os.process(os.process(x, f), f);
+}
+
+@export
+proc main() i32 {
+    let xs: [i32] = [1, 2, 3];
+    println(xs.first_or(7));                       // 7
+
+    let b: Box<i32> = Box { v: 40 };
+    println(b.pair_sum(2i64, add));                // 42
+
+    let os: Os = Os { k: 1.0f32 };
+    let g: Gain = Gain { g: 2.0f32 };
+    println(os.process(1.5f32, &g));               // 4
+    println(run_twice(&os, 1.0f32, &g));           // 7
+    println(os.process::<Gain>(0.5f32, &g));       // 2
+    return 0;
+}

@@ -1,6 +1,28 @@
-//! Bit operations and byte conversions for `f64`. All methods are effect-free.
+//! Constants, bit operations and byte conversions for `f64`. All methods are
+//! effect-free.
 
 import u64
+
+/// Positive infinity.
+///
+/// The consts here are module items, not members of the type: import them by
+/// name (`import std/numeric/f64 { INFINITY }`) or reach them through the
+/// parent module (`import std/numeric`, then `numeric::f64::INFINITY`). A bare
+/// `f64::INFINITY` names the type `f64`, which has no such member.
+pub const INFINITY: f64 = 1.0f64 / 0.0f64;
+/// Negative infinity.
+pub const NEG_INFINITY: f64 = -1.0f64 / 0.0f64;
+/// Not a number. Its sign and payload bits are not specified; test for it with
+/// `x != x`, never by comparing bits.
+pub const NAN: f64 = 0.0f64 / 0.0f64;
+/// The largest finite value.
+pub const MAX: f64 = 1.7976931348623157e308f64;
+/// The most negative finite value.
+pub const MIN: f64 = -1.7976931348623157e308f64;
+/// The smallest positive normal value.
+pub const MIN_POSITIVE: f64 = 2.2250738585072014e-308f64;
+/// The gap between 1.0 and the next larger value.
+pub const EPSILON: f64 = 2.220446049250313e-16f64;
 
 extend f64 {
     /// Reinterpret an IEEE 754 bit pattern without numerical conversion.

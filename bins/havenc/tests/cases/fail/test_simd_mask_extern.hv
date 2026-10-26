@@ -1,0 +1,9 @@
+// A mask's memory layout is not a C type, so it cannot cross `extern`.
+//@ error: not allowed
+
+extern takes_mask(m: simd<bool, 4>) void;
+
+@export
+proc main() i32 {
+    return 0;
+}

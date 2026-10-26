@@ -184,6 +184,9 @@ struct EmitCtx<'a> {
     /// Fresh-name counter for ABI coercion temporaries (`%abi.N`), kept separate
     /// from MIL's `%tN` registers so the two never collide.
     abi_ctr: usize,
+    /// Intrinsics used on the fly that `PREPEND` does not declare (the vector
+    /// saturating casts), declared once at the end of the module.
+    extra_decls: std::collections::BTreeSet<String>,
     /// When the function currently being emitted returns a struct in registers
     /// (SysV Direct class), this holds the local slot the body writes the result
     /// into, plus its coerced register pieces - so `ret void` becomes a
@@ -288,6 +291,12 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
                 let zero = if matches!(ty, Type::Simd(_, _)) { "zeroinitializer" } else { "0" };
                 emitln!(cx, "    {dst} = sub {ty_str} {zero}, {}", emit_value(val));
             }
+        }
+        // `!` on a mask flips every lane
+        Unary { dst, op: UnaryOp::Not, val, ty: Type::Simd(_, n) } => {
+            let n = n.expect_lit();
+            let ones = vec!["i1 1"; n].join(", ");
+            emitln!(cx, "    {dst} = xor <{n} x i1> {}, <{ones}>", emit_value(val));
         }
         Unary { dst, op, val, ty: _ } =>
             emitln!(cx, "    {dst} = {}, {}", match op {
@@ -529,6 +538,22 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
         }
         PtrToInt { dst, ptr } =>
             emitln!(cx, "    {dst} = ptrtoint ptr {} to i64", emit_value(ptr)),
+        // a vector converts lane by lane, with the scalar rules below
+        Extend { dst, val, from_ty: Type::Simd(from, n), to_ty: Type::Simd(to, _) } => {
+            let n = n.expect_lit();
+            let from_s = emit_field_type(&from, &cx.types, &cx.symbols);
+            let to_s = emit_field_type(&to, &cx.types, &cx.symbols);
+            let (from_v, to_v) = (format!("<{n} x {from_s}>"), format!("<{n} x {to_s}>"));
+            let value = emit_value(val);
+            match lane_cast(&from, &to) {
+                LaneCast::Op(op) => emitln!(cx, "    {dst} = {op} {from_v} {value} to {to_v}"),
+                LaneCast::Sat(kind) => {
+                    let name = format!("llvm.{kind}.sat.v{n}{}.v{n}{}", lane_suffix(&to), lane_suffix(&from));
+                    cx.extra_decls.insert(format!("declare {to_v} @{name}({from_v})"));
+                    emitln!(cx, "    {dst} = call {to_v} @{name}({from_v} {value})");
+                }
+            }
+        }
         Extend { dst, val, from_ty, to_ty } => {
             use Type::*;
             let value = emit_value(val);
@@ -652,6 +677,17 @@ fn emit_inst<'a>(cx: &mut EmitCtx<'a>, inst: Inst<'a>) {
             let ty_str = emit_type(&ty, &cx.types, &cx.symbols);
             let simd_ty = format!("<{size} x {}>", ty_str);
             emitln!(cx, "    {dst} = insertelement {simd_ty} undef, {ty_str} {}, i32 0", emit_value(val));
+        }
+        Select { dst, mask, a, b, ty } => {
+            let Type::Simd(_, n) = &ty else { unreachable!("select on a non-vector {ty}") };
+            let vt = emit_type(&ty, &cx.types, &cx.symbols);
+            emitln!(cx, "    {dst} = select <{} x i1> {}, {vt} {}, {vt} {}",
+                n.expect_lit(), emit_value(mask), emit_value(a), emit_value(b));
+        }
+        ExtractLane { dst, vec, index, index_ty, ty, size } => {
+            let lane = emit_type(&ty, &cx.types, &cx.symbols);
+            let idx = emit_type(&index_ty, &cx.types, &cx.symbols);
+            emitln!(cx, "    {dst} = extractelement <{size} x {lane}> {}, {idx} {}", emit_value(vec), emit_value(index));
         }
         Shuffle { dst, value_size, v0, v1, ty, size, mask } => {
             let ty_str = emit_type(&ty, &cx.types, &cx.symbols);
@@ -1022,6 +1058,51 @@ fn emit_module<'a>(cx: &mut EmitCtx<'a>, module: Module<'a>) {
     module.functions.into_iter().for_each(|func| emit_function(cx, func));
 }
 
+/// How one lane converts in a vector `numerical_cast`: the same choice the
+/// scalar table in `Extend` makes, by width and signedness.
+enum LaneCast {
+    /// a plain instruction: `bitcast`, `trunc`, `sext`, `zext`, `fpext`, ...
+    Op(&'static str),
+    /// float to integer, saturating like the scalar cast: `fptosi` / `fptoui`
+    Sat(&'static str),
+}
+
+fn lane_cast(from: &Type, to: &Type) -> LaneCast {
+    use Type::*;
+    let int_bits = |t: &Type| match t {
+        Int8 | Uint8 => Some(8), Int16 | Uint16 => Some(16),
+        Int32 | Uint32 => Some(32), Int64 | Uint64 => Some(64),
+        _ => None,
+    };
+    let signed = |t: &Type| matches!(t, Int8 | Int16 | Int32 | Int64);
+    match (from, to) {
+        (Bool, t) if int_bits(t).is_some() => LaneCast::Op("sext"),
+        (Float32, Float32) | (Float64, Float64) => LaneCast::Op("bitcast"),
+        (Float32, Float64) => LaneCast::Op("fpext"),
+        (Float64, Float32) => LaneCast::Op("fptrunc"),
+        (Float32 | Float64, t) if int_bits(t).is_some() =>
+            LaneCast::Sat(if signed(t) { "fptosi" } else { "fptoui" }),
+        (f, Float32 | Float64) if int_bits(f).is_some() =>
+            LaneCast::Op(if signed(f) { "sitofp" } else { "uitofp" }),
+        (f, t) => match (int_bits(f), int_bits(t)) {
+            (Some(a), Some(b)) if a == b => LaneCast::Op("bitcast"),
+            (Some(a), Some(b)) if a > b => LaneCast::Op("trunc"),
+            (Some(_), Some(_)) => LaneCast::Op(if signed(f) { "sext" } else { "zext" }),
+            _ => unreachable!("unsupported vector lane cast from {f:?} to {t:?}"),
+        },
+    }
+}
+
+/// The type part of an overloaded intrinsic name for one lane: `i32`, `f32`, ...
+fn lane_suffix(t: &Type) -> &'static str {
+    use Type::*;
+    match t {
+        Int8 | Uint8 => "i8", Int16 | Uint16 => "i16", Int32 | Uint32 => "i32", Int64 | Uint64 => "i64",
+        Float32 => "f32", Float64 => "f64",
+        other => unreachable!("not a vector lane type: {other:?}"),
+    }
+}
+
 // I hope LLVM will optimize these away if it's not used
 const PREPEND: &str = r#"
 ; casts (for numeric_cast)
@@ -1057,7 +1138,14 @@ pub fn emit<'a>(module: Module<'a>) -> String {
         unions,
         abi_ctr: 0,
         sret_direct: None,
+        extra_decls: std::collections::BTreeSet::new(),
     };
     emit_module(&mut cx, module);
+    for decl in std::mem::take(&mut cx.extra_decls) {
+        if !PREPEND.contains(&decl) {
+            cx.buf.push_str(&decl);
+            cx.buf.push('\n');
+        }
+    }
     cx.buf
 }

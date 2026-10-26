@@ -62,6 +62,9 @@ fn escapes(function: &Function<'_>, root: Register) -> bool {
                 Inst::PtrToInt { ptr, .. } => contains(ptr, &aliases),
                 Inst::Extend { val, .. } | Inst::Splat { val, .. } => contains(val, &aliases),
                 Inst::Shuffle { v0, v1, .. } => contains(v0, &aliases) || contains(v1, &aliases),
+                Inst::ExtractLane { vec, index, .. } => contains(vec, &aliases) || contains(index, &aliases),
+                Inst::Select { mask, a, b, .. } =>
+                    contains(mask, &aliases) || contains(a, &aliases) || contains(b, &aliases),
                 Inst::Load { .. }
                 | Inst::IndexArray { .. }
                 | Inst::FieldPtr { .. }

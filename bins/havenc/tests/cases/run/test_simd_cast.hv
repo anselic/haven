@@ -1,0 +1,46 @@
+// `numerical_cast` on vectors converts lane by lane with the scalar rules:
+// int -> float rounds, float -> int truncates and saturates (NaN gives 0),
+// a signed source sign-extends and an unsigned one zero-extends, and a
+// narrowing cast keeps the low bits.
+
+import std/numeric/f32 { NAN }
+import std/simd { simd_load, simd_store }
+
+proc show_i32(v: simd<i32, 4>) {
+    let a: [i32] = [0, 0, 0, 0];
+    simd_store::<i32, 4>(a, 0u64, v);
+    println(a[0]); println(a[1]); println(a[2]); println(a[3]);
+}
+
+@export
+proc main() i32 {
+    // int -> float
+    let ints: [i32] = [-3, 0, 7, 16777217];
+    let f: simd<f32, 4> = numerical_cast::<simd<f32, 4>>(simd_load::<i32, 4>(ints, 0u64));
+    let fo: [f32] = [0.0f32; 4];
+    simd_store::<f32, 4>(fo, 0u64, f);
+    println(fo[0]); println(fo[2]); println(fo[3] == 16777216.0f32); // -3, 7, true (2^24+1 rounds)
+
+    // float -> int: truncate toward zero, saturate, NaN -> 0
+    let fl: [f32] = [-2.7f32, 2.7f32, 1e10f32, NAN];
+    show_i32(numerical_cast::<simd<i32, 4>>(simd_load::<f32, 4>(fl, 0u64)));  // -2 2 2147483647 0
+
+    // widening: i8 sign-extends, u8 zero-extends
+    let bytes: [i8] = [-1, 5, -128, 127];
+    show_i32(numerical_cast::<simd<i32, 4>>(simd_load::<i8, 4>(bytes, 0u64)));  // -1 5 -128 127
+    let ubytes: [u8] = [255, 5, 128, 0];
+    let wu: simd<i32, 4> = numerical_cast::<simd<i32, 4>>(simd_load::<u8, 4>(ubytes, 0u64));
+    show_i32(wu);                                                 // 255 5 128 0
+
+    // narrowing keeps the low bits; then back up as unsigned
+    let wide: [i32] = [257, -1, 65535, 3];
+    let narrow: simd<u8, 4> = numerical_cast::<simd<u8, 4>>(simd_load::<i32, 4>(wide, 0u64));
+    show_i32(numerical_cast::<simd<i32, 4>>(narrow));            // 1 255 255 3
+
+    // f32 -> f64 and back
+    let d: simd<f64, 4> = numerical_cast::<simd<f64, 4>>(f);
+    let back: simd<f32, 4> = numerical_cast::<simd<f32, 4>>(d);
+    simd_store::<f32, 4>(fo, 0u64, back);
+    println(fo[1]);                                               // 0
+    return 0;
+}

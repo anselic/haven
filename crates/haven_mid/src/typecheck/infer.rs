@@ -3,8 +3,24 @@ use haven_common::ast::*;
 use crate::intrinsics::Intrinsic;
 use haven_common::defs::{DefId, Member};
 use super::context::{Context, MethodCall, RecvAdjust};
-use super::generics::{bind_generics, bind_turbofish, check_bounds, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self, infer_struct_type_args, infer_enum_type_args, TargSite, ResolvedGenerics};
+use super::generics::{bind_generics, bind_turbofish, infer_method_targs, check_bounds, subst_param_type, check_generic_call, bind_struct_generics, check_const_scope, subst_self, infer_struct_type_args, infer_enum_type_args, TargSite, ResolvedGenerics};
 use super::enums::{enum_variant, split_enum_variant, enum_variant_ctor, check_variant_pattern};
+
+/// The value of an integer literal index (`3`, `3u64`), if it is one.
+fn literal_index(index: &Expr<'_>) -> Option<i128> {
+    Some(match &index.value {
+        ExprNode::IntLit(v) => *v,
+        ExprNode::Int8(v) => *v as i128,
+        ExprNode::Int16(v) => *v as i128,
+        ExprNode::Int32(v) => *v as i128,
+        ExprNode::Int64(v) => *v as i128,
+        ExprNode::Uint8(v) => *v as i128,
+        ExprNode::Uint16(v) => *v as i128,
+        ExprNode::Uint32(v) => *v as i128,
+        ExprNode::Uint64(v) => *v as i128,
+        _ => return None,
+    })
+}
 
 /// A method's mangled name, parameter types, and return type for one call site.
 type MethodSig<'a> = (&'a str, Vec<Type<'a>>, Type<'a>);
@@ -31,14 +47,19 @@ pub(crate) fn receiver_member<'a>(cx: &Context<'a>, base_ty: &Type<'a>, field: &
 /// Specialize a member signature for one call site. Receiver matching supplies
 /// the `extend` block's arguments; the call's turbofish supplies any method
 /// arguments. The desugared signature stores those groups in that order.
+///
+/// With no turbofish, the method's own arguments are inferred from `infer_from`
+/// (the call's value arguments) when given. The inferred list is returned too,
+/// for the caller to record: mono needs it to mint the instance.
 fn method_signature<'a>(
-    cx: &Context<'a>,
+    cx: &mut Context<'a>,
     m: &Member<'a>,
     u: &Unified<'a>,
     field: &str,
     type_args: &[GenericArg<'a>],
+    infer_from: Option<&[Expr<'a>]>,
     span: &Span,
-) -> Result<Option<MethodSig<'a>>, Error> {
+) -> Result<Option<(MethodSig<'a>, Option<Vec<GenericArg<'a>>>)>, Error> {
     // the impl's parameters were bound by unifying its target against the
     // receiver, so its `where` clause is checked here rather than by
     // `bind_turbofish` - nothing was written at the call site for that to look at.
@@ -52,14 +73,31 @@ fn method_signature<'a>(
         }
         return Ok(match cx.lookup(m.name) {
             Some((_, Type::Function { params, return_type })) =>
-                Some((m.name, params.clone(), (**return_type).clone())),
+                Some(((m.name, params.clone(), (**return_type).clone()), None)),
             _ => None,
         });
     };
+    let sig = sig.clone();
 
     // the parameters the receiver could not determine: everything the desugared
     // function declares past the impl's own list.
     let own = &sig.generics[sig.generics.len().min(m.generics.len())..];
+
+    // no turbofish: infer them from the value arguments, like a free proc. The
+    // impl's parameters are already known from the receiver, so substitute them
+    // first and leave only the method's own free. An arity mismatch is left for
+    // the caller's check, which reports it better than a failed inference would.
+    let mut inferred = None;
+    if type_args.is_empty() && !own.is_empty()
+        && let Some(args) = infer_from
+        && args.len() + 1 == sig.params.len()
+    {
+        let arg_params: Vec<Type<'a>> = sig.params[1..].iter()
+            .map(|p| subst_param_type(cx, &u.types, &u.consts, p)).collect();
+        inferred = Some(infer_method_targs(cx, field, own, &arg_params, args, span)?);
+    }
+    let type_args: &[GenericArg<'a>] = inferred.as_deref().unwrap_or(type_args);
+
     if type_args.len() != own.len() {
         return Err(Error::new(*span, format!(
             "method '{}' expects {} generic argument{} in `::<...>`, got {}",
@@ -68,19 +106,18 @@ fn method_signature<'a>(
                 "declares {} generic parameter{} of its own",
                 own.len(), if own.len() == 1 { "" } else { "s" }))
             .with_note(format!(
-                "supply {} with a turbofish, e.g. `.{}::<...>(...)` - they cannot be \
-                 inferred from the arguments",
-                if own.len() == 1 { "it" } else { "them" }, field)));
+                "write all of them in the turbofish, e.g. `.{}::<...>(...)`, or none \
+                 to infer them from the arguments", field)));
     }
 
     let (mut types, mut consts) = bind_turbofish(cx, field, own, type_args, span)?;
     types.extend(u.types.iter().map(|(k, v)| (*k, v.clone())));
     consts.extend(u.consts.iter().map(|(k, v)| (*k, v.clone())));
-    Ok(Some((
+    Ok(Some(((
         m.name,
         sig.params.iter().map(|p| subst_param_type(cx, &types, &consts, p)).collect(),
         subst_param_type(cx, &types, &consts, &sig.return_type),
-    )))
+    ), inferred)))
 }
 
 /// Resolve a method call `base.field(args)` when `base` is a (possibly
@@ -151,8 +188,8 @@ fn resolve_bounded_method<'a>(
             let mut u = Unified::default();
             if unify(&m.self_ty, &self_ty, &impl_params, &mut u)
                 && bounds_hold(&cx.impls, &cx.generic_bounds, &m.generics, &u)
-                && let Some((_, all_params, return_type)) =
-                    method_signature(cx, &m, &u, field, &[], span)?
+                && let Some(((_, all_params, return_type), _)) =
+                    method_signature(cx, &m, &u, field, &[], None, span)?
             {
                 let params = &all_params[1..];
                 if args.len() != params.len() {
@@ -299,10 +336,33 @@ fn typecheck_intrinsic<'a>(
             // numerical_cast::<T>(value) -> T
             let target_ty = tys[0].clone();
             let value_ty = infer(cx, &args[0])?;
-            // an enum casts to/from its integer repr, so it is allowed here too.
-            if !value_ty.is_numeric() && !cx.enums.contains_key(&value_ty.def().unwrap_or(DefId::UNRESOLVED)) {
-                return Err(Error::new(span, format!(
-                    "numerical_cast() argument must be a numeric type, got {}", cx.show(&value_ty))));
+            // a vector converts lane by lane, so both sides must be vectors of
+            // the same width; a scalar never turns into a vector or back.
+            match (&value_ty, &target_ty) {
+                (Type::Simd(from, n), Type::Simd(_, m)) => {
+                    if !from.is_numeric() {
+                        return Err(Error::new(span, format!(
+                            "numerical_cast() argument must be a vector of numbers, got {}", cx.show(&value_ty))));
+                    }
+                    if n != m {
+                        return Err(Error::new(span, format!(
+                            "numerical_cast() cannot change the lane count: {} to {}",
+                            cx.show(&value_ty), cx.show(&target_ty)))
+                            .with_note("cast each half separately, or use `simd_low`/`simd_high`"));
+                    }
+                }
+                (Type::Simd(..), _) | (_, Type::Simd(..)) => {
+                    return Err(Error::new(span, format!(
+                        "numerical_cast() cannot convert between a scalar and a vector: {} to {}",
+                        cx.show(&value_ty), cx.show(&target_ty)))
+                        .with_note("use `simd_splat` to fill a vector from a scalar"));
+                }
+                // an enum casts to/from its integer repr, so it is allowed here too.
+                _ if !value_ty.is_numeric() && !cx.enums.contains_key(&value_ty.def().unwrap_or(DefId::UNRESOLVED)) => {
+                    return Err(Error::new(span, format!(
+                        "numerical_cast() argument must be a numeric type, got {}", cx.show(&value_ty))));
+                }
+                _ => {}
             }
             cx.node_types.insert(expr_id, target_ty.clone());
             Ok(target_ty)
@@ -362,6 +422,31 @@ fn typecheck_intrinsic<'a>(
             }
             cx.node_types.insert(expr_id, Type::Void);
             Ok(Type::Void)
+        }
+        Intrinsic::SimdSelect => {
+            let ty = tys[0].clone();
+            let size = consts[0].clone();
+            let mask = Type::Simd(Box::new(Type::Bool), size.clone());
+            let vec = Type::Simd(Box::new(ty), size);
+            check_expr(cx, &mask, &args[0])?;
+            check_expr(cx, &vec, &args[1])?;
+            check_expr(cx, &vec, &args[2])?;
+            cx.node_types.insert(expr_id, vec.clone());
+            Ok(vec)
+        }
+        Intrinsic::SimdMaskToInt | Intrinsic::SimdIntToMask => {
+            let ty = tys[0].clone();
+            if !ty.is_integer() && !matches!(ty, Type::Param(_)) {
+                return Err(Error::new(span, format!(
+                    "{}() converts between masks and integer lanes, got `{}`", intrinsic, cx.show(&ty))));
+            }
+            let size = consts[0].clone();
+            let mask = Type::Simd(Box::new(Type::Bool), size.clone());
+            let ints = Type::Simd(Box::new(ty), size);
+            let (arg, result) = if intrinsic == Intrinsic::SimdMaskToInt { (mask, ints) } else { (ints, mask) };
+            check_expr(cx, &arg, &args[0])?;
+            cx.node_types.insert(expr_id, result.clone());
+            Ok(result)
         }
         Intrinsic::SimdSplat => {
             let ty = tys[0].clone();
@@ -687,6 +772,17 @@ fn check_intrinsic_call<'a>(
 /// lane (`<N x i1>`), not the single `bool` a comparison is typed as. Until
 /// there is a mask type to give it, reject it here rather than emit IR that
 /// clang refuses.
+/// The mask a lane-wise comparison of two vectors of `ty` gives: `simd<bool, N>`
+/// for a vector of numbers (or of a type parameter, checked again after mono).
+/// `None` for anything else, including a mask itself.
+fn lane_compare<'a>(ty: &Type<'a>) -> Option<Type<'a>> {
+    match ty {
+        Type::Simd(inner, n) if inner.is_numeric() || matches!(**inner, Type::Param(_)) =>
+            Some(Type::Simd(Box::new(Type::Bool), n.clone())),
+        _ => None,
+    }
+}
+
 fn reject_simd_comparison<'a>(
     cx: &Context<'a>,
     op: BinaryOp,
@@ -698,8 +794,8 @@ fn reject_simd_comparison<'a>(
     }
     Err(Error::new(span, format!("comparison operator '{}' is not supported on SIMD vectors", op))
         .with_label(span, format!("got `{}`", cx.show(operand_ty)))
-        .with_note("a lane-wise comparison yields one result per lane, \
-            and there is no SIMD mask type yet"))
+        .with_note("masks are compared with the bitwise operators: `a ^ b` is \
+            true in the lanes where they differ"))
 }
 
 /// The type arguments a generic enum's constructor is built with, and the
@@ -1215,6 +1311,16 @@ pub(crate) fn infer<'a>(
                 Type::Slice(inner)
                 | Type::Array(inner, _)
                 | Type::Pointer(inner) => *inner,
+                // one lane of a vector. A literal index past the last lane is
+                // caught here; a runtime one is unchecked, like an array's.
+                Type::Simd(inner, n) => {
+                    if let (Some(i), ConstVal::Lit(n)) = (literal_index(index), &n)
+                        && i >= *n as i128 {
+                            return Err(Error::new(span, format!(
+                                "lane {} is out of range for a vector of {} lanes", i, n)));
+                        }
+                    *inner
+                }
                 _ => {
                     return Err(Error::new(span, "this type cannot be indexed")
                         .with_label(span, format!("got `{}`", cx.show(&slice_ty)))
@@ -1253,8 +1359,10 @@ pub(crate) fn infer<'a>(
                 // logical not only: there is no bitwise `!` on integers, and
                 // the backend lowers this to `xor i1`, so anything but a `bool`
                 // operand would reach LLVM as ill-typed IR.
-                UnaryOp::Not => if operand_ty == Type::Bool {
-                    Type::Bool
+                UnaryOp::Not => if operand_ty == Type::Bool
+                    || matches!(&operand_ty, Type::Simd(inner, _) if **inner == Type::Bool)
+                {
+                    operand_ty
                 } else {
                     return Err(Error::new(span, "`!` needs a `bool` operand")
                         .with_label(span, format!("expected `bool`, got `{}`",
@@ -1268,8 +1376,13 @@ pub(crate) fn infer<'a>(
             match op {
                 Eq | Ne => {
                     let left_ty = binary_operand_ty(cx, left, right)?;
-                    reject_simd_comparison(cx, *op, &left_ty, span)?;
-                    Type::Bool
+                    match lane_compare(&left_ty) {
+                        Some(mask) => mask,
+                        None => {
+                            reject_simd_comparison(cx, *op, &left_ty, span)?;
+                            Type::Bool
+                        }
+                    }
                 },
                 Add | Sub | Mul | Div | Mod
                 | Lt | Gt | Le | Ge => {
@@ -1283,10 +1396,13 @@ pub(crate) fn infer<'a>(
 
                     match op {
                         Add | Sub | Mul | Div | Mod => left_ty, // returns scalar or SIMD
-                        Lt | Gt | Le | Ge => {
-                            reject_simd_comparison(cx, *op, &left_ty, span)?;
-                            Type::Bool
-                        }
+                        Lt | Gt | Le | Ge => match lane_compare(&left_ty) {
+                            Some(mask) => mask,
+                            None => {
+                                reject_simd_comparison(cx, *op, &left_ty, span)?;
+                                Type::Bool
+                            }
+                        },
                         _ => unreachable!(),
                     }
                 },
@@ -1299,9 +1415,14 @@ pub(crate) fn infer<'a>(
                 // bitwise and shifts: integer operands, same type on both sides
                 // (LLVM requires the shift amount to match the value type), result
                 // is that integer type.
+                // a vector of integers works lane by lane, the shift amount
+                // being a vector of the same type.
                 BitAnd | BitOr | BitXor | Shl | Shr => {
                     let left_ty = binary_operand_ty(cx, left, right)?;
-                    if !left_ty.is_integer() {
+                    let lanes_ok = matches!(&left_ty, Type::Simd(inner, _) if inner.is_integer())
+                        || (matches!(&left_ty, Type::Simd(inner, _) if **inner == Type::Bool)
+                            && matches!(op, BitAnd | BitOr | BitXor));
+                    if !left_ty.is_integer() && !lanes_ok {
                         return Err(Error::new(span,
                             format!("bitwise operator '{}' needs integer operands", op))
                             .with_label(span, format!("got `{}`", cx.show(&left_ty))));
@@ -1506,11 +1627,17 @@ pub(crate) fn infer<'a>(
                                 format!("method '{}' is private to its module", field))
                                 .with_note("mark it `pub` to call it from another module"));
                         }
-                        method_signature(cx, &m, &u, field, type_args, &span)?
+                        method_signature(cx, &m, &u, field, type_args, Some(args), &span)?
                     }
                     _ => None,
                 };
-                if let Some((target, params, return_type)) = resolved {
+                if let Some(((target, params, return_type), inferred)) = resolved {
+                    // a call with its method generics inferred keeps an empty
+                    // turbofish on the node; record them for mono, the same
+                    // channel a bare generic free-proc call uses.
+                    if let Some(targs) = inferred {
+                        cx.inferred_type_args.insert(metadata.id, targs);
+                    }
                     // params[0] is the receiver `self`; args match the rest.
                     let arg_params = &params[1..];
                     if args.len() != arg_params.len() {

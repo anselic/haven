@@ -116,6 +116,15 @@ fn infer_pointer_params(function: &mut Function<'_>) {
                 expose_value(&mut exposed, v0);
                 expose_value(&mut exposed, v1);
             }
+            Inst::Select { mask, a, b, .. } => {
+                expose_value(&mut exposed, mask);
+                expose_value(&mut exposed, a);
+                expose_value(&mut exposed, b);
+            }
+            Inst::ExtractLane { vec, index, .. } => {
+                expose_value(&mut exposed, vec);
+                expose_value(&mut exposed, index);
+            }
             Inst::Call { .. } => unreachable!("calls excluded above"),
         }
     }

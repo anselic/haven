@@ -1,0 +1,14 @@
+// A method parameter that appears in no argument cannot be inferred: the call
+// names the parameter it could not determine instead of guessing.
+//@ error: cannot infer type argument `U`
+
+extend [T] {
+    proc make<U>(self) U { return abort("unused"); }
+}
+
+@export
+proc main() i32 {
+    let xs: [i32] = [1, 2, 3];
+    let v: i32 = xs.make();
+    return v;
+}

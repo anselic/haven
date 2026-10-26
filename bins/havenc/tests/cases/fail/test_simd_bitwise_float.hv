@@ -1,0 +1,11 @@
+// Bitwise operators need integer lanes; a float vector goes through `to_bits`.
+//@ error: needs integer operands
+
+import std/simd { simd_splat }
+
+@export
+proc main() i32 {
+    let v: simd<f32, 4> = simd_splat::<f32, 4>(1.0f32);
+    let w: simd<f32, 4> = v & v;
+    return 0;
+}

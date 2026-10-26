@@ -1,6 +1,28 @@
-//! Bit operations and byte conversions for `f32`. All methods are effect-free.
+//! Constants, bit operations and byte conversions for `f32`. All methods are
+//! effect-free.
 
 import u32
+
+/// Positive infinity.
+///
+/// The consts here are module items, not members of the type: import them by
+/// name (`import std/numeric/f32 { INFINITY }`) or reach them through the
+/// parent module (`import std/numeric`, then `numeric::f32::INFINITY`). A bare
+/// `f32::INFINITY` names the type `f32`, which has no such member.
+pub const INFINITY: f32 = 1.0f32 / 0.0f32;
+/// Negative infinity.
+pub const NEG_INFINITY: f32 = -1.0f32 / 0.0f32;
+/// Not a number. Its sign and payload bits are not specified; test for it with
+/// `x != x`, never by comparing bits.
+pub const NAN: f32 = 0.0f32 / 0.0f32;
+/// The largest finite value.
+pub const MAX: f32 = 3.40282347e38f32;
+/// The most negative finite value.
+pub const MIN: f32 = -3.40282347e38f32;
+/// The smallest positive normal value.
+pub const MIN_POSITIVE: f32 = 1.17549435e-38f32;
+/// The gap between 1.0 and the next larger value.
+pub const EPSILON: f32 = 1.19209290e-7f32;
 
 extend f32 {
     /// Reinterpret an IEEE 754 bit pattern without numerical conversion.

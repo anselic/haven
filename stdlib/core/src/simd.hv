@@ -141,3 +141,71 @@ pub proc simd_fill<T, const N: u64>(dst: [T], value: T, count: u64) void {
         i = i + 1u64;
     }
 }
+
+// Bit views: the IEEE 754 bits of a float vector as unsigned integers of the
+// same width, and back. No numeric conversion, like `f32::to_bits`.
+
+/// The unsigned integer with the same width as a float: `u32` for `f32`, `u64`
+/// for `f64`. Names the lane type of a float vector's bits.
+pub trait FloatBits {
+    type Bits;
+}
+
+extend f32: FloatBits { type Bits = u32; }
+extend f64: FloatBits { type Bits = u64; }
+
+extend simd<T, N> where T: FloatBits {
+    /// Each lane's bit pattern: `simd<u32, N>` for `f32` lanes, `simd<u64, N>`
+    /// for `f64`. Preserves signed zero, infinities, subnormals and NaN payloads.
+    pub proc to_bits(self) simd<T::Bits, N> with [] {
+        return *ptr_cast::<*simd<T::Bits, N>>(&self);
+    }
+}
+
+/// Reinterpret each lane's bit pattern as a float: the inverse of `to_bits`.
+///
+/// `simd_from_bits::<f32, 8>(bits)` takes `simd<u32, 8>`; with `f64` it takes
+/// `simd<u64, N>`.
+pub proc simd_from_bits<T: FloatBits, const N: u64>(bits: simd<T::Bits, N>) simd<T, N> with [] {
+    return *ptr_cast::<*simd<T, N>>(&bits);
+}
+
+// Masks. Comparing two vectors (`a < b`, `a == b`, ...) gives a
+// `simd<bool, N>`: one bool per lane. Combine masks with `&`, `|`, `^` and `!`.
+// A mask may be a local or a struct field, but not cross `@export`/`extern`.
+
+/// Per lane: `a` where `mask` is true, `b` where it is false.
+///
+/// `select(x > y, x, y)` is a lane-wise max that returns `y` when either is NaN
+/// (x86 `maxps`), unlike `math::max`.
+pub proc select<T, const N: u64>(mask: simd<bool, N>, a: simd<T, N>, b: simd<T, N>) simd<T, N> with [] {
+    return __simd_select::<T, N>(mask, a, b);
+}
+
+@llvm_intrinsic_infer("llvm.vector.reduce.or", mask)
+extern __mask_reduce_or<const N: u64>(mask: simd<bool, N>) bool with [];
+
+@llvm_intrinsic_infer("llvm.vector.reduce.and", mask)
+extern __mask_reduce_and<const N: u64>(mask: simd<bool, N>) bool with [];
+
+/// Whether any lane of `mask` is true.
+pub proc any<const N: u64>(mask: simd<bool, N>) bool with [] {
+    return __mask_reduce_or::<N>(mask);
+}
+
+/// Whether every lane of `mask` is true.
+pub proc all<const N: u64>(mask: simd<bool, N>) bool with [] {
+    return __mask_reduce_and::<N>(mask);
+}
+
+/// A mask as integer lanes: true becomes all ones (-1, the SSE convention),
+/// false becomes 0. `T` is an integer type.
+pub proc simd_mask_to_int<T, const N: u64>(mask: simd<bool, N>) simd<T, N> with [] {
+    return __simd_mask_to_int::<T, N>(mask);
+}
+
+/// Integer lanes as a mask: a lane is true when it is not 0. `T` is an
+/// integer type.
+pub proc simd_int_to_mask<T, const N: u64>(v: simd<T, N>) simd<bool, N> with [] {
+    return __simd_int_to_mask::<T, N>(v);
+}

@@ -1,0 +1,28 @@
+// The float constants in std/numeric. They are module items, so they come in
+// by name, or through the parent module when f32's and f64's are both needed.
+// Bits are checked against IEEE 754; NaN is checked by `x != x` only, since
+// its sign and payload are not specified.
+
+import std/numeric
+import std/numeric/f32 { INFINITY, NEG_INFINITY, NAN, MAX, MIN, MIN_POSITIVE, EPSILON }
+
+@export
+proc main() i32 {
+    println(INFINITY.to_bits());                                 // 2139095040 (0x7f800000)
+    println(NEG_INFINITY.to_bits());                             // 4286578688 (0xff800000)
+    println(NAN != NAN);                                         // true
+    println(MAX.to_bits());                                      // 2139095039 (0x7f7fffff)
+    println(MIN.to_bits());                                      // 4286578687 (0xff7fffff)
+    println(MIN_POSITIVE.to_bits());                             // 8388608    (0x00800000)
+    println(EPSILON.to_bits());                                  // 872415232  (0x34000000)
+    println(1.0f32 + EPSILON > 1.0f32);                          // true
+
+    // f64 through the parent module, in the same file as f32's by name
+    println(numeric::f64::INFINITY > numeric::f64::MAX);         // true
+    println(numeric::f64::MAX.to_bits());                        // 9218868437227405311
+    println(numeric::f64::MIN_POSITIVE.to_bits());               // 4503599627370496
+    println(numeric::f64::EPSILON.to_bits());                    // 4372995238176751616
+    println(numeric::f64::NAN != numeric::f64::NAN);             // true
+    println(numeric::f64::NEG_INFINITY < numeric::f64::MIN);     // true
+    return 0;
+}

@@ -61,6 +61,15 @@ pub enum Intrinsic {
     SimdLow,
     /// `__simd_high::<T, N>(value: simd<T, M>) -> simd<T, N> where N < M`
     SimdHigh,
+    /// `__simd_select::<T, N>(mask: simd<bool, N>, a: simd<T, N>, b: simd<T, N>) -> simd<T, N>`:
+    /// per lane, `a` where the mask is true, else `b` (LLVM `select`).
+    SimdSelect,
+    /// `__simd_mask_to_int::<T, N>(mask: simd<bool, N>) -> simd<T, N>`: true lanes
+    /// become all ones (-1), false lanes 0. `T` is an integer.
+    SimdMaskToInt,
+    /// `__simd_int_to_mask::<T, N>(v: simd<T, N>) -> simd<bool, N>`: a lane is true
+    /// when it is not 0. `T` is an integer.
+    SimdIntToMask,
 }
 
 impl Intrinsic {
@@ -80,6 +89,9 @@ impl Intrinsic {
             "__simd_concat" => Some(Self::SimdConcat),
             "__simd_low" => Some(Self::SimdLow),
             "__simd_high" => Some(Self::SimdHigh),
+            "__simd_select" => Some(Self::SimdSelect),
+            "__simd_mask_to_int" => Some(Self::SimdMaskToInt),
+            "__simd_int_to_mask" => Some(Self::SimdIntToMask),
             _ => None,
         }
     }
@@ -102,6 +114,9 @@ impl std::fmt::Display for Intrinsic {
             Self::SimdConcat => "__simd_concat",
             Self::SimdLow => "__simd_low",
             Self::SimdHigh => "__simd_high",
+            Self::SimdSelect => "__simd_select",
+            Self::SimdMaskToInt => "__simd_mask_to_int",
+            Self::SimdIntToMask => "__simd_int_to_mask",
         };
         write!(f, "{}", name)
     }
@@ -118,6 +133,9 @@ pub enum TyConstraint {
     /// Any pointer type: `*T`, or `str` (a raw `const char*`). Used by
     /// `null`/`ptr_cast`.
     Pointer,
+    /// A numeric scalar, or a `simd<T, N>` of one. Used by `numerical_cast`,
+    /// which converts a vector lane by lane.
+    NumericOrVector,
 }
 
 /// Bound on an intrinsic's const parameter: an inclusive range plus a
@@ -158,7 +176,7 @@ impl Intrinsic {
             usize,
         ) = match self {
             Self::Null          => (&[Pointer], &[],           0),
-            Self::NumericalCast => (&[Numeric], &[],           1),
+            Self::NumericalCast => (&[NumericOrVector], &[],   1),
             Self::Sizeof        => (&[Any],     &[],           0),
             Self::PtrCast       => (&[Pointer], &[],           1),
             Self::PtrAddr       => (&[Any],     &[],           1),
@@ -173,6 +191,9 @@ impl Intrinsic {
             Self::SimdConcat    => (&[Numeric], &[EVEN_LANES], 2),
             Self::SimdLow       => (&[Numeric], &[EVEN_LANES], 1),
             Self::SimdHigh      => (&[Numeric], &[EVEN_LANES], 1),
+            Self::SimdSelect    => (&[Numeric], &[LANES],      3),
+            Self::SimdMaskToInt => (&[Numeric], &[LANES],      1),
+            Self::SimdIntToMask => (&[Numeric], &[LANES],      1),
         };
         IntrinsicSig { type_params, const_params, value_arity }
     }

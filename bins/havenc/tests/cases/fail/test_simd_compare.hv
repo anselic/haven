@@ -1,7 +1,8 @@
-// A comparison of two vectors is lane-wise and has no single `bool` result. It
-// used to typecheck as `bool` and reach clang as `<4 x i1>` where `i1` was
-// expected.
-//@ error: is not supported on SIMD vectors
+// A comparison of two vectors is lane-wise: it gives a `simd<bool, N>` mask,
+// not one `bool`, so it cannot be an `if` condition (reduce it with `any` or
+// `all`). It once typechecked as `bool` and reached clang as `<4 x i1>` where
+// `i1` was expected.
+//@ error: expected `bool`, got `simd[bool, 4]`
 
 import std/simd { simd_splat }
 

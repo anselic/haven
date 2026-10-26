@@ -1,0 +1,13 @@
+// `select` takes a mask with as many lanes as the vectors it picks from.
+//@ error: mismatch
+
+import std/simd { simd_splat, select }
+
+@export
+proc main() i32 {
+    let a: simd<f32, 4> = simd_splat::<f32, 4>(1.0f32);
+    let w: simd<f32, 8> = simd_splat::<f32, 8>(1.0f32);
+    let m: simd<bool, 8> = w < w;
+    let r: simd<f32, 4> = select(m, a, a);
+    return 0;
+}

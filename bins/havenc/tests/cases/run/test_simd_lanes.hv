@@ -1,0 +1,50 @@
+// `v[i]` reads one lane of a vector and `v[i] = x` writes one, on a local, on
+// a struct field, through a runtime index, and on a temporary (read only).
+// Writing a lane changes only that lane.
+
+import std/simd { simd_splat, simd_load }
+import std/math { abs, max }
+
+struct Bank { gr: simd<f32, 4>, n: i32 }
+
+proc hmax(y: simd<f32, 8>) f32 {
+    // the horizontal max the limiters need, straight off the lanes
+    let m: f32 = 0.0f32;
+    let k = 0u64;
+    while (k < 8u64) {
+        m = max(m, abs(y)[k]);
+        k = k + 1u64;
+    }
+    return m;
+}
+
+proc bump(p: *f32) { *p = *p + 100.0f32; }
+
+@export
+proc main() i32 {
+    let src: [f32] = [1.0f32, 2.0f32, 3.0f32, 4.0f32];
+    let v: simd<f32, 4> = simd_load::<f32, 4>(src, 0u64);
+    println(v[0u64] + v[3u64]);                   // 5
+
+    v[1u64] = 9.0f32;                             // write one lane
+    println(v[0u64]); println(v[1u64]); println(v[2u64]); // 1 9 3
+
+    let w: simd<f32, 4> = v + simd_splat::<f32, 4>(1.0f32);
+    println((w * w)[1u64]);                       // 100, read off a temporary
+
+    let b: Bank = Bank { gr: simd_splat::<f32, 4>(0.0f32), n: 7 };
+    let i = 0u64;
+    while (i < 4u64) {
+        b.gr[i] = numerical_cast::<f32>(i) * 2.0f32;  // field lane, runtime index
+        i = i + 1u64;
+    }
+    println(b.gr[3u64]);                          // 6
+    println(b.n);                                 // 7, the neighbour field survives
+
+    bump(&v[2u64]);                               // a lane's address
+    println(v[2u64]);                             // 103
+
+    let ys: [f32] = [0.5f32, -7.0f32, 3.0f32, 0.0f32, -1.0f32, 6.5f32, 2.0f32, -6.9f32];
+    println(hmax(simd_load::<f32, 8>(ys, 0u64))); // 7
+    return 0;
+}

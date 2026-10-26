@@ -63,7 +63,7 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             // slot so it fills it in place instead of alloca'ing at the literal
             // site - which, inside a loop, would grow the stack every iteration.
             if is_aggregate_ty(ty, &cx.enums)
-                && matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_) | ExprNode::Tuple(_))
+                && matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_) | ExprNode::Tuple(_) | ExprNode::Repeat { .. })
             {
                 let (slot, _) = cx.env[&binding]; // pre-allocated in the entry block
                 cx.store_target = Some(slot);
@@ -86,13 +86,18 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
                     cx.env.insert(binding, (dst, ty.clone()));
                 }
                 Type::Array(_, _) => {
-                    // a non-literal array value (e.g. a var) is already backed by a
-                    // slot; adopt its register directly.
-                    let arr_reg = match val {
-                        Value::Reg(r) => r,
-                        _ => unreachable!(),
-                    };
-                    cx.env.insert(binding, (arr_reg, ty.clone()));
+                    let Value::Reg(src) = val else { unreachable!() };
+                    // a call writes its result into a fresh slot nobody else
+                    // aliases, so adopt it. anything else (a var, a field, an
+                    // index, a deref) is someone else's storage: copy it into this
+                    // local's own slot, hoisted by collect_locals. adopting it made
+                    // `let b = a; b[0] = x;` write through to `a`.
+                    if matches!(value.value, ExprNode::Call { .. }) {
+                        cx.env.insert(binding, (src, ty.clone()));
+                    } else {
+                        let (dst, _) = cx.env[&binding];
+                        copy_aggregate(cx, ty, src, dst);
+                    }
                 }
                 // a struct or data-enum aggregate: same value-semantics rules.
                 _ if aggregate_def(ty, &cx.enums).is_some() => {
@@ -136,7 +141,9 @@ fn lower_stmt<'a>(cx: &mut LowerCtx<'a>, stmt: &Stmt<'a>) {
             // are addresses: assigning one is a field-by-field copy into the
             // destination's existing storage, exactly as `Declare` does. A plain
             // `Store` here wrote the source *pointer* into the first field.
-            if matches!(ty, Type::Tuple(_)) {
+            // a fixed array is held by pointer too; a plain `Store` here stored
+            // the source pointer as if it were the array value (invalid IR).
+            if matches!(ty, Type::Tuple(_) | Type::Array(..)) {
                 let Value::Reg(src) = val else { unreachable!() };
                 copy_aggregate(cx, &ty, src, ptr);
                 return;
@@ -411,12 +418,18 @@ fn collect_locals<'a>(stmt: &Stmt<'a>, enums: &HashMap<DefId, EnumDef<'a>>, out:
                 // A struct/array/data-enum *literal* used to alloca at its own
                 // site, which sits inside any enclosing loop body and grows the
                 // stack every iteration. Hoist one slot to the entry block; the
-                // Declare arm fills it in place via store_target. Non-literal
+                // Declare arm fills it in place via store_target. A fixed array
+                // copied from a place gets a hoisted slot too. Other non-literal
                 // aggregate declares (a call, incl. a data-enum constructor, or a
-                // var copy) still adopt or copy in lower_stmt and are not
+                // struct var copy) still adopt or copy in lower_stmt and are not
                 // pre-allocated here.
                 _ if is_aggregate_ty(&ty, enums) => {
-                    if matches!(value.value, ExprNode::Struct { .. } | ExprNode::Slice(_) | ExprNode::Tuple(_)) {
+                    let literal = matches!(value.value,
+                        ExprNode::Struct { .. } | ExprNode::Slice(_) | ExprNode::Tuple(_) | ExprNode::Repeat { .. });
+                    // a fixed array bound to anything but a call is copied into a
+                    // slot of its own (value semantics); hoist that slot as well.
+                    let array_copy = matches!(ty, Type::Array(..)) && !matches!(value.value, ExprNode::Call { .. });
+                    if literal || array_copy {
                         out.push((stmt.id, name, ty));
                     }
                 }

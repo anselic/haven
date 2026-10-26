@@ -1,0 +1,10 @@
+// Globals that refer to each other in a circle have no value.
+//@ error: refers to itself
+
+const A: i32 = B + 1;
+const B: i32 = A + 1;
+
+@export
+proc main() i32 {
+    return A;
+}

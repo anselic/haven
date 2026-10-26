@@ -34,6 +34,12 @@ fn check_type_arg<'a>(
                     "{}() expects a numeric type, got `{}`", intrinsic, cx.show(&ty))));
             }
         }
+        TyConstraint::NumericOrVector => {
+            if !ty.is_numeric_or_numeric_simd() && !matches!(ty, Type::Param(_)) {
+                return Err(Error::new(*span, format!(
+                    "{}() expects a numeric type or a vector of one, got `{}`", intrinsic, cx.show(&ty))));
+            }
+        }
         TyConstraint::Pointer => {
             // `str` is a raw `const char*` - a single machine pointer - so it is a
             // valid pointer type for `null`/`ptr_cast` (e.g. a null C string, or
@@ -362,6 +368,31 @@ fn infer_type_args<'a>(
     // by `materialize_targs`, and `check_bounds` skips it in the meantime.
     check_bounds(cx, name, &sig.generics, &u.types, span)?;
     Ok((u.types, u.consts))
+}
+
+/// Infer a method's own generic arguments (the ones it declares past its
+/// `extend` block's) from the call's value arguments, the same way
+/// [`infer_type_args`] does for a free proc. `params` are the value parameters
+/// after `self`, with the `extend` block's parameters already substituted, so
+/// the only free names left are the method's own.
+pub(crate) fn infer_method_targs<'a>(
+    cx: &mut Context<'a>,
+    name: &str,
+    own: &[GenericParam<'a>],
+    params: &[Type<'a>],
+    args: &[Expr<'a>],
+    span: &Span,
+) -> Result<Vec<GenericArg<'a>>, Error> {
+    let names = param_names(own);
+    let mut u = Unified::default();
+    for (param_ty, arg) in params.iter().zip(args) {
+        // a parameter that mentions none of them can teach us nothing
+        if !mentions_param(param_ty, &names) { continue; }
+        let arg_ty = infer(cx, arg)?;
+        unify(param_ty, &arg_ty, &names, &mut u);
+    }
+    check_bounds(cx, name, own, &u.types, span)?;
+    materialize_targs(name, own, &u.types, &u.consts, TargSite::Call, span)
 }
 
 /// Infer a generic struct's type arguments from its field values. Declared field

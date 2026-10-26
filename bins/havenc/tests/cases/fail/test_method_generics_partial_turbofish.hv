@@ -1,0 +1,13 @@
+// Inference is all or nothing: a turbofish that names some of a method's own
+// parameters but not all is an arity error, not a partial inference.
+//@ error: declares 2 generic parameters of its own
+
+extend [T] {
+    proc both<U, V>(self, u: U, v: V) U { return u; }
+}
+
+@export
+proc main() i32 {
+    let xs: [i32] = [1, 2, 3];
+    return xs.both::<i32>(1, 2i64);
+}

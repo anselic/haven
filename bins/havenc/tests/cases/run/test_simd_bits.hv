@@ -1,0 +1,49 @@
+// Bitwise operators on integer vectors work lane by lane, and a float vector's
+// bits are reachable with `x.to_bits()` and `simd_from_bits::<T, N>(bits)`.
+// The exponent/mantissa split below is the fast-log2 trick, done on 8 lanes and
+// checked against the same trick on scalars.
+
+import std/numeric/f32
+import std/simd { simd_splat, simd_load, simd_store, simd_from_bits }
+
+@export
+proc main() i32 {
+    let xs: [f32] = [1.0f32, 0.5f32, 3.0f32, 1024.0f32, 0.1f32, 7.25f32, 65536.5f32, 0.001f32];
+    let x: simd<f32, 8> = simd_load::<f32, 8>(xs, 0u64);
+    let bits: simd<u32, 8> = x.to_bits();
+    // exponent field and mantissa in [1, 2), all lanes at once
+    let e: simd<u32, 8> = (bits >> simd_splat::<u32, 8>(23u32)) & simd_splat::<u32, 8>(0xffu32);
+    let m: simd<f32, 8> = simd_from_bits::<f32, 8>(
+        (bits & simd_splat::<u32, 8>(0x007fffffu32)) | simd_splat::<u32, 8>(0x3f800000u32));
+    let eo: [u32] = [0u32; 8];
+    let mo: [f32] = [0.0f32; 8];
+    simd_store::<u32, 8>(eo, 0u64, e);
+    simd_store::<f32, 8>(mo, 0u64, m);
+    let same: i32 = 0;
+    let k = 0u64;
+    while (k < 8u64) {
+        let b: u32 = xs[k].to_bits();
+        let se: u32 = (b >> 23u32) & 0xffu32;
+        let sm: f32 = f32::from_bits((b & 0x007fffffu32) | 0x3f800000u32);
+        if (se == eo[k] && sm.to_bits() == mo[k].to_bits()) { same = same + 1; }
+        k = k + 1u64;
+    }
+    println(same);                                    // 8
+    println(eo[3]);                                   // 137 (1024 = 2^10)
+
+    // xor, shift left, and an arithmetic right shift on signed lanes
+    let si: [i32] = [-8, 8, -1, 1];
+    let s: simd<i32, 4> = simd_load::<i32, 4>(si, 0u64);
+    let so: [i32] = [0; 4];
+    simd_store::<i32, 4>(so, 0u64, (s >> simd_splat::<i32, 4>(1)) ^ (simd_splat::<i32, 4>(1) << simd_splat::<i32, 4>(4)));
+    println(so[0]); println(so[2]);                   // -20, -17
+
+    // f64 lanes: to_bits gives u64 lanes, and back again
+    let d: simd<f64, 2> = simd_splat::<f64, 2>(2.0f64);
+    let db: simd<u64, 2> = d.to_bits();
+    let back: simd<f64, 2> = simd_from_bits::<f64, 2>(db + simd_splat::<u64, 2>(0x0010000000000000u64));
+    let dout: [f64] = [0.0f64; 2];
+    simd_store::<f64, 2>(dout, 0u64, back);
+    println(dout[1]);                                 // 4
+    return 0;
+}

@@ -1,0 +1,27 @@
+// A global's initializer may name another global, or a field of one. The value
+// is inlined at compile time, so the result is still a plain constant; the
+// referenced global is type-checked as written, so its type must match.
+
+struct Coeffs { b0: f32, a1: f32 }
+struct Biquad { c: Coeffs, s1: f32 }
+struct Band { freq: f32, q: f32 }
+
+const IDENTITY: Coeffs = Coeffs { b0: 1.0f32, a1: 0.0f32 };
+const DEFAULT: Biquad = Biquad { c: IDENTITY, s1: 0.0f32 };   // a whole struct
+const OFF: Band = Band { freq: 1000.0f32, q: 0.707f32 };
+const NARROW: Band = Band { freq: OFF.freq * 2.0f32, q: OFF.q }; // fields, arithmetic
+const TWO: [Band; 2] = [OFF, NARROW];                          // inside an array
+const LANES: u64 = 8u64;
+const BYTES: u64 = LANES * 4u64;                               // arithmetic on a scalar
+const MORE: u64 = BYTES + LANES;                               // a chain of three
+
+@export
+proc main() i32 {
+    println(DEFAULT.c.b0);       // 1
+    println(NARROW.freq);        // 2000
+    println(NARROW.q);           // 0.707
+    println(TWO[1u64].freq);     // 2000
+    println(BYTES);              // 32
+    println(MORE);               // 40
+    return 0;
+}

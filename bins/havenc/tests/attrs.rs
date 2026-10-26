@@ -91,6 +91,43 @@ proc main() i32 {
 }
 
 #[test]
+fn array_copy_in_loop_reuses_entry_stack_slot() {
+    // `let c = src;` copies into c's own slot, and `[x; N]` fills its local in
+    // place. Both slots must be hoisted to the entry block: an alloca inside the
+    // loop body grows the stack on every pass.
+    let dir = tempfile::tempdir().unwrap();
+    let ir = compile_ir(dir.path(), r#"
+@export
+proc main() i32 {
+    let src: [i32; 4] = [1, 2, 3, 4];
+    let i: i32 = 0;
+    let total: i32 = 0;
+    while (i < 1000) {
+        let c: [i32; 4] = src;
+        let z: [i32; 4] = [i; 4];
+        c[0u64] = z[1u64];
+        total = total + c[0u64] + c[3u64];
+        i = i + 1;
+    }
+    if (total == 503500 && src[0u64] == 1) { return 0; }
+    return 1;
+}
+"#);
+    let main = ir.split("define ").find(|part| part.contains("@main("))
+        .unwrap_or_else(|| panic!("missing main in:
+{ir}"));
+    let entry_end = main.find("b1:").expect("loop must have a second block");
+    assert_eq!(main.matches("alloca [4 x i32]").count(), 3, "{main}");
+    assert_eq!(main[..entry_end].matches("alloca [4 x i32]").count(), 3, "{main}");
+
+    let result = std::process::Command::new(dir.path().join("app"))
+        .output().expect("failed to run fixture");
+    assert!(result.status.success(), "exit: {:?}
+stderr: {}",
+        result.status.code(), String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
 fn pointer_argument_does_not_reuse_loop_temporary() {
     let dir = tempfile::tempdir().unwrap();
     let ir = compile_ir(dir.path(), r#"

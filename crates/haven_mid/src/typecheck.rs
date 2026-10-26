@@ -116,11 +116,15 @@ fn check_export_type<'a>(
 
 /// Verify that a global's initializer is a compile-time constant we can emit as
 /// an LLVM `constant` aggregate: literal arithmetic, struct literals of
-/// constants, and bare function names (a function's address is a link-time
-/// constant). Anything that would need to run code - a call, a load of another
-/// global's value, indexing - is rejected.
+/// constants, bare function names (a function's address is a link-time
+/// constant), and other globals or their fields (mono inlines their values, see
+/// `inline_global_refs`). Anything that would need to run code - a call,
+/// indexing - is rejected.
 fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), Error> {
     match &expr.value {
+        // another global, or a field of one: its value is already a constant
+        ExprNode::Var(name) if cx.global_consts.contains(name) => Ok(()),
+        ExprNode::Access { .. } if global_root(cx, expr) => Ok(()),
         ExprNode::Bool(_)
         | ExprNode::Int8(_) | ExprNode::Int16(_) | ExprNode::Int32(_) | ExprNode::Int64(_)
         | ExprNode::Uint8(_) | ExprNode::Uint16(_) | ExprNode::Uint32(_) | ExprNode::Uint64(_)
@@ -176,6 +180,11 @@ fn check_const_initializer<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), 
 /// checking so invalid operations receive a source diagnostic and lowering can
 /// remain infallible.
 fn check_const_arithmetic<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), Error> {
+    // a reference to another global is only a value once mono has inlined it;
+    // the post-mono pass sees the inlined form and checks it then.
+    if mentions_global(cx, expr) {
+        return Ok(());
+    }
     match &expr.value {
         ExprNode::Unary { op: UnaryOp::Neg, .. } | ExprNode::Binary { .. } =>
             crate::mil::eval_const_scalar(expr, &cx.node_types)
@@ -190,6 +199,85 @@ fn check_const_arithmetic<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> Result<(), E
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+/// Whether `expr` is a field access chain (`A.b.c`) rooted at a global.
+fn global_root<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> bool {
+    match &expr.value {
+        ExprNode::Var(name) => cx.global_consts.contains(name),
+        ExprNode::Access { base, .. } => global_root(cx, base),
+        _ => false,
+    }
+}
+
+/// Whether a constant initializer refers to a global anywhere inside it.
+fn mentions_global<'a>(cx: &Context<'a>, expr: &Expr<'a>) -> bool {
+    match &expr.value {
+        ExprNode::Var(name) => cx.global_consts.contains(name),
+        ExprNode::Access { base, .. } => mentions_global(cx, base),
+        ExprNode::Unary { operand, .. } => mentions_global(cx, operand),
+        ExprNode::Binary { left, right, .. } => mentions_global(cx, left) || mentions_global(cx, right),
+        ExprNode::Struct { fields, .. } => fields.iter().any(|(_, f)| mentions_global(cx, f)),
+        ExprNode::Slice(elems) | ExprNode::Tuple(elems) => elems.iter().any(|e| mentions_global(cx, e)),
+        _ => false,
+    }
+}
+
+/// The globals a constant initializer names directly.
+fn global_refs<'a>(cx: &Context<'a>, expr: &Expr<'a>, out: &mut Vec<&'a str>) {
+    match &expr.value {
+        ExprNode::Var(name) if cx.global_consts.contains(name) => out.push(name),
+        ExprNode::Access { base, .. } | ExprNode::Unary { operand: base, .. } => global_refs(cx, base, out),
+        ExprNode::Binary { left, right, .. } => { global_refs(cx, left, out); global_refs(cx, right, out); }
+        ExprNode::Struct { fields, .. } => for (_, f) in fields { global_refs(cx, f, out); },
+        ExprNode::Slice(elems) | ExprNode::Tuple(elems) => for e in elems { global_refs(cx, e, out); },
+        _ => {}
+    }
+}
+
+/// Reject a global whose value depends on itself (`A = B`, `B = A`): inlining
+/// it would never end. Reported once, on the first global of the cycle.
+fn check_global_cycles<'a>(cx: &Context<'a>, program: &[TopLevel<'a>], errors: &mut Vec<Error>) {
+    let inits: std::collections::HashMap<&'a str, &Expr<'a>> = program.iter()
+        .filter_map(|tl| match &tl.value {
+            TopLevelNode::Global { name, value, .. } => Some((*name, value)),
+            _ => None,
+        })
+        .collect();
+    let mut reported: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
+    for tl in program {
+        let TopLevelNode::Global { name, value, .. } = &tl.value else { continue };
+        if reported.contains(name) { continue; }
+        // depth-first from this global; a path that comes back to it is a cycle
+        let mut path: Vec<&'a str> = vec![name];
+        let mut stack: Vec<(&'a str, Vec<&'a str>)> = Vec::new();
+        let mut refs = Vec::new();
+        global_refs(cx, value, &mut refs);
+        stack.push((name, refs));
+        let mut seen: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
+        while let Some((_, refs)) = stack.last_mut() {
+            let Some(next) = refs.pop() else {
+                stack.pop();
+                path.pop();
+                continue;
+            };
+            if next == *name {
+                // the emitted names are package-anchored (`pkg$A`); show the source name
+                let short = |n: &str| n.rsplit('$').next().unwrap_or(n).to_string();
+                let chain = path.iter().chain(std::iter::once(name)).map(|n| short(n)).collect::<Vec<_>>().join(" -> ");
+                errors.push(Error::new(value.span, format!("global '{}' refers to itself", short(name)))
+                    .with_note(format!("the chain is {}", chain)));
+                reported.extend(path.iter().copied());
+                break;
+            }
+            if !seen.insert(next) { continue; }
+            let Some(init) = inits.get(next) else { continue };
+            let mut more = Vec::new();
+            global_refs(cx, init, &mut more);
+            path.push(next);
+            stack.push((next, more));
+        }
     }
 }
 
@@ -348,6 +436,22 @@ fn check_toplevel<'a>(
             if let Err(msg) = check_type_resolves(cx, &resolved_ret) {
                 return Err(Error::new(node.span, format!("return type of extern '{}': {}", name, msg))
                     .with_label(node.span, "return type"));
+            }
+            // a mask (`simd<bool, N>`) is LLVM's bit-packed `<N x i1>`, which has
+            // no C counterpart. An LLVM intrinsic takes one natively (that is how
+            // `any`/`all` are bound); a C function cannot.
+            if !cx.llvm_intrinsics.contains_key(name) {
+                let is_mask = |t: &Type<'a>| matches!(t, Type::Simd(inner, _) if **inner == Type::Bool);
+                if let Some((pname, _)) = params.iter().find(|(_, t)| is_mask(t)) {
+                    return Err(Error::new(node.span, format!(
+                        "parameter '{}' of extern '{}': a mask (`simd<bool, N>`) is not allowed across `extern`",
+                        pname, name))
+                        .with_note("pass integer lanes instead: `simd_mask_to_int::<T, N>(mask)`"));
+                }
+                if is_mask(return_type) {
+                    return Err(Error::new(node.span, format!(
+                        "return type of extern '{}': a mask (`simd<bool, N>`) is not allowed across `extern`", name)));
+                }
             }
         }
 
@@ -704,6 +808,8 @@ pub fn typecheck_program<'a>(
     for imp in impls {
         check_impl_conformance(cx, imp, &clauses, &mut errors);
     }
+
+    check_global_cycles(cx, program, &mut errors);
 
     // --- typecheck pass
     for node in program {

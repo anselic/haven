@@ -1,0 +1,11 @@
+// A global named in another's initializer keeps its own type: an `i32` global
+// is not silently re-read as an `i64` because its literal would fit.
+//@ error: mismatch
+
+const A: i32 = 5;
+const B: i64 = A;
+
+@export
+proc main() i32 {
+    return 0;
+}

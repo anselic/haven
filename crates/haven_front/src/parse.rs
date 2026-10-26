@@ -119,20 +119,42 @@ fn lexer<'a> (
     // context asks for, defaulting to 32 bits when there is none. That is why the
     // unsuffixed cases below do no range check - the target type is not known
     // yet, so `5000000000` is only too big once something asks for an `i32`.
+    // `1.5`, `1e-3`, `2.5E+9`: a dot, an exponent, or both make a float. The
+    // digits are parsed straight to the width the suffix names (`1e-3f32` as an
+    // `f32`), so an f32 literal is rounded once, not to f64 first and then again.
+    // A value too big for its width is an error, like an integer out of range.
+    let exponent = one_of("eE")
+        .then(one_of("+-").or_not())
+        .then(text::digits(10));
     let float = text::int::<_, extra::Err<Rich<'a, char>>>(10)
-        .then(just('.').then(text::digits(10)))
+        .then(choice((
+            just('.').then(text::digits(10)).then(exponent.or_not()).ignored(),
+            exponent.ignored(),
+        )))
         .to_slice()
-        .from_str::<f64>()
-        .unwrapped()
         .then(just('f').or(just('F'))
             .ignore_then(text::int(10).from_str::<u32>().unwrapped())
             .or_not())
-        .try_map(|(f, width), span| {
-            match width {
-                Some(32) => Ok(Token::Float32(f as f32)),
-                Some(64) => Ok(Token::Float64(f)),
-                None => Ok(Token::FloatLit(f)),
-                Some(other) => Err(Rich::custom(span, format!("invalid float literal suffix 'f{other}'"))),
+        // `validate`, not `try_map`: a failed float must not backtrack and lex
+        // as an integer followed by junk (see the integer macros above).
+        .validate(|(digits, width): (&str, _), e, emitter| {
+            let parsed = match width {
+                Some(32) => match digits.parse::<f32>() {
+                    Ok(f) if f.is_finite() => Ok(Token::Float32(f)),
+                    _ => Err(format!("failed to parse literal: {digits} does not fit in f32")),
+                },
+                Some(64) | None => match digits.parse::<f64>() {
+                    Ok(f) if f.is_finite() => Ok(if width.is_some() { Token::Float64(f) } else { Token::FloatLit(f) }),
+                    _ => Err(format!("failed to parse literal: {digits} does not fit in f64")),
+                },
+                Some(other) => Err(format!("invalid float literal suffix 'f{other}'")),
+            };
+            match parsed {
+                Ok(token) => token,
+                Err(msg) => {
+                    emitter.emit(Rich::custom(e.span(), msg));
+                    Token::FloatLit(0.0)
+                }
             }
         });
 

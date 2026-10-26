@@ -129,6 +129,47 @@ fn lower_intrinsic<'a>(
             lower_expr(cx, &args[1]);
             Value::Const(Const::Undef)
         }
+        Intrinsic::SimdSelect => {
+            let ty = Type::Simd(Box::new(ta_type(type_args, 0)), ConstVal::Lit(ta_const(type_args, 1)));
+            let mask = lower_expr(cx, &args[0]);
+            let a = lower_expr(cx, &args[1]);
+            let b = lower_expr(cx, &args[2]);
+            let dst = cx.fresh_reg();
+            cx.emit(Inst::Select { dst, mask, a, b, ty });
+            Value::Reg(dst)
+        }
+        // true -> all ones, by sign-extending each `i1` lane
+        Intrinsic::SimdMaskToInt => {
+            let size = ConstVal::Lit(ta_const(type_args, 1));
+            let val = lower_expr(cx, &args[0]);
+            let dst = cx.fresh_reg();
+            cx.emit(Inst::Extend {
+                dst, val,
+                from_ty: Type::Simd(Box::new(Type::Bool), size.clone()),
+                to_ty: Type::Simd(Box::new(ta_type(type_args, 0)), size),
+            });
+            Value::Reg(dst)
+        }
+        // a lane is true where it is not 0: compare against a splat of zero
+        Intrinsic::SimdIntToMask => {
+            let lane = ta_type(type_args, 0);
+            let size = ta_const(type_args, 1);
+            let val = lower_expr(cx, &args[0]);
+            let zero = lit_const(&lane, &ExprNode::IntLit(0));
+            let z0 = cx.fresh_reg();
+            cx.emit(Inst::Splat { dst: z0, val: Value::Const(zero), ty: lane.clone(), size });
+            let zeros = cx.fresh_reg();
+            cx.emit(Inst::Shuffle {
+                dst: zeros, value_size: size, v0: Value::Reg(z0), v1: Value::Const(Const::Undef),
+                ty: lane.clone(), size, mask: vec![0; size],
+            });
+            let dst = cx.fresh_reg();
+            cx.emit(Inst::Binary {
+                dst, op: BinaryOp::Ne, lhs: val, rhs: Value::Reg(zeros),
+                ty: Type::Simd(Box::new(lane), ConstVal::Lit(size)),
+            });
+            Value::Reg(dst)
+        }
         Intrinsic::SimdSplat => {
             let ty = ta_type(type_args, 0);
             let size = ta_const(type_args, 1);
@@ -912,6 +953,19 @@ pub(crate) fn lower_expr<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Value {
             }
         }
 
+        // reading one lane of a vector value: `extractelement`, no memory
+        ExprNode::Index { slice, index }
+            if let Type::Simd(lane, n) = cx.node_types[&slice.id].clone() =>
+        {
+            let vec = lower_expr(cx, slice);
+            let index_val = lower_expr(cx, index);
+            let dst = cx.fresh_reg();
+            cx.emit(Inst::ExtractLane {
+                dst, vec, index: index_val, index_ty: cx.node_types[&index.id].clone(),
+                ty: *lane, size: n.expect_lit(),
+            });
+            Value::Reg(dst)
+        }
         ExprNode::Index { slice, index } => {
             let slice_val = lower_expr(cx, slice);
             let index_val = lower_expr(cx, index);
@@ -1102,6 +1156,18 @@ pub(crate) fn lower_lvalue<'a>(cx: &mut LowerCtx<'a>, expr: &Expr<'a>) -> Regist
             }
         }
 
+        // the address of one lane of a vector place: the vector sits in memory
+        // as its lanes in order, so this is the array element address. A write
+        // through it is what `insertelement` does; LLVM turns it into one.
+        ExprNode::Index { slice, index }
+            if let Type::Simd(lane, _) = cx.node_types[&slice.id].clone() =>
+        {
+            let base = lower_lvalue(cx, slice);
+            let index_val = lower_expr(cx, index);
+            let dst = cx.fresh_reg();
+            cx.emit(Inst::Index { dst, slice: base, index: index_val, index_ty: cx.node_types[&index.id].clone(), element_ty: *lane });
+            dst
+        }
         ExprNode::Index { slice, index } => {
             let slice_val = lower_expr(cx, slice);
             let index_val = lower_expr(cx, index);

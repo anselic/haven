@@ -1,0 +1,22 @@
+// Float literals with an exponent: `1e-3`, `2.5E+9`, `1e3` (a float even with
+// no dot). A suffixed literal is parsed straight to its width, so an `f32` is
+// rounded once. The last case sits just above the midpoint between two f32s:
+// read as f64 first it lands exactly on the midpoint and then rounds to even
+// (0x3f800000), read as f32 it rounds up (0x3f800001), which is the right answer.
+
+import std/numeric/f32
+import std/numeric/f64
+
+@export
+proc main() i32 {
+    println((1e-3f64).to_bits() == (0.001f64).to_bits());              // true
+    println((1e-20f32).to_bits());                                     // 507307272
+    println((2.5E+9f32).to_bits() == (2500000000.0f32).to_bits());     // true
+    println((1.5e-3f32).to_bits() == (0.0015f32).to_bits());           // true
+    let k: f32 = 1e3;                                                  // no suffix, f32 from context
+    println(k);                                                        // 1000
+    let tiny: f64 = 1e-100;
+    println(tiny > 0.0f64 && tiny < 0.000001f64);                      // true
+    println((1.0000000596046447755f32).to_bits());                     // 1065353217
+    return 0;
+}

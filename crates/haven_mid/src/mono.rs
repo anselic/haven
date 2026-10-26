@@ -778,6 +778,56 @@ impl<'p, 'a> Mono<'p, 'a> {
         })
     }
 
+    /// Replace each reference to another global inside a global's (rebuilt)
+    /// initializer with a fresh copy of that global's value, and `GLOBAL.field`
+    /// with the field's value, so the initializer is literal constants only and
+    /// lowers like any other. `stack` holds the globals being inlined; a cycle was
+    /// already rejected by the typechecker, and is left alone here.
+    fn inline_global_refs(
+        &mut self,
+        expr: Expr<'a>,
+        inits: &HashMap<&'a str, &Expr<'a>>,
+        stack: &mut Vec<&'a str>,
+    ) -> Expr<'a> {
+        let Metadata { value, id, span } = expr;
+        let node = match value {
+            ExprNode::Var(name) if inits.contains_key(name) && !stack.contains(&name) => {
+                stack.push(name);
+                let copy = self.rebuild_expr(inits[name], &Bindings::empty());
+                let copy = self.inline_global_refs(copy, inits, stack);
+                stack.pop();
+                return copy;
+            }
+            ExprNode::Access { base, field } => {
+                let base = self.inline_global_refs(*base, inits, stack);
+                if let ExprNode::Struct { fields, .. } = base.value {
+                    let found = fields.into_iter().find(|(f, _)| *f == field)
+                        .expect("typecheck guarantees the field exists");
+                    return found.1;
+                }
+                ExprNode::Access { base: Box::new(base), field }
+            }
+            ExprNode::Unary { op, operand } => ExprNode::Unary {
+                op, operand: Box::new(self.inline_global_refs(*operand, inits, stack)),
+            },
+            ExprNode::Binary { op, left, right } => ExprNode::Binary {
+                op,
+                left: Box::new(self.inline_global_refs(*left, inits, stack)),
+                right: Box::new(self.inline_global_refs(*right, inits, stack)),
+            },
+            ExprNode::Struct { name, type_args, fields } => ExprNode::Struct {
+                name, type_args,
+                fields: fields.into_iter().map(|(f, e)| (f, self.inline_global_refs(e, inits, stack))).collect(),
+            },
+            ExprNode::Slice(elems) => ExprNode::Slice(
+                elems.into_iter().map(|e| self.inline_global_refs(e, inits, stack)).collect()),
+            ExprNode::Tuple(elems) => ExprNode::Tuple(
+                elems.into_iter().map(|e| self.inline_global_refs(e, inits, stack)).collect()),
+            other => other,
+        };
+        Metadata { value: node, id, span }
+    }
+
     fn rebuild_expr(&mut self, expr: &Expr<'a>, b: &Bindings<'a>) -> Expr<'a> {
         let node = match &expr.value {
             ExprNode::Call { func, type_args, args } => {
@@ -789,9 +839,16 @@ impl<'p, 'a> Mono<'p, 'a> {
                 // falls through to the ordinary paths below. A turbofish here
                 // belongs to the method's own parameters, so it goes with it
                 // rather than staying on the rewritten call.
+                // a method call written without a turbofish had its own generic
+                // arguments inferred by the typechecker; use those.
+                let method_targs: &[GenericArg<'a>] = if type_args.is_empty() {
+                    self.inferred_type_args.get(&expr.id).map_or(type_args, Vec::as_slice)
+                } else {
+                    type_args
+                };
                 if let ExprNode::Access { base, field } = &func.value
                     && let Some(call) =
-                        self.generic_method_call(base, field, type_args, &new_args, b, &expr.span)
+                        self.generic_method_call(base, field, method_targs, &new_args, b, &expr.span)
                     {
                         return Metadata::new(call, expr.span);
                     }
@@ -1245,6 +1302,13 @@ pub fn monomorphize<'a>(
     let mut concrete: HashMap<usize, TopLevel<'a>> = HashMap::new();
     let mut concrete_aggregates: HashMap<usize, TopLevel<'a>> = HashMap::new();
     let mut concrete_globals: HashMap<usize, TopLevel<'a>> = HashMap::new();
+    // every global's initializer by name, for inlining one global into another
+    let global_inits: HashMap<&'a str, &Expr<'a>> = program.iter()
+        .filter_map(|tl| match &tl.value {
+            TopLevelNode::Global { name, value, .. } => Some((*name, value)),
+            _ => None,
+        })
+        .collect();
     for (i, tl) in program.iter().enumerate() {
         match &tl.value {
             TopLevelNode::Function { generics, .. } if !generics.is_empty() => {} // template
@@ -1266,10 +1330,12 @@ pub fn monomorphize<'a>(
             // rewritten to the mangled symbol. Globals are never generic themselves,
             // so `empty` bindings suffice.
             TopLevelNode::Global { name, def, is_pub, attributes, ty, value } => {
+                let rebuilt = m.rebuild_expr(value, &empty);
+                let value = m.inline_global_refs(rebuilt, &global_inits, &mut vec![*name]);
                 concrete_globals.insert(i, Metadata::new(
                     TopLevelNode::Global {
                         name, def: *def, is_pub: *is_pub, attributes: attributes.clone(),
-                        ty: ty.clone(), value: m.rebuild_expr(value, &empty),
+                        ty: ty.clone(), value,
                     },
                     tl.span,
                 ));

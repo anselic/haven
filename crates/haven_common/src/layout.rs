@@ -78,6 +78,9 @@ pub fn size_of<'a>(ty: &Type<'a>, types: &TypeTable<'a>) -> usize {
         Array(elem, n) => size_of(elem, types) * n.expect_lit(),
         Tuple(fields) => aggregate_layout(fields.iter(), types).0,
 
+        // a mask (`<N x i1>`) is packed one bit per lane by LLVM: ceil(N/8)
+        // bytes, padded to its alignment, a power of two.
+        Simd(elem, n) if **elem == Bool => n.expect_lit().div_ceil(8).next_power_of_two(),
         // n packed elements, no interior padding.
         Simd(elem, n) => size_of(elem, types) * n.expect_lit(),
 
@@ -330,6 +333,18 @@ mod tests {
         let msg = nt("Msg");
         assert_eq!((size_of(&msg, &s), align_of(&msg, &s)), (12, 4));
         assert_eq!(field_offset(d("Msg"), 1, &s), 4); // payload blob after the tag
+    }
+
+    #[test]
+    fn mask_is_bit_packed() {
+        // `simd<bool, N>` is LLVM's `<N x i1>`: one bit per lane, ceil(N/8)
+        // bytes, aligned (and padded) to a power of two.
+        let s = TypeTable::new();
+        let mask = |n| Type::Simd(Box::new(Type::Bool), crate::ast::ConstVal::Lit(n));
+        for (n, bytes) in [(4, 1), (8, 1), (16, 2), (24, 4), (32, 4), (64, 8)] {
+            assert_eq!(size_of(&mask(n), &s), bytes, "size of a {n}-lane mask");
+            assert_eq!(align_of(&mask(n), &s), bytes, "align of a {n}-lane mask");
+        }
     }
 
     #[test]
