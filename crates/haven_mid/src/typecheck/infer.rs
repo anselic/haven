@@ -636,10 +636,18 @@ fn binary_operand_ty<'a>(
 /// An LLVM intrinsic has no address: LLVM rejects a module that takes one. So
 /// an extern bound to one is only ever called directly, never used as a value.
 fn intrinsic_as_value(span: Span, name: &str) -> Error {
+    let name = source_name(name);
     Error::new(span, format!("`{name}` is bound to an LLVM intrinsic and cannot be used as a value"))
         .with_label(span, "an intrinsic has no address")
         .with_note(format!("call it directly, or wrap the call in a proc: \
             `proc f(x: f32) f32 {{ return {name}(x); }}`"))
+}
+
+/// The name an intrinsic extern was declared with. It is namespaced like a
+/// proc (`core.math$sqrt`) so it cannot take a C extern's symbol; a message
+/// that suggests code to write wants the name that code would use.
+fn source_name(symbol: &str) -> &str {
+    symbol.rsplit('$').next().unwrap_or(symbol)
 }
 
 /// For a call to an extern bound to an LLVM intrinsic, check the concrete
@@ -660,6 +668,7 @@ fn check_intrinsic_call<'a>(
     if !cx.llvm_intrinsics.contains_key(name) {
         return Ok(());
     }
+    let name = source_name(name);
     let arg_tys: Vec<Type<'a>> = args.iter().map(|a| cx.node_types[&a.id].clone()).collect();
     if !is_concrete(return_type) || !arg_tys.iter().all(is_concrete) {
         return Ok(());

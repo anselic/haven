@@ -1490,7 +1490,21 @@ pub fn monomorphize<'a>(
             TopLevelNode::Struct { .. } | TopLevelNode::Enum { .. } =>
                 output.push(concrete_aggregates.remove(&i).unwrap()),
             TopLevelNode::Global { .. } => output.push(concrete_globals.remove(&i).unwrap()),
-            TopLevelNode::Extern { .. } => output.push(tl.clone()),
+            // a generic extern is not instantiated: it reaches the concrete
+            // program as written. Its trait bounds were checked at every call in
+            // the template pass, and the concrete pass runs without impls, where
+            // `T: Float` could never hold. So the bounds go, the params stay.
+            TopLevelNode::Extern { .. } => {
+                let mut ext = tl.clone();
+                if let TopLevelNode::Extern { generics, .. } = &mut ext.value {
+                    for g in generics.iter_mut() {
+                        if let GenericParam::Type { bounds, .. } = g {
+                            bounds.clear();
+                        }
+                    }
+                }
+                output.push(ext);
+            }
             // traits emit no code and are not carried into the concrete program.
             TopLevelNode::Trait { .. } => {}
             TopLevelNode::Alias { .. } => unreachable!("aliases expanded before mono"),

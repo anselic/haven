@@ -1,0 +1,16 @@
+// `std/math`'s functions are LLVM intrinsics, namespaced like any proc, so they
+// do not claim the C symbol a program binds itself: this `extern sqrt` is libm's
+// `sqrt`, and `math::sqrt` is still the generic intrinsic.
+
+import std/math
+
+extern sqrt(x: f64) f64 with [];
+
+@export
+proc main() i32 {
+    let a: f64 = sqrt(16.0);
+    let b: f32 = math::sqrt(9.0f32);
+    println(a);   // 4
+    println(b);   // 3
+    return 0;
+}

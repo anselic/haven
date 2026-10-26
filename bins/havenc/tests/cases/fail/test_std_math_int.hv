@@ -1,0 +1,11 @@
+// The math functions take `f32`, `f64` and vectors of them. An integer is a
+// Haven error at the call, not an LLVM error about `llvm.sqrt.i32`.
+//@ error: type `i32` does not implement trait `Float`
+
+import std/math
+
+@export
+proc main() i32 {
+    let a = math::sqrt(4);
+    return 0;
+}

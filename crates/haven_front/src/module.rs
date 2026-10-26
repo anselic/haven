@@ -113,10 +113,14 @@ fn is_export(attrs: &[Attribute]) -> bool {
 /// * `extern` - the name *is* the C link symbol.
 /// * `@export` - a host looks the symbol up by that name.
 ///
-/// Other items use the module namespace. The driver marks `main` as exported
-/// before this runs.
+/// Other items use the module namespace, and so does an extern bound to an
+/// LLVM intrinsic: it never reaches the linker under its own name, so `core`'s
+/// `sqrt` must not take the global symbol a user's C `extern sqrt` would. The
+/// driver marks `main` as exported before this runs.
 fn linkage_of<'a>(name: &'a str, attrs: &[Attribute], is_extern: bool) -> Linkage<'a> {
-    if is_extern || is_export(attrs) {
+    let intrinsic = attrs.iter().any(|a| a.value.name == haven_common::llvm_intrinsic::EXACT_ATTR
+        || a.value.name == haven_common::llvm_intrinsic::INFER_ATTR);
+    if (is_extern && !intrinsic) || is_export(attrs) {
         Linkage::Fixed(name)
     } else {
         Linkage::Mangled
@@ -2275,6 +2279,9 @@ impl<'x, 'a> Rewriter<'x, 'a> {
                     .expect("a module's own callable is always in its own scope");
                 *name = sym.name;
                 *def = sym.def;
+                // an extern's `T: Trait` names a trait like any item's does;
+                // left unresolved, no type could ever satisfy it
+                self.bounds(generics);
                 for (_, ty) in params { self.ty(ty, &gparams); }
                 self.ty(return_type, &gparams);
             }

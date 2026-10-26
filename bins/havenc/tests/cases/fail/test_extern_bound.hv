@@ -1,0 +1,13 @@
+// A trait bound on a generic extern is checked like one on a proc. It used to
+// name an unresolved trait, which no type could satisfy.
+//@ error: type `Point` does not implement trait `Display`
+
+struct Point { x: i32, y: i32 }
+
+extern show<T: Display>(x: T) void with [];
+
+@export
+proc main() i32 {
+    show(Point { x: 1, y: 2 });
+    return 0;
+}

@@ -45,7 +45,7 @@ fn build_lib_with_deps(cwd: &Path, entry: &str, pkg: &str, deps: &[&str], out: &
 /// an `import std/...` (whose module must not travel in the artifact).
 fn sample_files() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("src/lib.hv", "import std/math { sqrtf }\n\
+        ("src/lib.hv", "import std/math { sqrt }\n\
                         import geo { Point }\n\
                         import dsp/osc { ramp }\n\
                         pub proc scale(p: Point, k: i32) i32 { return (p.x + p.y) * k + ramp(1); }\n"),

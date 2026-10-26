@@ -1,9 +1,31 @@
-//! Scalar math constants and the C standard-library math functions.
+//! Math for `f32`, `f64` and their SIMD vectors.
 //!
-//! Two layers: a handful of convenience constants/helpers written in haven, and
-//! direct bindings to libm. Every libm function comes in an `f64` form and an
-//! `f32` form (suffixed `f`) so single-precision DSP code never widens to double.
-//! Angles are in radians throughout.
+//! Most functions here are generic over [`Float`]: `f32`, `f64`,
+//! `simd<f32, N>` and `simd<f64, N>`. They are LLVM intrinsics, not libm calls,
+//! so they have no side effects (libm may set `errno`), a loop that calls them
+//! can be vectorized, and on a vector they work lane by lane:
+//!
+//! ```hv
+//! let peak: f32 = math::max(math::abs(sample), peak);
+//! let gains: simd<f32, 4> = math::sqrt(powers);
+//! ```
+//!
+//! A call inside a `@fastmath(...)` function takes its flags: `afn` lets LLVM
+//! use a faster approximation of `sin`, `exp` and the others, and `nnan`/`nsz`
+//! make `min`/`max` cheaper. Because the functions are intrinsics, they can only
+//! be called; wrap one in a proc to pass it as a value.
+//!
+//! The rest are direct bindings to libm, as an `f64` function and an `f32` one
+//! suffixed `f`. Angles are in radians throughout.
+
+/// The types the floating-point functions accept: `f32`, `f64`, and SIMD
+/// vectors of either, which they process lane by lane.
+pub trait Float {}
+
+extend f32: Float {}
+extend f64: Float {}
+extend simd<f32, N>: Float {}
+extend simd<f64, N>: Float {}
 
 /// `x` squared (`x * x`).
 pub proc square(x: f64) f64 with [] { return x * x; }
@@ -16,21 +38,116 @@ pub proc pi_f32() f32 with [] { return 3.14159265358979323846f32; }
 /// The constant tau (2*pi) as an `f32`.
 pub proc tau_f32() f32 with [] { return 6.28318530717958647692f32; }
 
-/// Clamp `x` into the inclusive range [lo, hi].
-pub proc clampf(x: f64, lo: f64, hi: f64) f64 with [] {
-    if (x < lo) { return lo; }
-    if (x > hi) { return hi; }
-    return x;
+// Exact operations. Each one is correctly rounded, so the result is the same
+// on every target and at every optimization level.
+
+/// Square root of `x`. Negative `x` gives NaN.
+@llvm_intrinsic_infer("llvm.sqrt")
+pub extern sqrt<T: Float>(x: T) T with [];
+
+/// Absolute value of `x`: `x` with its sign bit cleared. Keeps NaN a NaN.
+@llvm_intrinsic_infer("llvm.fabs")
+pub extern abs<T: Float>(x: T) T with [];
+
+/// The magnitude of `mag` with the sign of `sign`. Works on zeros and NaNs too:
+/// `copysign(1.0, -0.0)` is `-1.0`.
+@llvm_intrinsic_infer("llvm.copysign")
+pub extern copysign<T: Float>(mag: T, sign: T) T with [];
+
+/// The smaller of `a` and `b`. If one of them is NaN, the result is the other
+/// one, so a NaN never wins. Which zero `min(0.0, -0.0)` gives is not specified.
+@llvm_intrinsic_infer("llvm.minnum")
+pub extern min<T: Float>(a: T, b: T) T with [];
+
+/// The larger of `a` and `b`. If one of them is NaN, the result is the other
+/// one, so a NaN never wins. Which zero `max(0.0, -0.0)` gives is not specified.
+@llvm_intrinsic_infer("llvm.maxnum")
+pub extern max<T: Float>(a: T, b: T) T with [];
+
+/// `a * b + c` with a single rounding, always. On a CPU without FMA
+/// instructions (x86 before Haswell, without `-march`) this is a slow software
+/// routine; prefer `mul_add` unless the single rounding is the point.
+@llvm_intrinsic_infer("llvm.fma")
+pub extern fma<T: Float>(a: T, b: T, c: T) T with [];
+
+/// `a * b + c`, fused into one FMA instruction when the target has one and
+/// computed as a multiply then an add when it does not. Use this for filters
+/// and mixing; the result may differ in the last bit between targets.
+@llvm_intrinsic_infer("llvm.fmuladd")
+pub extern mul_add<T: Float>(a: T, b: T, c: T) T with [];
+
+/// The largest integer value not greater than `x`.
+@llvm_intrinsic_infer("llvm.floor")
+pub extern floor<T: Float>(x: T) T with [];
+
+/// The smallest integer value not less than `x`.
+@llvm_intrinsic_infer("llvm.ceil")
+pub extern ceil<T: Float>(x: T) T with [];
+
+/// `x` with its fractional part removed, rounding toward zero.
+@llvm_intrinsic_infer("llvm.trunc")
+pub extern trunc<T: Float>(x: T) T with [];
+
+/// `x` rounded to the nearest integer value, halfway cases away from zero:
+/// `round(2.5)` is `3.0` and `round(-2.5)` is `-3.0`.
+@llvm_intrinsic_infer("llvm.round")
+pub extern round<T: Float>(x: T) T with [];
+
+/// `x` rounded to the nearest integer value, halfway cases to the even one:
+/// `round_even(2.5)` is `2.0` and `round_even(3.5)` is `4.0`. Unlike `round`,
+/// it does not push halfway cases away from zero, so it adds no bias over many
+/// values.
+@llvm_intrinsic_infer("llvm.roundeven")
+pub extern round_even<T: Float>(x: T) T with [];
+
+/// `x` limited to the range `[lo, hi]`, as `min(max(x, lo), hi)`. A NaN `x`
+/// gives `lo`, so a clamp also turns NaN samples into a finite value. `lo` must
+/// not be greater than `hi`.
+pub proc clamp<T: Float>(x: T, lo: T, hi: T) T with [] {
+    return min(max(x, lo), hi);
 }
 
-// libm, linked via -lm. the extern name IS the C link symbol, so these bind
-// straight to the platform math library; no wrapper runtime is involved.
+// Transcendental functions. These are not correctly rounded: the result can
+// differ in the last bits between platforms. On a vector, each lane is
+// computed separately.
+
+/// Sine of `x` (radians).
+@llvm_intrinsic_infer("llvm.sin")
+pub extern sin<T: Float>(x: T) T with [];
+
+/// Cosine of `x` (radians).
+@llvm_intrinsic_infer("llvm.cos")
+pub extern cos<T: Float>(x: T) T with [];
+
+/// e raised to the power `x`.
+@llvm_intrinsic_infer("llvm.exp")
+pub extern exp<T: Float>(x: T) T with [];
+
+/// 2 raised to the power `x`.
+@llvm_intrinsic_infer("llvm.exp2")
+pub extern exp2<T: Float>(x: T) T with [];
+
+/// Natural (base-e) logarithm of `x`. Zero gives negative infinity, a negative
+/// `x` gives NaN.
+@llvm_intrinsic_infer("llvm.log")
+pub extern log<T: Float>(x: T) T with [];
+
+/// Base-2 logarithm of `x`.
+@llvm_intrinsic_infer("llvm.log2")
+pub extern log2<T: Float>(x: T) T with [];
+
+/// Base-10 logarithm of `x`. For decibels: `20.0 * log10(gain)`.
+@llvm_intrinsic_infer("llvm.log10")
+pub extern log10<T: Float>(x: T) T with [];
+
+/// `base` raised to the power `exp`.
+@llvm_intrinsic_infer("llvm.pow")
+pub extern pow<T: Float>(base: T, exp: T) T with [];
+
+// libm, linked via -lm: the functions with no LLVM intrinsic. The extern name
+// IS the C link symbol, so these bind straight to the platform math library.
 
 // f64 (C `double`) variants:
-/// Sine of `x` (radians).
-pub extern sin(x: f64) f64 with [];
-/// Cosine of `x` (radians).
-pub extern cos(x: f64) f64 with [];
 /// Tangent of `x` (radians).
 pub extern tan(x: f64) f64 with [];
 /// Arcsine of `x`, in radians. `x` must be in [-1, 1].
@@ -47,65 +164,29 @@ pub extern sinh(x: f64) f64 with [];
 pub extern cosh(x: f64) f64 with [];
 /// Hyperbolic tangent of `x`.
 pub extern tanh(x: f64) f64 with [];
-/// e raised to the power `x`.
-pub extern exp(x: f64) f64 with [];
-/// Natural (base-e) logarithm of `x`. `x` must be positive.
-pub extern log(x: f64) f64 with [];
-/// Base-2 logarithm of `x`. `x` must be positive.
-pub extern log2(x: f64) f64 with [];
-/// Base-10 logarithm of `x`. `x` must be positive.
-pub extern log10(x: f64) f64 with [];
-/// `base` raised to the power `exp`.
-pub extern pow(base: f64, exp: f64) f64 with [];
-/// Square root of `x`. `x` must be non-negative.
-pub extern sqrt(x: f64) f64 with [];
 /// Cube root of `x`.
 pub extern cbrt(x: f64) f64 with [];
-/// Absolute value of `x`.
-// TODO: fix something about MSVC CRT `fabs`/`fabsf` so we can use an `extern`
-// here instead of a proc. But at -O2 it lowers to hardware sign-bit clear which
-// is close to what `llvm.fabs` do anyway
-pub proc fabs(x: f64) f64 with [] { if (x <= 0.0f64) { return 0.0f64 - x; } return x; }
-/// Largest integer value not greater than `x`, as an `f64`.
-pub extern floor(x: f64) f64 with [];
-/// Smallest integer value not less than `x`, as an `f64`.
-pub extern ceil(x: f64) f64 with [];
-/// `x` rounded to the nearest integer, halves away from zero, as an `f64`.
-pub extern round(x: f64) f64 with [];
-/// `x` truncated toward zero, as an `f64`.
-pub extern trunc(x: f64) f64 with [];
 /// Floating-point remainder of `x / y`, with the sign of `x`.
 pub extern fmod(x: f64, y: f64) f64 with [];
 
 // f32 (C `float`) variants, for single-precision DSP:
-/// Sine of `x` (radians), single precision.
-pub extern sinf(x: f32) f32 with [];
-/// Cosine of `x` (radians), single precision.
-pub extern cosf(x: f32) f32 with [];
 /// Tangent of `x` (radians), single precision.
 pub extern tanf(x: f32) f32 with [];
+/// Arcsine of `x`, in radians, single precision. `x` must be in [-1, 1].
+pub extern asinf(x: f32) f32 with [];
+/// Arccosine of `x`, in radians, single precision. `x` must be in [-1, 1].
+pub extern acosf(x: f32) f32 with [];
+/// Arctangent of `x`, in radians, single precision.
+pub extern atanf(x: f32) f32 with [];
 /// Arctangent of `y/x` (radians), quadrant-aware, single precision.
 pub extern atan2f(y: f32, x: f32) f32 with [];
+/// Hyperbolic sine of `x`, single precision.
+pub extern sinhf(x: f32) f32 with [];
+/// Hyperbolic cosine of `x`, single precision.
+pub extern coshf(x: f32) f32 with [];
 /// Hyperbolic tangent of `x`, single precision.
 pub extern tanhf(x: f32) f32 with [];
-/// e raised to the power `x`, single precision.
-pub extern expf(x: f32) f32 with [];
-/// Natural (base-e) logarithm of `x`, single precision. `x` must be positive.
-pub extern logf(x: f32) f32 with [];
-/// Base-2 logarithm of `x`, single precision. `x` must be positive.
-pub extern log2f(x: f32) f32 with [];
-/// Base-10 logarithm of `x`, single precision. `x` must be positive.
-pub extern log10f(x: f32) f32 with [];
-/// `base` raised to the power `exp`, single precision.
-pub extern powf(base: f32, exp: f32) f32 with [];
-/// Square root of `x`, single precision. `x` must be non-negative.
-pub extern sqrtf(x: f32) f32 with [];
-/// Absolute value of `x`, single precision.
-// TODO: see `fabs` above
-pub proc fabsf(x: f32) f32 with [] { if (x <= 0.0f32) { return 0.0f32 - x; } return x; }
-/// Largest integer value not greater than `x`, single precision.
-pub extern floorf(x: f32) f32 with [];
-/// Smallest integer value not less than `x`, single precision.
-pub extern ceilf(x: f32) f32 with [];
+/// Cube root of `x`, single precision.
+pub extern cbrtf(x: f32) f32 with [];
 /// Floating-point remainder of `x / y` with the sign of `x`, single precision.
 pub extern fmodf(x: f32, y: f32) f32 with [];

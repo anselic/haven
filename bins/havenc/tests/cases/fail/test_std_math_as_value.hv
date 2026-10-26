@@ -1,0 +1,12 @@
+// The math functions are intrinsics: they can be called, not taken by value.
+// The note shows the wrapper to write, with the name as the caller spells it.
+//@ error: `sqrt` is bound to an LLVM intrinsic and cannot be used as a value
+//@ error: return sqrt(x);
+
+import std/math
+
+@export
+proc main() i32 {
+    let f: proc(f32) f32 = math::sqrt::<f32>;
+    return 0;
+}

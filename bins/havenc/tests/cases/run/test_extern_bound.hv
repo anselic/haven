@@ -1,0 +1,20 @@
+// A bounded generic extern accepts a type that satisfies the bound, in the
+// template pass and again in the concrete program mono produces, where the
+// trait impls no longer exist.
+
+trait Real {}
+extend f32: Real {}
+extend f64: Real {}
+
+@llvm_intrinsic_infer("llvm.fabs")
+extern magnitude<T: Real>(x: T) T with [];
+
+// through a generic caller: the bound holds on `T` itself
+proc twice_magnitude<T: Real>(x: T) T { return magnitude(magnitude(x)); }
+
+@export
+proc main() i32 {
+    println(magnitude(-2.5f32));         // 2.5
+    println(twice_magnitude(-4.0f64));   // 4
+    return 0;
+}

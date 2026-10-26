@@ -256,3 +256,79 @@ proc main() i32 {
     let run = std::process::Command::new(&out).output().expect("failed to run app");
     assert!(run.status.success(), "wrong roots: exit {:?}", run.status.code());
 }
+
+/// Compile `source` against the tests' std with `--emit-ir` (plus `extra`
+/// flags) and return the `.ll` text.
+fn compile_ir_std(dir: &Path, source: &str, extra: &[&str]) -> String {
+    let entry = dir.join("main.hv");
+    std::fs::write(&entry, source).unwrap();
+    let out = dir.join("app");
+    let o = common::havenc_cmd()
+        .arg(&entry)
+        .arg("--emit-ir")
+        .args(extra)
+        .arg("-o").arg(&out)
+        .output()
+        .expect("failed to spawn havenc");
+    assert!(o.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&o.stderr));
+    std::fs::read_to_string(out.with_extension("ll")).expect("the kept .ll")
+}
+
+/// `std/math`'s functions are the intrinsic externs themselves, not wrappers,
+/// so the call sits in the caller's function and takes its fast-math flags.
+#[test]
+fn std_math_calls_take_the_callers_fastmath_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = compile_ir_std(dir.path(), r#"
+import std/math
+
+@fastmath(afn, nsz)
+proc fast(x: f32) f32 { return math::sin(x) + math::max(x, 0.0f32); }
+
+proc exact(x: f32) f32 { return math::sin(x); }
+
+@export
+proc main() i32 {
+    println(fast(0.5f32) + exact(0.5f32));
+    return 0;
+}
+"#, &[]);
+    let fast = function_body(&ir, "$fast");
+    assert!(fast.contains("call nsz afn float @llvm.sin.f32("), "{fast}");
+    assert!(fast.contains("call nsz afn float @llvm.maxnum.f32("), "{fast}");
+    let exact = function_body(&ir, "$exact");
+    assert!(exact.contains("call float @llvm.sin.f32("), "{exact}");
+    // a std math function never reaches LLVM under its own name (a `;` comment
+    // naming the source call is not a symbol)
+    assert!(!ir.lines().any(|l| !l.trim_start().starts_with(';') && l.contains("math$sin")),
+        "{ir}");
+}
+
+#[test]
+fn a_std_math_loop_vectorizes() {
+    let dir = tempfile::tempdir().unwrap();
+    compile_ir_std(dir.path(), r#"
+import std/math
+
+@inline(never)
+proc process(buf: *f32, n: u64) void {
+    let i: u64 = 0u64;
+    while (i < n) {
+        buf[i] = math::sqrt(math::abs(buf[i]));
+        i = i + 1u64;
+    }
+}
+
+@export
+proc main() i32 {
+    let buf: [f32; 64] = [-4.0f32; 64];
+    process(&buf[0], 64u64);
+    println(buf[63]);
+    return 0;
+}
+"#, &["--emit-optimized-ir"]);
+    let opt = std::fs::read_to_string(dir.path().join("app.opt.ll")).expect("the .opt.ll");
+    assert!(opt.contains("@llvm.sqrt.v4f32") || opt.contains("@llvm.sqrt.v8f32"),
+        "the loop should call the vector intrinsic:\n{opt}");
+    assert!(!opt.contains("@sqrtf("), "no libm call is left:\n{opt}");
+}
