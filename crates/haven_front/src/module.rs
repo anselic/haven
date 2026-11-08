@@ -3858,6 +3858,16 @@ pub fn load_and_merge<'a>(entry: &FilePath, package: Option<&str>, prelude: Prel
                                 through its receiver instead"));
             }
             let f = scopes.calls.get(rm.fn_name).map(|s| s.name).unwrap_or(rm.fn_name);
+            // diagnostics name the method as written (`Vec::push`), never as the
+            // synthesized `Vec$push`. A structural target has no path to put in
+            // front, so it is bracketed the way Rust does: `<*T>::display`.
+            if let Some(sym) = scopes.calls.get(rm.fn_name) {
+                let owner = match &rm.target {
+                    Type::Path { path, .. } => path.last().to_string(),
+                    other => format!("<{}>", other),
+                };
+                defs.set_method_name(sym.def, &owner, rm.name);
+            }
             let prev = defs.add_member(head, rm.name, Member {
                 name: f,
                 receiver: rm.receiver,

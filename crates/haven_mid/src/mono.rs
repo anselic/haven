@@ -308,7 +308,7 @@ fn display_name<'a>(defs: &Defs<'a>, base: DefId, args: &[ConcreteArg<'a>]) -> S
         ConcreteArg::Type(t) => t.to_string(),
         ConcreteArg::Const(n) => n.to_string(),
     }).collect::<Vec<_>>().join(", ");
-    format!("{}::<{}>", defs.get(base).source_name, targs)
+    format!("{}::<{}>", defs.short_name(base), targs)
 }
 
 /// The method `name` a receiver of type `ty` dispatches to, plus the bindings

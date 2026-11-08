@@ -9,8 +9,8 @@
 //@ error: allocation reaches it through
 // the chain names each hop; the symbols are package-mangled, so match the shape
 // (`outer` -> `middle` -> the extern) rather than any one spelling.
-//@ error: $middle
-//@ error: rt_puts
+//@ error: ├ middle
+//@ error: ╰ std/fmt::rt_puts
 
 proc outer() { middle(); }
 proc middle() { println(0); }   // `println` is an unannotated extern: dirty

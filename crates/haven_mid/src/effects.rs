@@ -403,8 +403,9 @@ pub fn check_program<'a>(
     let calls = call_graph(program, &r);
     let summaries = compute_summaries(program, &calls);
 
-    // mono mangles generic call names. prefer the friendly spelling it
-    // recorded (`alloc::<Vec2>`) over `std.alloc$alloc$Vec2`.
+    // the call graph is keyed by emitted symbols (`effects$render`,
+    // `std.alloc$alloc$Vec2`); never show one. `show_symbol` maps each back to
+    // its definition's spelling (`render`, `alloc::<Vec2>`).
     let show = |n: &'a str| defs.show_symbol(n);
 
     // A violated bound has at least one nonconforming immediate callee: both

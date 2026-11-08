@@ -343,6 +343,11 @@ pub struct Defs<'a> {
     /// alloc check works on MIL callee names) recover the definition and so its
     /// friendly spelling.
     by_symbol: HashMap<&'a str, DefId>,
+    /// How to name a desugared `extend` method to a human: `Vec::push`. Its
+    /// `source_name` is the synthesized `Vec$push`, unique within the module
+    /// but built from a lossy key (`ptr_Foo`, `slice_i32`) and never meant to
+    /// be read. Filled in when the member table is built.
+    method_names: HashMap<DefId, String>,
     /// The prelude module, if this program has one.
     prelude: Option<ModId>,
     /// Compiler-known definitions, resolved from `prelude` at load time.
@@ -453,12 +458,41 @@ impl<'a> Defs<'a> {
         self.instances.get(&id).map(|i| i.template)
     }
 
-    /// The friendliest spelling of an emitted symbol: the turbofish form if it
-    /// names an instance, otherwise the symbol unchanged.
-    pub fn show_symbol<'s>(&'s self, sym: &'s str) -> &'s str {
-        self.by_symbol.get(sym)
-            .and_then(|id| self.instances.get(id))
-            .map_or(sym, |i| i.display.as_str())
+    /// The friendliest spelling of an emitted symbol, for a stage that only has
+    /// symbols in hand (the effect check works on post-mono callee names): the
+    /// turbofish form for an instance, `std/math::square` or a bare `square`
+    /// for any other definition, and the symbol unchanged when it names none
+    /// (an indirect call, an unresolved name).
+    pub fn show_symbol(&self, sym: &str) -> String {
+        match self.def_of_symbol(sym) {
+            Some(id) => self.show(id),
+            None => sym.to_string(),
+        }
+    }
+
+    /// The definition emitted as `sym`. A fixed symbol is indexed; a mangled
+    /// one is `<slug>$<source name>`, and a slug never contains `$`, so it
+    /// splits at the first one. Linear in the definitions, which is fine for
+    /// the diagnostic paths that need it and is why nothing hot may.
+    fn def_of_symbol(&self, sym: &str) -> Option<DefId> {
+        if let Some(id) = self.by_symbol.get(sym) { return Some(*id); }
+        let (slug, name) = sym.split_once('$')?;
+        let module = *self.slugs.get(slug)?;
+        self.defs.iter().position(|d| {
+            d.module == module && d.source_name == name && matches!(d.linkage, Linkage::Mangled)
+        }).map(|i| DefId(i as u32))
+    }
+
+    /// Record the readable name of the function an `extend` method desugared
+    /// into: `owner` is its target as a reader would write it (`Vec`, `<*T>`).
+    pub fn set_method_name(&mut self, id: DefId, owner: &str, method: &str) {
+        self.method_names.insert(id, format!("{}::{}", owner, method));
+    }
+
+    /// The unqualified name of a definition as a reader knows it: the source
+    /// name, or `Vec::push` for a method rather than its synthesized `Vec$push`.
+    pub fn short_name(&self, id: DefId) -> &str {
+        self.method_names.get(&id).map_or(self.get(id).source_name, String::as_str)
     }
 
     /// How to name this definition to a human: `std/math::square` for an
@@ -520,13 +554,18 @@ impl<'a> Defs<'a> {
             .collect()
     }
 
-    /// How to name this definition to a human: `std/math::square`. Uses the
-    /// module's source key, not its slug, so it reads the way it was written.
+    /// How to name this definition to a human: `std/math::square` for an
+    /// imported item, a bare `square` in the entry module, and `Vec::push`
+    /// rather than the synthesized `Vec$push` for a method.
     pub fn display(&self, id: DefId) -> String {
-        let def = self.get(id);
-        let m = self.module(def.module);
-        if m.is_entry { def.source_name.to_string() }
-        else { format!("{}::{}", m.key, def.source_name) }
+        let m = self.module(self.get(id).module);
+        let name = self.short_name(id);
+        if m.is_entry { return name.to_string(); }
+        // the module is named by its slug, not its key: a key is `std/fmt.hv`
+        // for a dependency and an absolute path for a module of this package,
+        // while the slug is package-anchored (`std.fmt`, `foo.geo`, or the bare
+        // package name for a root module) and reads as a path once dotted.
+        format!("{}::{}", m.slug.replace('.', "/"), name)
     }
 }
 

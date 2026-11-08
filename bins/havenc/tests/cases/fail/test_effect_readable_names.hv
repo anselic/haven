@@ -1,0 +1,20 @@
+//@ error: 'Pool::fill' has effect clause `without Alloc` but may allocate
+//@ error: calls 'Vec::push::<i32>', which may allocate
+//@ error: ├ Vec::reserve::<i32>
+// Effect diagnostics work on emitted symbols, but must never show one: the
+// method is `Pool::fill`, not `test_effect_readable_names$Pool$fill`, and the
+// std method is `Vec::push::<i32>`, not `Vec$push::<i32>`.
+struct Pool { items: Vec<i32> }
+
+extend Pool {
+    proc fill(*self) without Alloc {
+        self.items.push(1);
+    }
+}
+
+@export
+proc main() i32 {
+    let p = Pool { items: Vec::<i32>::new() };
+    p.fill();
+    return 0;
+}
